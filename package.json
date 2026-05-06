@@ -1,0 +1,44 @@
+{
+  "name": "@metalab/storybook-design-sync",
+  "version": "0.0.1",
+  "description": "Storybook 10 addon that detects drift between a story and its Figma counterpart.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./manager": "./dist/manager.js",
+    "./preview": "./dist/preview.js",
+    "./preset": "./dist/preset.js",
+    "./package.json": "./package.json"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build"
+  },
+  "peerDependencies": {
+    "storybook": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "storybook": "^10.0.0",
+    "typescript": "^5.5.0"
+  },
+  "storybook": {
+    "displayName": "Design Sync",
+    "supportedFrameworks": ["*"]
+  }
+}

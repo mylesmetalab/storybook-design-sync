@@ -31,4 +31,6 @@ export interface DriftReport {
   nodeId: string;
   dimensions: DimensionDiff[];
   generatedAt: string;
+  /** Active mode name used for comparison (e.g. "light", "dark"). */
+  mode?: string;
 }

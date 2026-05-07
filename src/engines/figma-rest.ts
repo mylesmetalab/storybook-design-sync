@@ -89,9 +89,10 @@ class FigmaRestEngine implements Engine {
 
     const dimensions: DimensionDiff[] = [];
     const snapshot = input.snapshot;
+    const activeMode = input.mode;
 
-    dimensions.push(...this.diffTokenValues(node, snapshot, variables));
-    dimensions.push(...this.diffTokenBindings(node, snapshot, variables));
+    dimensions.push(...this.diffTokenValues(node, snapshot, variables, activeMode));
+    dimensions.push(...this.diffTokenBindings(node, snapshot, variables, activeMode));
     dimensions.push(...this.diffVariantSet(node, snapshot));
 
     // Reserved kinds — engine fills as flag-only placeholders for v0.
@@ -102,12 +103,14 @@ class FigmaRestEngine implements Engine {
       this.placeholder("motion", "story.motion"),
     );
 
-    return {
+    const report: DriftReport = {
       storyId: input.storyId,
       nodeId,
       dimensions,
       generatedAt: new Date().toISOString(),
     };
+    if (activeMode) report.mode = activeMode;
+    return report;
   }
 
   // ---- HTTP ---------------------------------------------------------------
@@ -197,13 +200,14 @@ class FigmaRestEngine implements Engine {
     node: FigmaNode,
     snapshot: CodeSnapshot | undefined,
     variables: FigmaLocalVariablesResponse | null,
+    activeMode?: string,
   ): DimensionDiff[] {
     const out: DimensionDiff[] = [];
     if (!snapshot) return out;
 
     // Background color: code "background-color" vs Figma fills[0] (resolved).
     const codeBg = snapshot.styles["background-color"];
-    const figmaBg = resolveFillColor(node, variables);
+    const figmaBg = resolveFillColor(node, variables, activeMode);
     if ((codeBg && codeBg !== "rgba(0, 0, 0, 0)") || figmaBg !== undefined) {
       const modes = figmaBg?.modes;
       const figmaValue = figmaBg?.value;
@@ -237,17 +241,17 @@ class FigmaRestEngine implements Engine {
       if (!v || v.resolvedType !== "FLOAT") continue;
       const collection = variables.meta.variableCollections[v.variableCollectionId];
       if (!collection) continue;
-      const defaultRaw = v.valuesByMode[collection.defaultModeId];
-      if (typeof defaultRaw !== "number") continue;
+      const figmaPx = resolveNumericForMode(v, collection, activeMode);
+      if (figmaPx === null) continue;
       const codeValue = snapshot.styles[cssProp];
       const codePx = parsePx(codeValue);
       const status: DimensionDiff["status"] =
-        codePx !== null && Math.abs(codePx - defaultRaw) < 0.5 ? "match" : "drift";
+        codePx !== null && Math.abs(codePx - figmaPx) < 0.5 ? "match" : "drift";
       out.push({
         kind: "token-value",
         property: cssProp,
         codeValue: codeValue ?? null,
-        figmaValue: `${defaultRaw}px (token: ${v.name})`,
+        figmaValue: `${figmaPx}px (token: ${v.name})`,
         status,
       });
     }
@@ -270,17 +274,17 @@ class FigmaRestEngine implements Engine {
         if (!v || v.resolvedType !== "FLOAT") continue;
         const collection = variables.meta.variableCollections[v.variableCollectionId];
         if (!collection) continue;
-        const defaultRaw = v.valuesByMode[collection.defaultModeId];
-        if (typeof defaultRaw !== "number") continue;
+        const figmaPx = resolveNumericForMode(v, collection, activeMode);
+        if (figmaPx === null) continue;
         const codeValue = snapshot.styles[cssProp];
         const codePx = parsePx(codeValue);
         const status: DimensionDiff["status"] =
-          codePx !== null && Math.abs(codePx - defaultRaw) < 0.5 ? "match" : "drift";
+          codePx !== null && Math.abs(codePx - figmaPx) < 0.5 ? "match" : "drift";
         out.push({
           kind: "token-value",
           property: cssProp,
           codeValue: codeValue ?? null,
-          figmaValue: `${defaultRaw}px (token: ${v.name})`,
+          figmaValue: `${figmaPx}px (token: ${v.name})`,
           status,
         });
       }
@@ -293,10 +297,11 @@ class FigmaRestEngine implements Engine {
     node: FigmaNode,
     snapshot: CodeSnapshot | undefined,
     variables: FigmaLocalVariablesResponse | null,
+    activeMode?: string,
   ): DimensionDiff[] {
     const out: DimensionDiff[] = [];
     const bindings = snapshot?.bindings ?? {};
-    const figmaBindings = collectFigmaBindings(node, variables);
+    const figmaBindings = collectFigmaBindings(node, variables, activeMode);
 
     const keys = new Set([...Object.keys(bindings), ...Object.keys(figmaBindings)]);
     for (const key of keys) {
@@ -502,12 +507,13 @@ interface ResolvedFill {
 function resolveFillColor(
   node: FigmaNode,
   variables: FigmaLocalVariablesResponse | null,
+  activeMode?: string,
 ): ResolvedFill | undefined {
   const fill = node.fills?.[0];
   if (!fill) return undefined;
   const alias = fill.boundVariables?.color;
   if (alias && variables) {
-    const resolved = resolveColorVariable(alias.id, variables);
+    const resolved = resolveColorVariable(alias.id, variables, activeMode);
     if (resolved) return resolved;
   }
   if (fill.color) return { value: rgbaToCss(fill.color) };
@@ -517,13 +523,14 @@ function resolveFillColor(
 function resolveColorVariable(
   variableId: string,
   variables: FigmaLocalVariablesResponse,
+  activeMode?: string,
 ): ResolvedFill | undefined {
   const v = variables.meta.variables[variableId];
   if (!v || v.resolvedType !== "COLOR") return undefined;
   const collection = variables.meta.variableCollections[v.variableCollectionId];
   if (!collection) return undefined;
 
-  const find = (modeName: string): string | undefined => {
+  const findByName = (modeName: string): string | undefined => {
     const mode = collection.modes.find((m) => m.name.toLowerCase() === modeName);
     if (!mode) return undefined;
     const raw = v.valuesByMode[mode.modeId];
@@ -533,18 +540,42 @@ function resolveColorVariable(
     return undefined;
   };
 
-  const light = find("light");
-  const dark = find("dark");
+  const light = findByName("light");
+  const dark = findByName("dark");
+
+  // The "comparison value" is the active mode if known, else the file default.
+  const activeStr = activeMode ? findByName(activeMode) : undefined;
   const defaultRaw = v.valuesByMode[collection.defaultModeId];
   const defaultStr =
     defaultRaw && typeof defaultRaw === "object" && "r" in defaultRaw
       ? rgbaToCss(defaultRaw as { r: number; g: number; b: number; a?: number })
       : v.name;
+  const value = activeStr ?? defaultStr;
 
   if (light && dark) {
-    return { value: defaultStr, modes: { light, dark } };
+    return { value, modes: { light, dark } };
   }
-  return { value: defaultStr };
+  return { value };
+}
+
+/**
+ * Pick a numeric (FLOAT) variable's value for the active mode, falling back
+ * to the file's default mode if the active one isn't defined.
+ */
+function resolveNumericForMode(
+  v: FigmaVariable,
+  collection: FigmaVariableCollection,
+  activeMode?: string,
+): number | null {
+  if (activeMode) {
+    const mode = collection.modes.find((m) => m.name.toLowerCase() === activeMode);
+    if (mode) {
+      const raw = v.valuesByMode[mode.modeId];
+      if (typeof raw === "number") return raw;
+    }
+  }
+  const defaultRaw = v.valuesByMode[collection.defaultModeId];
+  return typeof defaultRaw === "number" ? defaultRaw : null;
 }
 
 interface FigmaBinding {
@@ -577,6 +608,7 @@ const FIGMA_CORNER_TO_CSS: Record<string, string> = {
 function collectFigmaBindings(
   node: FigmaNode,
   variables: FigmaLocalVariablesResponse | null,
+  activeMode?: string,
 ): Record<string, FigmaBinding> {
   const out: Record<string, FigmaBinding> = {};
   const raw = node.boundVariables ?? {};
@@ -588,7 +620,7 @@ function collectFigmaBindings(
       return;
     }
     const resolved =
-      v.resolvedType === "COLOR" ? resolveColorVariable(alias.id, variables!) : undefined;
+      v.resolvedType === "COLOR" ? resolveColorVariable(alias.id, variables!, activeMode) : undefined;
     const binding: FigmaBinding = { tokenName: v.name };
     if (resolved?.modes) binding.modes = resolved.modes;
     out[property] = binding;

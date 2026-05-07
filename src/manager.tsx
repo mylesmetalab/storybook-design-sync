@@ -24,7 +24,11 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   const [edits, setEdits] = useState<ProposedEdit[]>([]);
   const sb = useStorybookState();
   const storyId = sb.storyId;
-  const designSync = useParameter<{ target?: string; tokens?: Record<string, string> }>("designSync", {}) ?? {};
+  const designSync = useParameter<{
+    target?: string;
+    tokens?: Record<string, string>;
+    modeAttribute?: string;
+  }>("designSync", {}) ?? {};
 
   const emit = useChannel({
     [EVENTS.DriftReport]: (payload: DriftReportPayload) => {
@@ -49,8 +53,9 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     const payload: CheckDriftRequestPayload = { storyId };
     if (designSync.target) payload.target = designSync.target;
     if (designSync.tokens) payload.tokens = designSync.tokens;
+    if (designSync.modeAttribute) payload.modeAttribute = designSync.modeAttribute;
     emit(EVENTS.CheckDriftRequest, payload);
-  }, [emit, storyId, designSync.target, designSync.tokens]);
+  }, [emit, storyId, designSync.target, designSync.tokens, designSync.modeAttribute]);
 
   if (!active) return null;
 
@@ -77,7 +82,8 @@ const DiffTable: React.FC<{ report: DriftReport }> = ({ report }) => (
     <h3 style={styles.h3}>
       Drift report{" "}
       <span style={styles.muted}>
-        — node {report.nodeId} · {new Date(report.generatedAt).toLocaleTimeString()}
+        — node {report.nodeId}
+        {report.mode ? ` · mode: ${report.mode}` : ""} · {new Date(report.generatedAt).toLocaleTimeString()}
       </span>
     </h3>
     <table style={styles.table}>

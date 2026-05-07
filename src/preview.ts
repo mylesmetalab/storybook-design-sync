@@ -87,6 +87,20 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
 
 const channel = addons.getChannel();
 
+/**
+ * Read the active mode from the rendered DOM. Default attribute is
+ * `data-theme` (the Downmark / common convention). Falls back to "light".
+ *
+ * The attribute is read off the document root (`<html>`) but stories using
+ * a wrapping element can override via `parameters.designSync.modeAttribute`
+ * pointing to a different attribute.
+ */
+function readActiveMode(modeAttribute = "data-theme"): string {
+  const root = document.documentElement;
+  const value = root.getAttribute(modeAttribute);
+  return (value || "light").toLowerCase();
+}
+
 channel.on(EVENTS.CheckDriftRequest, (payload: CheckDriftRequestPayload) => {
   const target = findStoryRoot(payload.target);
   if (!target) {
@@ -99,10 +113,10 @@ channel.on(EVENTS.CheckDriftRequest, (payload: CheckDriftRequestPayload) => {
     return;
   }
   const snapshot = snapshotElement(target);
-  // Overlay story-declared token bindings on top of any DOM-attribute bindings.
   if (payload.tokens) {
     snapshot.bindings = { ...(snapshot.bindings ?? {}), ...payload.tokens };
   }
-  const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot };
+  const mode = readActiveMode(payload.modeAttribute);
+  const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot, mode };
   channel.emit(EVENTS.CodeSnapshot, out);
 });

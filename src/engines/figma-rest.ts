@@ -568,19 +568,29 @@ function findMatchingArg(
   figmaValue: string,
 ): [string, unknown] | null {
   const lowerValue = figmaValue.toLowerCase();
+  const isBoolish = lowerValue === "true" || lowerValue === "false";
   const propClean = figmaProp.toLowerCase().replace(/[-_]/g, "");
   const propStripped = propClean.replace(/^(is|has)/, "");
 
-  for (const [k, v] of Object.entries(args)) {
-    if (String(v).toLowerCase() === lowerValue) return [k, v];
-  }
-  if (lowerValue === "true") {
+  // For boolean Figma values, strategy 2 (property-name) runs first because
+  // strategy 1 would match the FIRST truthy arg regardless of whose property
+  // it represents. For non-boolean values, strategy 1 (direct value match) is
+  // the most specific signal.
+  if (isBoolish) {
+    if (lowerValue === "true") {
+      for (const [k, v] of Object.entries(args)) {
+        if (!v) continue;
+        const kClean = k.toLowerCase().replace(/[-_]/g, "");
+        if (kClean === propClean || kClean === propStripped) return [k, v];
+      }
+    }
+  } else {
     for (const [k, v] of Object.entries(args)) {
-      if (!v) continue;
-      const kClean = k.toLowerCase().replace(/[-_]/g, "");
-      if (kClean === propClean || kClean === propStripped) return [k, v];
+      if (String(v).toLowerCase() === lowerValue) return [k, v];
     }
   }
+
+  // Strategy 3: value-as-name (Figma "Active" → code `isActive: true`)
   for (const [k, v] of Object.entries(args)) {
     if (!v) continue;
     const kClean = k.toLowerCase().replace(/[-_]/g, "").replace(/^(is|has)/, "");

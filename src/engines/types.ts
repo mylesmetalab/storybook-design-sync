@@ -42,6 +42,8 @@ export interface CheckDriftInput {
    * file's default (Light) mode.
    */
   mode?: string;
+  /** Storybook story args at request time. Used by the props dimension. */
+  args?: Record<string, unknown>;
 }
 
 export interface Engine {

@@ -193,5 +193,6 @@ channel.on(EVENTS.CheckDriftRequest, (payload: CheckDriftRequestPayload) => {
   }
   const mode = readActiveMode(payload.modeAttribute);
   const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot, mode };
+  if (payload.args) out.args = payload.args;
   channel.emit(EVENTS.CodeSnapshot, out);
 });

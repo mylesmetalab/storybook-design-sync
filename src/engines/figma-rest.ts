@@ -95,10 +95,10 @@ class FigmaRestEngine implements Engine {
     dimensions.push(...this.diffTokenBindings(node, snapshot, variables, activeMode));
     dimensions.push(...this.diffVariantSet(node, snapshot));
     dimensions.push(...this.diffCopy(node, snapshot));
+    dimensions.push(...this.diffProps(node, input.args));
 
     // Reserved kinds — engine fills as flag-only placeholders.
     dimensions.push(
-      this.placeholder("props", "story.props"),
       this.placeholder("structure", "story.structure"),
       this.placeholder("motion", "story.motion"),
     );
@@ -408,6 +408,85 @@ class FigmaRestEngine implements Engine {
       diff.note = `code variants not declared in Figma: [${unknownInFigma.join(", ")}]`;
     }
     return [diff];
+  }
+
+  /**
+   * Compare Figma's variant properties (parsed from the registered variant
+   * node's name) against Storybook story args. One row per Figma property.
+   *
+   * Matching strategy:
+   *   - Falsy/default Figma values (false/default/off/no/none) → match by
+   *     absence (no arg expected to carry that value)
+   *   - "True" → look for an arg whose name resembles the Figma property
+   *     (with `is`/`has` prefixes stripped) and is truthy
+   *   - Anything else → look for any arg whose stringified value equals
+   *     the Figma value (case-insensitive)
+   *
+   * If the registered node isn't a variant (or no args were provided),
+   * emits a single flag-only row.
+   */
+  private diffProps(node: FigmaNode, args: Record<string, unknown> | undefined): DimensionDiff[] {
+    if (!args) {
+      return [this.placeholder("props", "story.args (no args sent)")];
+    }
+    if (node.type !== "COMPONENT" || !node.name.includes("=")) {
+      return [
+        {
+          kind: "props",
+          property: "story.args",
+          codeValue: args,
+          figmaValue: null,
+          status: "flag-only",
+          note: "Registered node has no Figma variant properties to compare against.",
+        },
+      ];
+    }
+
+    const figmaProps = parseVariantName(node.name);
+    return Object.entries(figmaProps).map(([prop, value]): DimensionDiff => {
+      const lower = value.toLowerCase();
+
+      if (isFalsyVariantValue(value)) {
+        return {
+          kind: "props",
+          property: prop,
+          codeValue: null,
+          figmaValue: value,
+          status: "match",
+          note: "Falsy/default — no arg expected.",
+        };
+      }
+
+      if (lower === "true") {
+        const propClean = prop.toLowerCase().replace(/-|_/g, "");
+        const matchingArg = Object.entries(args).find(([k, v]) => {
+          const kClean = k.toLowerCase().replace(/-|_/g, "");
+          // Strip leading "is"/"has" so Figma "IsDirty" matches code "isDirty"
+          // AND code "dirty".
+          const propStripped = propClean.replace(/^(is|has)/, "");
+          return (kClean === propClean || kClean === propStripped) && Boolean(v);
+        });
+        return {
+          kind: "props",
+          property: prop,
+          codeValue: matchingArg ? { [matchingArg[0]]: matchingArg[1] } : null,
+          figmaValue: value,
+          status: matchingArg ? "match" : "drift",
+        };
+      }
+
+      // Direct value match.
+      const matchingArg = Object.entries(args).find(
+        ([, v]) => String(v).toLowerCase() === lower,
+      );
+      return {
+        kind: "props",
+        property: prop,
+        codeValue: matchingArg ? { [matchingArg[0]]: matchingArg[1] } : null,
+        figmaValue: value,
+        status: matchingArg ? "match" : "drift",
+      };
+    });
   }
 
   /**

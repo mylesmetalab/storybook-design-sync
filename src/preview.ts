@@ -177,14 +177,28 @@ function readActiveMode(modeAttribute = "data-theme"): string {
 }
 
 /**
- * Wait long enough for the browser to flush style recomputation after
- * toggling a CSS-variable-driving attribute. One rAF is sometimes too
- * fast (the next paint cycle hasn't applied the new variables); reading
- * `offsetHeight` forces a synchronous layout, then we wait two frames
- * to let any async style-driven re-renders settle.
+ * Inject a stylesheet that disables all transitions and animations. Returns
+ * a cleanup function. Used during dual-mode toggling so the snapshot reads
+ * the *target* mode value, not a transition midpoint.
+ */
+function suspendTransitions(): () => void {
+  const style = document.createElement("style");
+  style.setAttribute("data-design-sync-suspend-transitions", "");
+  style.textContent =
+    "*,*::before,*::after{transition:none!important;animation:none!important;}";
+  document.head.appendChild(style);
+  // Force the new style to apply before the caller toggles attributes.
+  void document.documentElement.offsetHeight;
+  return () => style.remove();
+}
+
+/**
+ * Wait for the browser to flush style + layout after a CSS-variable-driving
+ * attribute change. Two rAFs ensures the next paint pass has run; reading
+ * `offsetHeight` forces the synchronous part. Even when transitions are
+ * suspended, browsers occasionally need this extra tick to settle.
  */
 function waitForStyleFlush(): Promise<void> {
-  // Force synchronous style + layout recomputation.
   void document.documentElement.offsetHeight;
   return new Promise((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
@@ -209,26 +223,24 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     const [modeA, modeB] = payload.dualModes ?? ["light", "dark"];
     const root = document.documentElement;
     const original = root.getAttribute(modeAttribute);
+    const restoreTransitions = suspendTransitions();
 
     // Pass A
     root.setAttribute(modeAttribute, modeA);
     await waitForStyleFlush();
-    // eslint-disable-next-line no-console
-    console.info("[design-sync] pass A:", modeA, "actual:", root.getAttribute(modeAttribute));
     const snapA = snapshotElement(target);
     if (payload.tokens) snapA.bindings = { ...(snapA.bindings ?? {}), ...payload.tokens };
 
     // Pass B
     root.setAttribute(modeAttribute, modeB);
     await waitForStyleFlush();
-    // eslint-disable-next-line no-console
-    console.info("[design-sync] pass B:", modeB, "actual:", root.getAttribute(modeAttribute));
     const snapB = snapshotElement(target);
     if (payload.tokens) snapB.bindings = { ...(snapB.bindings ?? {}), ...payload.tokens };
 
     // Restore
     if (original === null) root.removeAttribute(modeAttribute);
     else root.setAttribute(modeAttribute, original);
+    restoreTransitions();
 
     const out: CodeSnapshotPayload = {
       storyId: payload.storyId,

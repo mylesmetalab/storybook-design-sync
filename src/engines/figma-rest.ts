@@ -444,8 +444,6 @@ class FigmaRestEngine implements Engine {
 
     const figmaProps = parseVariantName(node.name);
     return Object.entries(figmaProps).map(([prop, value]): DimensionDiff => {
-      const lower = value.toLowerCase();
-
       if (isFalsyVariantValue(value)) {
         return {
           kind: "props",
@@ -456,29 +454,7 @@ class FigmaRestEngine implements Engine {
           note: "Falsy/default — no arg expected.",
         };
       }
-
-      if (lower === "true") {
-        const propClean = prop.toLowerCase().replace(/-|_/g, "");
-        const matchingArg = Object.entries(args).find(([k, v]) => {
-          const kClean = k.toLowerCase().replace(/-|_/g, "");
-          // Strip leading "is"/"has" so Figma "IsDirty" matches code "isDirty"
-          // AND code "dirty".
-          const propStripped = propClean.replace(/^(is|has)/, "");
-          return (kClean === propClean || kClean === propStripped) && Boolean(v);
-        });
-        return {
-          kind: "props",
-          property: prop,
-          codeValue: matchingArg ? { [matchingArg[0]]: matchingArg[1] } : null,
-          figmaValue: value,
-          status: matchingArg ? "match" : "drift",
-        };
-      }
-
-      // Direct value match.
-      const matchingArg = Object.entries(args).find(
-        ([, v]) => String(v).toLowerCase() === lower,
-      );
+      const matchingArg = findMatchingArg(args, prop, value);
       return {
         kind: "props",
         property: prop,
@@ -570,6 +546,47 @@ function mergeInheritedBindings(variant: FigmaNode, parent: FigmaNode): FigmaNod
     }
   }
   return { ...variant, boundVariables: merged };
+}
+
+/**
+ * Find a Storybook arg that matches a Figma variant property using three
+ * strategies, in priority order:
+ *   1. Direct value match — any arg whose stringified value equals the
+ *      Figma value (case-insensitive). Catches "variant: 'accent'" → "Accent".
+ *   2. Property-name match for booleans — when Figma value is "True", any
+ *      arg whose name matches the Figma property name (with optional
+ *      is/has prefix) and is truthy. Catches "isDirty: true" → IsDirty=True.
+ *   3. Value-as-name match for boolean states — any arg whose name (with
+ *      is/has prefix stripped) equals the Figma value, and is truthy.
+ *      Catches "isActive: true" → State=Active.
+ *
+ * Returns the matching [key, value] tuple or null.
+ */
+function findMatchingArg(
+  args: Record<string, unknown>,
+  figmaProp: string,
+  figmaValue: string,
+): [string, unknown] | null {
+  const lowerValue = figmaValue.toLowerCase();
+  const propClean = figmaProp.toLowerCase().replace(/[-_]/g, "");
+  const propStripped = propClean.replace(/^(is|has)/, "");
+
+  for (const [k, v] of Object.entries(args)) {
+    if (String(v).toLowerCase() === lowerValue) return [k, v];
+  }
+  if (lowerValue === "true") {
+    for (const [k, v] of Object.entries(args)) {
+      if (!v) continue;
+      const kClean = k.toLowerCase().replace(/[-_]/g, "");
+      if (kClean === propClean || kClean === propStripped) return [k, v];
+    }
+  }
+  for (const [k, v] of Object.entries(args)) {
+    if (!v) continue;
+    const kClean = k.toLowerCase().replace(/[-_]/g, "").replace(/^(is|has)/, "");
+    if (kClean === lowerValue) return [k, v];
+  }
+  return null;
 }
 
 /**

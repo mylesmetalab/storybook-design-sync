@@ -31,6 +31,17 @@ export interface CheckDriftRequestPayload {
   modeAttribute?: string;
   /** Storybook story args at request time (used by the props dimension). */
   args?: Record<string, unknown>;
+  /**
+   * When true, the preview snapshots in both `dualModes[0]` and `dualModes[1]`
+   * by toggling the mode attribute, then restoring the original. The server
+   * runs the engine per mode and merges into a single report.
+   */
+  dualMode?: boolean;
+  /**
+   * The two mode names to snapshot when `dualMode` is true. Defaults to
+   * `["light", "dark"]`. Per-story override via `parameters.designSync.modes`.
+   */
+  dualModes?: [string, string];
 }
 
 export interface CodeSnapshotPayload {
@@ -44,6 +55,12 @@ export interface CodeSnapshotPayload {
   mode?: string;
   /** Storybook story args, relayed from the manager. Used by `props` diff. */
   args?: Record<string, unknown>;
+  /**
+   * When the preview snapshotted in dual-mode, this carries the second
+   * (mode, snapshot) pair. The server runs the engine separately per mode
+   * and merges results.
+   */
+  additionalSnapshots?: Array<{ mode: string; snapshot: CodeSnapshot }>;
 }
 
 export interface DriftReportPayload {

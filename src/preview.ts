@@ -176,7 +176,16 @@ function readActiveMode(modeAttribute = "data-theme"): string {
   return (value || "light").toLowerCase();
 }
 
-channel.on(EVENTS.CheckDriftRequest, (payload: CheckDriftRequestPayload) => {
+/**
+ * Force a re-render after toggling the mode attribute. We rely on the
+ * browser to recompute styles synchronously after the attribute change;
+ * a `requestAnimationFrame` ensures any scheduled layout flushes.
+ */
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) => {
   const target = findStoryRoot(payload.target, payload.storyId);
   if (!target) {
     channel.emit(EVENTS.DriftError, {
@@ -187,11 +196,46 @@ channel.on(EVENTS.CheckDriftRequest, (payload: CheckDriftRequestPayload) => {
     });
     return;
   }
+
+  const modeAttribute = payload.modeAttribute ?? "data-theme";
+
+  if (payload.dualMode) {
+    const [modeA, modeB] = payload.dualModes ?? ["light", "dark"];
+    const root = document.documentElement;
+    const original = root.getAttribute(modeAttribute);
+
+    // Pass A
+    root.setAttribute(modeAttribute, modeA);
+    await nextFrame();
+    const snapA = snapshotElement(target);
+    if (payload.tokens) snapA.bindings = { ...(snapA.bindings ?? {}), ...payload.tokens };
+
+    // Pass B
+    root.setAttribute(modeAttribute, modeB);
+    await nextFrame();
+    const snapB = snapshotElement(target);
+    if (payload.tokens) snapB.bindings = { ...(snapB.bindings ?? {}), ...payload.tokens };
+
+    // Restore
+    if (original === null) root.removeAttribute(modeAttribute);
+    else root.setAttribute(modeAttribute, original);
+
+    const out: CodeSnapshotPayload = {
+      storyId: payload.storyId,
+      snapshot: snapA,
+      mode: modeA,
+      additionalSnapshots: [{ mode: modeB, snapshot: snapB }],
+    };
+    if (payload.args) out.args = payload.args;
+    channel.emit(EVENTS.CodeSnapshot, out);
+    return;
+  }
+
   const snapshot = snapshotElement(target);
   if (payload.tokens) {
     snapshot.bindings = { ...(snapshot.bindings ?? {}), ...payload.tokens };
   }
-  const mode = readActiveMode(payload.modeAttribute);
+  const mode = readActiveMode(modeAttribute);
   const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot, mode };
   if (payload.args) out.args = payload.args;
   channel.emit(EVENTS.CodeSnapshot, out);

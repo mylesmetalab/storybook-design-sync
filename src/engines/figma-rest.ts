@@ -94,10 +94,10 @@ class FigmaRestEngine implements Engine {
     dimensions.push(...this.diffTokenValues(node, snapshot, variables, activeMode));
     dimensions.push(...this.diffTokenBindings(node, snapshot, variables, activeMode));
     dimensions.push(...this.diffVariantSet(node, snapshot));
+    dimensions.push(...this.diffCopy(node, snapshot));
 
-    // Reserved kinds — engine fills as flag-only placeholders for v0.
+    // Reserved kinds — engine fills as flag-only placeholders.
     dimensions.push(
-      this.placeholder("copy", "story.copy"),
       this.placeholder("props", "story.props"),
       this.placeholder("structure", "story.structure"),
       this.placeholder("motion", "story.motion"),
@@ -410,6 +410,48 @@ class FigmaRestEngine implements Engine {
     return [diff];
   }
 
+  /**
+   * Compare each Figma TEXT-node's `characters` against visible text in the
+   * rendered story. We allow case-insensitive substring containment (a
+   * Figma label "Send" still matches a code button reading "Send →").
+   *
+   * Single row per Figma string. Strings present in code = match; absent =
+   * drift. If neither side has any text, no row is emitted.
+   */
+  private diffCopy(node: FigmaNode, snapshot: CodeSnapshot | undefined): DimensionDiff[] {
+    const figmaStrings = collectFigmaText(node);
+    const codeTexts = (snapshot?.texts ?? []).map((s) => s.toLowerCase());
+    if (figmaStrings.length === 0 && codeTexts.length === 0) return [];
+
+    if (figmaStrings.length === 0) {
+      // Figma has no text but code does — surface as flag-only so it's
+      // visible without crying drift; the user may have added a label that
+      // belongs in design too.
+      return [
+        {
+          kind: "copy",
+          property: "text",
+          codeValue: snapshot?.texts ?? [],
+          figmaValue: [],
+          status: "flag-only",
+          note: "Code has visible text; Figma node has no TEXT children.",
+        },
+      ];
+    }
+
+    return figmaStrings.map((figmaText): DimensionDiff => {
+      const lower = figmaText.toLowerCase();
+      const present = codeTexts.some((c) => c.includes(lower) || lower.includes(c));
+      return {
+        kind: "copy",
+        property: "text",
+        codeValue: present ? figmaText : null,
+        figmaValue: figmaText,
+        status: present ? "match" : "drift",
+      };
+    });
+  }
+
   private placeholder(
     kind: DimensionDiff["kind"],
     property: string,
@@ -449,6 +491,26 @@ function mergeInheritedBindings(variant: FigmaNode, parent: FigmaNode): FigmaNod
     }
   }
   return { ...variant, boundVariables: merged };
+}
+
+/**
+ * Walk the Figma node tree and collect all TEXT-node `characters` values.
+ * Deduplicates and returns trimmed non-empty strings.
+ */
+function collectFigmaText(node: FigmaNode): string[] {
+  const out = new Set<string>();
+  function walk(n: FigmaNode): void {
+    if (n.type === "TEXT") {
+      const chars = (n as unknown as { characters?: string }).characters;
+      if (typeof chars === "string") {
+        const trimmed = chars.trim();
+        if (trimmed) out.add(trimmed);
+      }
+    }
+    for (const child of n.children ?? []) walk(child);
+  }
+  walk(node);
+  return [...out];
 }
 
 /**

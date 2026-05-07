@@ -22,6 +22,12 @@ export interface CodeSnapshot {
    * Used by the variant-set diff.
    */
   variantClasses?: string[];
+  /**
+   * Visible text content within the targeted element (recursive innerText),
+   * trimmed and split into non-empty strings. Used by the `copy` diff to
+   * check that Figma TEXT-node strings appear in the rendered story.
+   */
+  texts?: string[];
 }
 
 export interface CheckDriftInput {

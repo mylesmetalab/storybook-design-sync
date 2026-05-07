@@ -519,37 +519,70 @@ interface FigmaBinding {
   modes?: ModeAwareValue;
 }
 
+/**
+ * Map Figma's camelCase boundVariable keys to the CSS-property keys the
+ * snapshot collects, so the diff joins instead of producing two rows.
+ *
+ * `rectangleCornerRadii` is a nested map and is expanded separately below.
+ */
+const FIGMA_KEY_TO_CSS: Record<string, string> = {
+  paddingTop: "padding-top",
+  paddingRight: "padding-right",
+  paddingBottom: "padding-bottom",
+  paddingLeft: "padding-left",
+  itemSpacing: "gap",
+  fills: "background-color",
+};
+
+const FIGMA_CORNER_TO_CSS: Record<string, string> = {
+  RECTANGLE_TOP_LEFT_CORNER_RADIUS: "border-top-left-radius",
+  RECTANGLE_TOP_RIGHT_CORNER_RADIUS: "border-top-right-radius",
+  RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS: "border-bottom-left-radius",
+  RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS: "border-bottom-right-radius",
+};
+
 function collectFigmaBindings(
   node: FigmaNode,
   variables: FigmaLocalVariablesResponse | null,
 ): Record<string, FigmaBinding> {
   const out: Record<string, FigmaBinding> = {};
   const raw = node.boundVariables ?? {};
-  for (const [property, alias] of Object.entries(raw)) {
-    const aliases = Array.isArray(alias) ? alias : [alias];
-    const first = aliases[0];
-    if (!first) continue;
-    const v = variables?.meta.variables[first.id];
+
+  const setBinding = (property: string, alias: FigmaVariableAlias): void => {
+    const v = variables?.meta.variables[alias.id];
     if (!v) {
-      out[property] = { tokenName: first.id };
-      continue;
+      out[property] = { tokenName: alias.id };
+      return;
     }
     const resolved =
-      v.resolvedType === "COLOR" ? resolveColorVariable(first.id, variables!) : undefined;
+      v.resolvedType === "COLOR" ? resolveColorVariable(alias.id, variables!) : undefined;
     const binding: FigmaBinding = { tokenName: v.name };
     if (resolved?.modes) binding.modes = resolved.modes;
     out[property] = binding;
-  }
-  // Also surface fill-bound variables under "background-color".
-  const fillAlias = node.fills?.[0]?.boundVariables?.color;
-  if (fillAlias && variables) {
-    const v = variables.meta.variables[fillAlias.id];
-    if (v) {
-      const resolved = resolveColorVariable(fillAlias.id, variables);
-      const binding: FigmaBinding = { tokenName: v.name };
-      if (resolved?.modes) binding.modes = resolved.modes;
-      out["background-color"] = binding;
+  };
+
+  for (const [figmaKey, alias] of Object.entries(raw)) {
+    if (figmaKey === "rectangleCornerRadii") {
+      // Expand the nested per-corner map into individual CSS-prop keys.
+      const corners = alias as unknown as Record<string, FigmaVariableAlias>;
+      for (const [cornerKey, cornerAlias] of Object.entries(corners)) {
+        const cssProp = FIGMA_CORNER_TO_CSS[cornerKey];
+        if (cssProp && cornerAlias) setBinding(cssProp, cornerAlias);
+      }
+      continue;
     }
+    const aliases = Array.isArray(alias) ? alias : [alias];
+    const first = aliases[0];
+    if (!first) continue;
+    const cssProp = FIGMA_KEY_TO_CSS[figmaKey] ?? figmaKey;
+    setBinding(cssProp, first);
+  }
+
+  // Fall back to fills[0].boundVariables.color when the node has no top-level
+  // `fills` boundVariable (some shapes carry it on the paint instead).
+  if (!out["background-color"]) {
+    const fillAlias = node.fills?.[0]?.boundVariables?.color;
+    if (fillAlias) setBinding("background-color", fillAlias);
   }
   return out;
 }

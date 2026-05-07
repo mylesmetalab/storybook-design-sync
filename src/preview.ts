@@ -213,12 +213,16 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     // Pass A
     root.setAttribute(modeAttribute, modeA);
     await waitForStyleFlush();
+    // eslint-disable-next-line no-console
+    console.info("[design-sync] pass A:", modeA, "actual:", root.getAttribute(modeAttribute));
     const snapA = snapshotElement(target);
     if (payload.tokens) snapA.bindings = { ...(snapA.bindings ?? {}), ...payload.tokens };
 
     // Pass B
     root.setAttribute(modeAttribute, modeB);
     await waitForStyleFlush();
+    // eslint-disable-next-line no-console
+    console.info("[design-sync] pass B:", modeB, "actual:", root.getAttribute(modeAttribute));
     const snapB = snapshotElement(target);
     if (payload.tokens) snapB.bindings = { ...(snapB.bindings ?? {}), ...payload.tokens };
 

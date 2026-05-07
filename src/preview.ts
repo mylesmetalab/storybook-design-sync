@@ -73,10 +73,9 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
   // Figma's variant values.
   const allClasses = Array.from(el.classList);
   const candidates = new Set<string>();
-  for (const c of allClasses) candidates.add(c);
-  if (allClasses.length > 1) {
-    for (const c of allClasses.slice(1)) candidates.add(c);
-  }
+  // Adjacent modifiers: any class after the first (which is the base).
+  for (const c of allClasses.slice(1)) candidates.add(c);
+  // BEM modifiers: include the suffix after `--` of any class.
   for (const c of allClasses) {
     const i = c.indexOf("--");
     if (i !== -1) candidates.add(c.slice(i + 2));

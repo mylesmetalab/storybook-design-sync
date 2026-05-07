@@ -332,47 +332,50 @@ class FigmaRestEngine implements Engine {
   }
 
   private diffVariantSet(node: FigmaNode, snapshot: CodeSnapshot | undefined): DimensionDiff[] {
-    // Strip any "<component>--" prefix from BEM-modifier classes so we
-    // compare just the variant value (e.g. "icon-button--accent" → "accent").
+    // The preview already expands BEM-modifier classes and adjacent classes
+    // (.file-item.active style) into a candidate set. Lowercase everything
+    // here for case-insensitive matching.
     const codeVariants = new Set(
-      (snapshot?.variantClasses ?? [])
-        .map((c) => {
-          const dashIdx = c.indexOf("--");
-          return dashIdx === -1 ? c : c.slice(dashIdx + 2);
-        })
-        .map((v) => v.toLowerCase()),
+      (snapshot?.variantClasses ?? []).map((v) => v.toLowerCase()),
     );
 
     // If this node is a single COMPONENT (a variant in a set), Figma encodes
     // the active variant as the node name "Property=Value, Other=Value".
-    // Compare those values to the code-side variant classes.
+    // Parse it as a structured Record<property, value> and compare each
+    // property independently against code modifiers. This lets us:
+    //   - skip falsy/default values (no modifier expected in code)
+    //   - report per-property drift instead of collapsing to a string set
+    //     where "false" looks identical to a real variant value
     if (node.type === "COMPONENT" && node.name.includes("=")) {
-      const figmaActive = new Set(
-        node.name
-          .split(",")
-          .map((s) => s.trim().split("=")[1])
-          .filter((s): s is string => !!s)
-          .map((s) => s.toLowerCase()),
-      );
+      const figmaProps = parseVariantName(node.name);
+      const missing: string[] = [];
+      const matched: string[] = [];
+      const skipped: string[] = [];
 
-      // "Default" is conventionally not emitted as a BEM modifier in code —
-      // a story `--default` is just the base class. Filter it out so we don't
-      // flag "Figma says Default, code has no modifier" as drift.
-      figmaActive.delete("default");
+      for (const [prop, value] of Object.entries(figmaProps)) {
+        if (isFalsyVariantValue(value)) {
+          skipped.push(`${prop}=${value}`);
+          continue;
+        }
+        if (codeVariants.has(value.toLowerCase())) {
+          matched.push(`${prop}=${value}`);
+        } else {
+          missing.push(`${prop}=${value}`);
+        }
+      }
 
-      const onlyCode = [...codeVariants].filter((v) => !figmaActive.has(v));
-      const onlyFigma = [...figmaActive].filter((v) => !codeVariants.has(v));
-      const status: DimensionDiff["status"] =
-        onlyCode.length === 0 && onlyFigma.length === 0 ? "match" : "drift";
+      const status: DimensionDiff["status"] = missing.length === 0 ? "match" : "drift";
       const diff: DimensionDiff = {
         kind: "variant-set",
         property: "active-variant",
         codeValue: [...codeVariants],
-        figmaValue: [...figmaActive],
+        figmaValue: figmaProps,
         status,
       };
       if (status === "drift") {
-        diff.note = `code-only: [${onlyCode.join(", ")}], figma-only: [${onlyFigma.join(", ")}]`;
+        diff.note = `Figma variants not present in code: [${missing.join(", ")}]`;
+      } else if (skipped.length > 0) {
+        diff.note = `Falsy/default skipped: [${skipped.join(", ")}]`;
       }
       return [diff];
     }
@@ -441,6 +444,36 @@ function mergeInheritedBindings(variant: FigmaNode, parent: FigmaNode): FigmaNod
     }
   }
   return { ...variant, boundVariables: merged };
+}
+
+/**
+ * Parse a Figma variant name like "State=Active, IsDirty=False" into a
+ * structured `{ State: "Active", IsDirty: "False" }`. Tolerates trailing
+ * spaces and missing values.
+ */
+function parseVariantName(name: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of name.split(",")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (k && v) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Variant values that conventionally mean "no modifier in code" — typically
+ * the absence-state of a boolean variant or the unmodified default.
+ *
+ * Code-side BEM rarely emits `.foo--false` or `.foo--default`; the absence
+ * of a modifier IS the falsy state. Treat these as match-by-skip rather
+ * than flagging false-positive drift.
+ */
+function isFalsyVariantValue(value: string): boolean {
+  const v = value.toLowerCase();
+  return v === "false" || v === "default" || v === "off" || v === "no" || v === "none";
 }
 
 function parsePx(value: string | undefined): number | null {

@@ -64,8 +64,24 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
     }
   }
 
-  // Variant signal: BEM-modifier classes (anything with "--").
-  const variantClasses = Array.from(el.classList).filter((c) => c.includes("--"));
+  // Variant signals — collect both styles consumers actually use:
+  //  - BEM modifiers:    ".icon-button--accent"  → suffix "accent"
+  //  - Adjacent classes: ".file-item.active"     → "active" (any class
+  //                                                 after the first/base)
+  //
+  // We send all candidates; the engine matches case-insensitively against
+  // Figma's variant values.
+  const allClasses = Array.from(el.classList);
+  const candidates = new Set<string>();
+  for (const c of allClasses) candidates.add(c);
+  if (allClasses.length > 1) {
+    for (const c of allClasses.slice(1)) candidates.add(c);
+  }
+  for (const c of allClasses) {
+    const i = c.indexOf("--");
+    if (i !== -1) candidates.add(c.slice(i + 2));
+  }
+  const variantClasses = [...candidates];
 
   return { styles, bindings, variantClasses };
 }

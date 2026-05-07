@@ -332,15 +332,11 @@ class FigmaRestEngine implements Engine {
   }
 
   private diffVariantSet(node: FigmaNode, snapshot: CodeSnapshot | undefined): DimensionDiff[] {
-    // Strip any "<component>--" prefix from BEM-modifier classes so we
-    // compare just the variant value (e.g. "icon-button--accent" → "accent").
+    // The preview already expands BEM-modifier classes and adjacent classes
+    // (.file-item.active style) into a candidate set. Lowercase everything
+    // here for case-insensitive matching.
     const codeVariants = new Set(
-      (snapshot?.variantClasses ?? [])
-        .map((c) => {
-          const dashIdx = c.indexOf("--");
-          return dashIdx === -1 ? c : c.slice(dashIdx + 2);
-        })
-        .map((v) => v.toLowerCase()),
+      (snapshot?.variantClasses ?? []).map((v) => v.toLowerCase()),
     );
 
     // If this node is a single COMPONENT (a variant in a set), Figma encodes

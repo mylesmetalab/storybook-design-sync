@@ -177,12 +177,18 @@ function readActiveMode(modeAttribute = "data-theme"): string {
 }
 
 /**
- * Force a re-render after toggling the mode attribute. We rely on the
- * browser to recompute styles synchronously after the attribute change;
- * a `requestAnimationFrame` ensures any scheduled layout flushes.
+ * Wait long enough for the browser to flush style recomputation after
+ * toggling a CSS-variable-driving attribute. One rAF is sometimes too
+ * fast (the next paint cycle hasn't applied the new variables); reading
+ * `offsetHeight` forces a synchronous layout, then we wait two frames
+ * to let any async style-driven re-renders settle.
  */
-function nextFrame(): Promise<void> {
-  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+function waitForStyleFlush(): Promise<void> {
+  // Force synchronous style + layout recomputation.
+  void document.documentElement.offsetHeight;
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
 }
 
 channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) => {
@@ -206,13 +212,13 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
 
     // Pass A
     root.setAttribute(modeAttribute, modeA);
-    await nextFrame();
+    await waitForStyleFlush();
     const snapA = snapshotElement(target);
     if (payload.tokens) snapA.bindings = { ...(snapA.bindings ?? {}), ...payload.tokens };
 
     // Pass B
     root.setAttribute(modeAttribute, modeB);
-    await nextFrame();
+    await waitForStyleFlush();
     const snapB = snapshotElement(target);
     if (payload.tokens) snapB.bindings = { ...(snapB.bindings ?? {}), ...payload.tokens };
 

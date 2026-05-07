@@ -54,28 +54,56 @@ async function postEdit(
   }
 }
 
+type ApplyScope = "code" | "figma";
+
 /**
- * Build a pipeline Edit from a drift row + story context. Returns null if
- * the row isn't fixable via the pipeline today (e.g. dual-mode rows with
- * map-shaped values, or non-token-binding rows).
+ * Build a pipeline Edit from a drift row + story context. The scope
+ * decides which side wins on this drift:
+ *
+ *   - scope=code   → "code is wrong, change code to match Figma" (oldValue=code, newValue=figma)
+ *   - scope=figma  → "Figma is wrong, change Figma to match code" (oldValue=figma, newValue=code).
+ *                    Requires `nodeId` (passed in) and is processed by the
+ *                    Figma plugin worker via the pipeline's queue.
+ *
+ * Returns null if the row isn't fixable in the requested direction.
  */
 function buildEdit(
   d: DimensionDiff,
   storyId: string,
   selector: string | undefined,
+  scope: ApplyScope,
+  nodeId: string | undefined,
 ): Record<string, unknown> | null {
   if (d.kind !== "token-binding") return null;
   if (typeof d.codeValue !== "string" || typeof d.figmaValue !== "string") return null;
-  if (!selector) return null;
-  return {
-    id: typeof crypto !== "undefined" && "randomUUID" in crypto
+  if (scope === "code" && !selector) return null;
+  if (scope === "figma" && !nodeId) return null;
+
+  const id =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
-      : `${storyId}-${d.property}-${Date.now()}`,
+      : `${storyId}-${d.property}-${Date.now()}`;
+
+  if (scope === "code") {
+    return {
+      id,
+      kind: "token-binding",
+      scope: "code",
+      target: { selector, property: d.property, storyId },
+      oldValue: d.codeValue,
+      newValue: d.figmaValue,
+      source: "storybook-design-sync",
+      timestamp: new Date().toISOString(),
+    };
+  }
+  // figma scope: swap old/new — Figma is being asked to match code.
+  return {
+    id,
     kind: "token-binding",
-    scope: "code",
-    target: { selector, property: d.property, storyId },
-    oldValue: d.codeValue,
-    newValue: d.figmaValue,
+    scope: "figma",
+    target: { nodeId, property: d.property, storyId },
+    oldValue: d.figmaValue,
+    newValue: d.codeValue,
     source: "storybook-design-sync",
     timestamp: new Date().toISOString(),
   };
@@ -152,21 +180,33 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         <DiffTable
           report={state.report}
           applyResults={applyResults}
-          onApply={async (d, key) => {
-            const edit = buildEdit(d, storyId ?? "", designSync.target);
+          onApply={async (d, key, scope) => {
+            const edit = buildEdit(
+              d,
+              storyId ?? "",
+              designSync.target,
+              scope,
+              state.report?.nodeId,
+            );
             if (!edit) {
               setApplyResults((prev) => ({
                 ...prev,
-                [key]: { status: "rejected", message: "Row not auto-fixable (need token-binding + selector)." },
+                [key + ":" + scope]: {
+                  status: "rejected",
+                  message:
+                    scope === "code"
+                      ? "Row not auto-fixable: need token-binding + selector."
+                      : "Row not auto-fixable: need token-binding + figma nodeId.",
+                },
               }));
               return;
             }
-            setApplyResults((prev) => ({ ...prev, [key]: { status: "loading" } }));
+            setApplyResults((prev) => ({ ...prev, [key + ":" + scope]: { status: "loading" } }));
             const result = await postEdit(
               designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL,
               edit,
             );
-            setApplyResults((prev) => ({ ...prev, [key]: result }));
+            setApplyResults((prev) => ({ ...prev, [key + ":" + scope]: result }));
           }}
         />
       )}
@@ -179,7 +219,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
 interface DiffTableProps {
   report: DriftReport;
   applyResults: Record<string, ApplyResult>;
-  onApply: (d: DimensionDiff, key: string) => void;
+  onApply: (d: DimensionDiff, key: string, scope: ApplyScope) => void;
 }
 
 const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply }) => (
@@ -209,8 +249,9 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply }) 
             <Row
               key={key}
               d={d}
-              applyResult={applyResults[key]}
-              onApply={() => onApply(d, key)}
+              codeResult={applyResults[`${key}:code`]}
+              figmaResult={applyResults[`${key}:figma`]}
+              onApply={(scope) => onApply(d, key, scope)}
             />
           );
         })}
@@ -221,11 +262,12 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply }) 
 
 interface RowProps {
   d: DimensionDiff;
-  applyResult: ApplyResult | undefined;
-  onApply: () => void;
+  codeResult: ApplyResult | undefined;
+  figmaResult: ApplyResult | undefined;
+  onApply: (scope: ApplyScope) => void;
 }
 
-const Row: React.FC<RowProps> = ({ d, applyResult, onApply }) => {
+const Row: React.FC<RowProps> = ({ d, codeResult, figmaResult, onApply }) => {
   const fixable =
     d.kind === "token-binding" &&
     d.status === "drift" &&
@@ -252,24 +294,41 @@ const Row: React.FC<RowProps> = ({ d, applyResult, onApply }) => {
       </td>
       <td style={styles.td}>
         {fixable ? (
-          <button
-            style={styles.applyButton}
-            onClick={onApply}
-            disabled={applyResult?.status === "loading"}
-          >
-            {applyResult?.status === "loading" ? "…" : applyResult?.status === "applied" ? "✓ applied" : "Apply"}
-          </button>
+          <div style={styles.applyButtons}>
+            <ApplyButton label="→ code" scope="code" result={codeResult} onClick={() => onApply("code")} />
+            <ApplyButton label="→ figma" scope="figma" result={figmaResult} onClick={() => onApply("figma")} />
+          </div>
         ) : (
           <span style={styles.muted}>—</span>
         )}
-        {applyResult && applyResult.status !== "loading" && applyResult.status !== "applied" && (
-          <div style={styles.applyMessage}>
-            <code>{applyResult.status}</code>
-            {applyResult.message && <div>{applyResult.message}</div>}
-          </div>
-        )}
       </td>
     </tr>
+  );
+};
+
+interface ApplyButtonProps {
+  label: string;
+  scope: ApplyScope;
+  result: ApplyResult | undefined;
+  onClick: () => void;
+}
+
+const ApplyButton: React.FC<ApplyButtonProps> = ({ label, scope, result, onClick }) => {
+  const loading = result?.status === "loading";
+  const applied = result?.status === "applied";
+  const text = loading ? "…" : applied ? "✓" : label;
+  return (
+    <div style={styles.applyButtonGroup}>
+      <button style={styles.applyButton} onClick={onClick} disabled={loading} title={`Apply ${scope === "code" ? "→ code" : "→ Figma"}`}>
+        {text}
+      </button>
+      {result && !loading && !applied && (
+        <div style={styles.applyMessage}>
+          <code>{result.status}</code>
+          {result.message && <div>{result.message}</div>}
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -350,6 +409,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   storyId: { color: "#7a7a7a", fontFamily: "monospace" },
   checkboxLabel: { display: "flex", alignItems: "center", gap: 4, color: "#525252", fontSize: 12 },
+  applyButtons: { display: "flex", flexDirection: "column", gap: 4 },
+  applyButtonGroup: { display: "flex", flexDirection: "column", gap: 2 },
   applyButton: {
     padding: "2px 8px",
     fontSize: 11,
@@ -357,8 +418,9 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid #d4d4d4",
     background: "#fff",
     cursor: "pointer",
+    minWidth: 56,
   },
-  applyMessage: { color: "#7a7a7a", fontSize: 11, marginTop: 4 },
+  applyMessage: { color: "#7a7a7a", fontSize: 11, marginTop: 2 },
   error: {
     padding: 8,
     borderRadius: 4,

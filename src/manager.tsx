@@ -22,6 +22,7 @@ const initialState: PanelState = { loading: false, report: null, error: null };
 const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   const [state, setState] = useState<PanelState>(initialState);
   const [edits, setEdits] = useState<ProposedEdit[]>([]);
+  const [dualMode, setDualMode] = useState(false);
   const sb = useStorybookState();
   const storyId = sb.storyId;
   const designSync = useParameter<{
@@ -56,8 +57,9 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     if (designSync.tokens) payload.tokens = designSync.tokens;
     if (designSync.modeAttribute) payload.modeAttribute = designSync.modeAttribute;
     if (args && Object.keys(args).length > 0) payload.args = args as Record<string, unknown>;
+    if (dualMode) payload.dualMode = true;
     emit(EVENTS.CheckDriftRequest, payload);
-  }, [emit, storyId, designSync.target, designSync.tokens, designSync.modeAttribute, args]);
+  }, [emit, storyId, designSync.target, designSync.tokens, designSync.modeAttribute, args, dualMode]);
 
   if (!active) return null;
 
@@ -67,6 +69,14 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         <button style={styles.button} onClick={onCheck} disabled={!storyId || state.loading}>
           {state.loading ? "Checking…" : "Check drift"}
         </button>
+        <label style={styles.checkboxLabel}>
+          <input
+            type="checkbox"
+            checked={dualMode}
+            onChange={(e) => setDualMode(e.currentTarget.checked)}
+          />
+          Both modes
+        </label>
         {storyId && <span style={styles.storyId}>{storyId}</span>}
       </div>
 
@@ -205,6 +215,7 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
   },
   storyId: { color: "#7a7a7a", fontFamily: "monospace" },
+  checkboxLabel: { display: "flex", alignItems: "center", gap: 4, color: "#525252", fontSize: 12 },
   error: {
     padding: 8,
     borderRadius: 4,

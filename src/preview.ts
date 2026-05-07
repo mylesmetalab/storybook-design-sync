@@ -176,7 +176,36 @@ function readActiveMode(modeAttribute = "data-theme"): string {
   return (value || "light").toLowerCase();
 }
 
-channel.on(EVENTS.CheckDriftRequest, (payload: CheckDriftRequestPayload) => {
+/**
+ * Inject a stylesheet that disables all transitions and animations. Returns
+ * a cleanup function. Used during dual-mode toggling so the snapshot reads
+ * the *target* mode value, not a transition midpoint.
+ */
+function suspendTransitions(): () => void {
+  const style = document.createElement("style");
+  style.setAttribute("data-design-sync-suspend-transitions", "");
+  style.textContent =
+    "*,*::before,*::after{transition:none!important;animation:none!important;}";
+  document.head.appendChild(style);
+  // Force the new style to apply before the caller toggles attributes.
+  void document.documentElement.offsetHeight;
+  return () => style.remove();
+}
+
+/**
+ * Wait for the browser to flush style + layout after a CSS-variable-driving
+ * attribute change. Two rAFs ensures the next paint pass has run; reading
+ * `offsetHeight` forces the synchronous part. Even when transitions are
+ * suspended, browsers occasionally need this extra tick to settle.
+ */
+function waitForStyleFlush(): Promise<void> {
+  void document.documentElement.offsetHeight;
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+}
+
+channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) => {
   const target = findStoryRoot(payload.target, payload.storyId);
   if (!target) {
     channel.emit(EVENTS.DriftError, {
@@ -187,11 +216,48 @@ channel.on(EVENTS.CheckDriftRequest, (payload: CheckDriftRequestPayload) => {
     });
     return;
   }
+
+  const modeAttribute = payload.modeAttribute ?? "data-theme";
+
+  if (payload.dualMode) {
+    const [modeA, modeB] = payload.dualModes ?? ["light", "dark"];
+    const root = document.documentElement;
+    const original = root.getAttribute(modeAttribute);
+    const restoreTransitions = suspendTransitions();
+
+    // Pass A
+    root.setAttribute(modeAttribute, modeA);
+    await waitForStyleFlush();
+    const snapA = snapshotElement(target);
+    if (payload.tokens) snapA.bindings = { ...(snapA.bindings ?? {}), ...payload.tokens };
+
+    // Pass B
+    root.setAttribute(modeAttribute, modeB);
+    await waitForStyleFlush();
+    const snapB = snapshotElement(target);
+    if (payload.tokens) snapB.bindings = { ...(snapB.bindings ?? {}), ...payload.tokens };
+
+    // Restore
+    if (original === null) root.removeAttribute(modeAttribute);
+    else root.setAttribute(modeAttribute, original);
+    restoreTransitions();
+
+    const out: CodeSnapshotPayload = {
+      storyId: payload.storyId,
+      snapshot: snapA,
+      mode: modeA,
+      additionalSnapshots: [{ mode: modeB, snapshot: snapB }],
+    };
+    if (payload.args) out.args = payload.args;
+    channel.emit(EVENTS.CodeSnapshot, out);
+    return;
+  }
+
   const snapshot = snapshotElement(target);
   if (payload.tokens) {
     snapshot.bindings = { ...(snapshot.bindings ?? {}), ...payload.tokens };
   }
-  const mode = readActiveMode(payload.modeAttribute);
+  const mode = readActiveMode(modeAttribute);
   const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot, mode };
   if (payload.args) out.args = payload.args;
   channel.emit(EVENTS.CodeSnapshot, out);

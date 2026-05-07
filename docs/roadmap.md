@@ -5,19 +5,20 @@ The list below is the prioritized post-v0 work, one PR per item. Priority
 is by *(user value) ÷ (effort)*; items below `#5` only earn their keep
 once the tool is in daily use.
 
-| #  | Title                                              | Why                                                           |
+| #  | Title                                              | Status                                                        |
 | -- | -------------------------------------------------- | ------------------------------------------------------------- |
-| 1  | ✅ `feat: story-declared token bindings`            | Flips ~6 `flag-only` rows per story to real signal. (Downmark#13, addon v0.0.2) |
-| 1.5| ✅ `feat: inherit COMPONENT_SET bindings`           | When a variant is registered, padding/radius bindings live on the parent. Engine now fetches parent and merges. (addon v0.0.3) |
-| 2  | `feat: dual-mode drift detection`                  | Today only the rendered theme is compared; dark-mode drift is invisible. |
-| 3  | `refactor: smarter default snapshot target`        | The single-child walker fails on multi-child story roots; current escape hatch is per-story config. |
-| 4  | `feat: hash-based skip path (lastSyncedHash)`      | Re-checking unchanged stories should be ~free.                |
-| 5  | `fix: structured variant comparison`               | Multi-property variants (`State=Active, IsDirty=False`) lose meaning when collapsed to a string set. |
-| 6  | `chore: registry-seeding script`                   | Walks Figma + Storybook `index.json`, best-effort matches names. |
-| 7  | `feat: real diff for copy / props`                 | Two flag-only kinds get implementations.                      |
-| 8  | `feat: syncything engine adapter`                  | Validates the multi-engine premise.                           |
-| 9  | `feat: listen + apply proposedEdit`                | Today the addon lists `proposedEdit` events read-only; v1 routes them to a write-capable engine. |
-| 10 | `feat: CI runner`                                  | Block PRs that introduce drift.                               |
+| 1  | ✅ `feat: story-declared token bindings`            | Downmark#13, addon v0.0.2                                     |
+| 1.5| ✅ `feat: inherit COMPONENT_SET bindings`           | addon v0.0.4                                                  |
+| 2  | ✅ `feat: dual-mode drift detection (slim)`         | addon v0.0.6                                                  |
+| 2.5| ✅ `feat: dual-mode drift detection (full)`         | addon v0.0.10 — toggles theme + dual snapshot + per-mode merge |
+| 3  | ✅ `refactor: smarter default snapshot target`      | addon v0.0.7                                                  |
+| 4  | `feat: hash-based skip path (lastSyncedHash)`      | open — perf at scale                                          |
+| 5  | ✅ `fix: structured variant comparison`             | addon v0.0.5                                                  |
+| 6  | `chore: registry-seeding script`                   | open — useful when a 2nd repo joins                           |
+| 7  | ✅ `feat: real diff for copy / props`               | addon v0.0.8 (copy) + v0.0.9 (props)                          |
+| 8  | `feat: sync-pipeline engine adapter`               | open — depends on the sibling repo (replaces Syncything)       |
+| 9  | `feat: listen + apply proposedEdit`                | open — depends on a write-capable engine (8)                  |
+| 10 | `feat: CI runner`                                  | open — depends on stable contract (likely after 4)             |
 
 ## Done in #1 (the marker for each PR's "definition of done")
 

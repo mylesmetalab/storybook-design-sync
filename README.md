@@ -1,5 +1,11 @@
 # @metalab/storybook-design-sync
 
+> **Part of the design-sync system** —
+> [`addon`](https://github.com/mylesmetalab/storybook-design-sync) ·
+> [`pipeline`](https://github.com/mylesmetalab/design-sync-pipeline) ·
+> [`figma-plugin`](https://github.com/mylesmetalab/design-sync-figma-plugin) ·
+> [architecture](https://github.com/mylesmetalab/design-sync-pipeline/blob/main/ARCHITECTURE.md)
+
 A Storybook 10 addon that detects drift between a story and its Figma
 counterpart, and surfaces it as a per-dimension diff table inside a Storybook
 panel.

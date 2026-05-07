@@ -17,6 +17,70 @@ interface PanelState {
   error: string | null;
 }
 
+interface ApplyResult {
+  status: "applied" | "rejected" | "needs_review" | "error" | "no_op" | "loading";
+  message?: string;
+  diff?: string;
+}
+
+const PIPELINE_DEFAULT_URL = "http://127.0.0.1:7099";
+
+/**
+ * POST a single drift row to the design-sync-pipeline. Returns an
+ * ApplyResult that the panel renders inline. Errors (including the pipeline
+ * not running) become `status: "error"` with a human-readable message.
+ */
+async function postEdit(
+  pipelineUrl: string,
+  payload: Record<string, unknown>,
+): Promise<ApplyResult> {
+  try {
+    const res = await fetch(`${pipelineUrl}/edits`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      return { status: "error", message: `Pipeline returned ${res.status}` };
+    }
+    const data = (await res.json()) as ApplyResult;
+    return data;
+  } catch (err: unknown) {
+    const m = err instanceof Error ? err.message : String(err);
+    return {
+      status: "error",
+      message: `Pipeline unreachable (${m}). Is it running on ${pipelineUrl}?`,
+    };
+  }
+}
+
+/**
+ * Build a pipeline Edit from a drift row + story context. Returns null if
+ * the row isn't fixable via the pipeline today (e.g. dual-mode rows with
+ * map-shaped values, or non-token-binding rows).
+ */
+function buildEdit(
+  d: DimensionDiff,
+  storyId: string,
+  selector: string | undefined,
+): Record<string, unknown> | null {
+  if (d.kind !== "token-binding") return null;
+  if (typeof d.codeValue !== "string" || typeof d.figmaValue !== "string") return null;
+  if (!selector) return null;
+  return {
+    id: typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${storyId}-${d.property}-${Date.now()}`,
+    kind: "token-binding",
+    scope: "code",
+    target: { selector, property: d.property, storyId },
+    oldValue: d.codeValue,
+    newValue: d.figmaValue,
+    source: "storybook-design-sync",
+    timestamp: new Date().toISOString(),
+  };
+}
+
 const initialState: PanelState = { loading: false, report: null, error: null };
 
 const Panel: React.FC<{ active: boolean }> = ({ active }) => {
@@ -29,8 +93,10 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     target?: string;
     tokens?: Record<string, string>;
     modeAttribute?: string;
+    pipelineUrl?: string;
   }>("designSync", {}) ?? {};
   const [args] = useArgs();
+  const [applyResults, setApplyResults] = useState<Record<string, ApplyResult>>({});
 
   const emit = useChannel({
     [EVENTS.DriftReport]: (payload: DriftReportPayload) => {
@@ -82,14 +148,41 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
 
       {state.error && <div style={styles.error}>{state.error}</div>}
 
-      {state.report && <DiffTable report={state.report} />}
+      {state.report && (
+        <DiffTable
+          report={state.report}
+          applyResults={applyResults}
+          onApply={async (d, key) => {
+            const edit = buildEdit(d, storyId ?? "", designSync.target);
+            if (!edit) {
+              setApplyResults((prev) => ({
+                ...prev,
+                [key]: { status: "rejected", message: "Row not auto-fixable (need token-binding + selector)." },
+              }));
+              return;
+            }
+            setApplyResults((prev) => ({ ...prev, [key]: { status: "loading" } }));
+            const result = await postEdit(
+              designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL,
+              edit,
+            );
+            setApplyResults((prev) => ({ ...prev, [key]: result }));
+          }}
+        />
+      )}
 
       <StagedEdits edits={edits} />
     </div>
   );
 };
 
-const DiffTable: React.FC<{ report: DriftReport }> = ({ report }) => (
+interface DiffTableProps {
+  report: DriftReport;
+  applyResults: Record<string, ApplyResult>;
+  onApply: (d: DimensionDiff, key: string) => void;
+}
+
+const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply }) => (
   <div style={styles.section}>
     <h3 style={styles.h3}>
       Drift report{" "}
@@ -106,38 +199,79 @@ const DiffTable: React.FC<{ report: DriftReport }> = ({ report }) => (
           <th style={styles.th}>Code</th>
           <th style={styles.th}>Figma</th>
           <th style={styles.th}>Status</th>
+          <th style={styles.th}>Apply</th>
         </tr>
       </thead>
       <tbody>
-        {report.dimensions.map((d, i) => (
-          <Row key={`${d.kind}-${d.property}-${i}`} d={d} />
-        ))}
+        {report.dimensions.map((d, i) => {
+          const key = `${d.kind}-${d.property}-${i}`;
+          return (
+            <Row
+              key={key}
+              d={d}
+              applyResult={applyResults[key]}
+              onApply={() => onApply(d, key)}
+            />
+          );
+        })}
       </tbody>
     </table>
   </div>
 );
 
-const Row: React.FC<{ d: DimensionDiff }> = ({ d }) => (
-  <tr>
-    <td style={styles.td}>{d.kind}</td>
-    <td style={styles.td}>{d.property}</td>
-    <td style={styles.td}>
-      <ValueCell value={d.codeValue} />
-    </td>
-    <td style={styles.td}>
-      <ValueCell value={d.figmaValue} />
-      {d.modes && (
-        <div style={styles.modes}>
-          light: {d.modes.light} · dark: {d.modes.dark}
-        </div>
-      )}
-    </td>
-    <td style={{ ...styles.td, ...statusStyle(d.status) }}>
-      {d.status}
-      {d.note && <div style={styles.muted}>{d.note}</div>}
-    </td>
-  </tr>
-);
+interface RowProps {
+  d: DimensionDiff;
+  applyResult: ApplyResult | undefined;
+  onApply: () => void;
+}
+
+const Row: React.FC<RowProps> = ({ d, applyResult, onApply }) => {
+  const fixable =
+    d.kind === "token-binding" &&
+    d.status === "drift" &&
+    typeof d.codeValue === "string" &&
+    typeof d.figmaValue === "string";
+  return (
+    <tr>
+      <td style={styles.td}>{d.kind}</td>
+      <td style={styles.td}>{d.property}</td>
+      <td style={styles.td}>
+        <ValueCell value={d.codeValue} />
+      </td>
+      <td style={styles.td}>
+        <ValueCell value={d.figmaValue} />
+        {d.modes && (
+          <div style={styles.modes}>
+            light: {d.modes.light} · dark: {d.modes.dark}
+          </div>
+        )}
+      </td>
+      <td style={{ ...styles.td, ...statusStyle(d.status) }}>
+        {d.status}
+        {d.note && <div style={styles.muted}>{d.note}</div>}
+      </td>
+      <td style={styles.td}>
+        {fixable ? (
+          <button
+            style={styles.applyButton}
+            onClick={onApply}
+            disabled={applyResult?.status === "loading"}
+          >
+            {applyResult?.status === "loading" ? "…" : applyResult?.status === "applied" ? "✓ applied" : "Apply"}
+          </button>
+        ) : (
+          <span style={styles.muted}>—</span>
+        )}
+        {applyResult && applyResult.status !== "loading" && applyResult.status !== "applied" && (
+          <div style={styles.applyMessage}>
+            <code>{applyResult.status}</code>
+            {applyResult.message && <div>{applyResult.message}</div>}
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+};
 
 const ValueCell: React.FC<{ value: unknown }> = ({ value }) => {
   if (value === null || value === undefined) return <span style={styles.muted}>—</span>;
@@ -216,6 +350,15 @@ const styles: Record<string, React.CSSProperties> = {
   },
   storyId: { color: "#7a7a7a", fontFamily: "monospace" },
   checkboxLabel: { display: "flex", alignItems: "center", gap: 4, color: "#525252", fontSize: 12 },
+  applyButton: {
+    padding: "2px 8px",
+    fontSize: 11,
+    borderRadius: 3,
+    border: "1px solid #d4d4d4",
+    background: "#fff",
+    cursor: "pointer",
+  },
+  applyMessage: { color: "#7a7a7a", fontSize: 11, marginTop: 4 },
   error: {
     padding: 8,
     borderRadius: 4,

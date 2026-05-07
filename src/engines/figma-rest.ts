@@ -70,6 +70,8 @@ interface FigmaVariableCollection {
 class FigmaRestEngine implements Engine {
   readonly name = "figma-rest";
   private readonly pat: string | undefined;
+  /** Cache of `node_id → containing_frame.nodeId` per fileKey. */
+  private readonly parentMaps = new Map<string, Map<string, string>>();
 
   constructor(ctx: EngineContext) {
     this.pat = ctx.figmaPat;
@@ -82,7 +84,7 @@ class FigmaRestEngine implements Engine {
       );
     }
     const { fileKey, nodeId } = input.nodeRef;
-    const node = await this.fetchNode(fileKey, nodeId);
+    const node = await this.fetchNodeWithInheritedBindings(fileKey, nodeId);
     const variables = await this.fetchLocalVariables(fileKey).catch(() => null);
 
     const dimensions: DimensionDiff[] = [];
@@ -110,6 +112,28 @@ class FigmaRestEngine implements Engine {
 
   // ---- HTTP ---------------------------------------------------------------
 
+  /**
+   * Fetch the registered node and, if it is a COMPONENT inside a COMPONENT_SET,
+   * merge the parent's `boundVariables` underneath the variant's so inherited
+   * padding/radius bindings don't read as `flag-only`. Variant overrides win.
+   */
+  private async fetchNodeWithInheritedBindings(
+    fileKey: string,
+    nodeId: string,
+  ): Promise<FigmaNode> {
+    const node = await this.fetchNode(fileKey, nodeId);
+    if (node.type !== "COMPONENT") return node;
+
+    const parents = await this.fetchComponentParentsMap(fileKey).catch(() => null);
+    const parentId = parents?.get(nodeId);
+    if (!parentId) return node;
+
+    const parent = await this.fetchNode(fileKey, parentId).catch(() => null);
+    if (!parent || parent.type !== "COMPONENT_SET") return node;
+
+    return mergeInheritedBindings(node, parent);
+  }
+
   private async fetchNode(fileKey: string, nodeId: string): Promise<FigmaNode> {
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/nodes?ids=${encodeURIComponent(nodeId)}`;
     const res = await fetch(url, { headers: this.headers() });
@@ -122,6 +146,35 @@ class FigmaRestEngine implements Engine {
       throw new Error(`[design-sync] Figma node ${nodeId} not found in ${fileKey}.`);
     }
     return entry.document;
+  }
+
+  /**
+   * Build a `componentNodeId → containing_frame.nodeId` map from the file's
+   * components endpoint. Cached per fileKey.
+   *
+   * Returns an empty map on 403/404 (e.g. PAT scope insufficient) — callers
+   * fall back to no inheritance, which matches v0 behavior.
+   */
+  private async fetchComponentParentsMap(fileKey: string): Promise<Map<string, string>> {
+    const cached = this.parentMaps.get(fileKey);
+    if (cached) return cached;
+    const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/components`;
+    const res = await fetch(url, { headers: this.headers() });
+    if (!res.ok) {
+      const empty = new Map<string, string>();
+      this.parentMaps.set(fileKey, empty);
+      return empty;
+    }
+    const data = (await res.json()) as {
+      meta?: { components?: Array<{ node_id: string; containing_frame?: { nodeId?: string } }> };
+    };
+    const map = new Map<string, string>();
+    for (const c of data.meta?.components ?? []) {
+      const parent = c.containing_frame?.nodeId;
+      if (parent) map.set(c.node_id, parent);
+    }
+    this.parentMaps.set(fileKey, map);
+    return map;
   }
 
   private async fetchLocalVariables(fileKey: string): Promise<FigmaLocalVariablesResponse | null> {
@@ -366,6 +419,30 @@ class FigmaRestEngine implements Engine {
 
 // ---- helpers --------------------------------------------------------------
 
+/**
+ * Merge a parent COMPONENT_SET's boundVariables underneath the variant's,
+ * so any padding/radius/etc. binding declared on the parent shows up when
+ * the variant doesn't override it. Variant wins on conflicts.
+ *
+ * `rectangleCornerRadii` is a nested map keyed by corner; merge per-corner
+ * rather than wholesale-replacing.
+ */
+function mergeInheritedBindings(variant: FigmaNode, parent: FigmaNode): FigmaNode {
+  const parentBV = parent.boundVariables ?? {};
+  const variantBV = variant.boundVariables ?? {};
+  const merged: Record<string, FigmaVariableAlias | FigmaVariableAlias[]> = { ...parentBV };
+  for (const [k, v] of Object.entries(variantBV)) {
+    if (k === "rectangleCornerRadii") {
+      const parentCorners = (parentBV.rectangleCornerRadii ?? {}) as Record<string, FigmaVariableAlias>;
+      const variantCorners = v as unknown as Record<string, FigmaVariableAlias>;
+      merged.rectangleCornerRadii = { ...parentCorners, ...variantCorners } as unknown as FigmaVariableAlias;
+    } else {
+      merged[k] = v;
+    }
+  }
+  return { ...variant, boundVariables: merged };
+}
+
 function parsePx(value: string | undefined): number | null {
   if (!value) return null;
   const m = /^(-?\d+(?:\.\d+)?)\s*px$/.exec(value);
@@ -442,37 +519,70 @@ interface FigmaBinding {
   modes?: ModeAwareValue;
 }
 
+/**
+ * Map Figma's camelCase boundVariable keys to the CSS-property keys the
+ * snapshot collects, so the diff joins instead of producing two rows.
+ *
+ * `rectangleCornerRadii` is a nested map and is expanded separately below.
+ */
+const FIGMA_KEY_TO_CSS: Record<string, string> = {
+  paddingTop: "padding-top",
+  paddingRight: "padding-right",
+  paddingBottom: "padding-bottom",
+  paddingLeft: "padding-left",
+  itemSpacing: "gap",
+  fills: "background-color",
+};
+
+const FIGMA_CORNER_TO_CSS: Record<string, string> = {
+  RECTANGLE_TOP_LEFT_CORNER_RADIUS: "border-top-left-radius",
+  RECTANGLE_TOP_RIGHT_CORNER_RADIUS: "border-top-right-radius",
+  RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS: "border-bottom-left-radius",
+  RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS: "border-bottom-right-radius",
+};
+
 function collectFigmaBindings(
   node: FigmaNode,
   variables: FigmaLocalVariablesResponse | null,
 ): Record<string, FigmaBinding> {
   const out: Record<string, FigmaBinding> = {};
   const raw = node.boundVariables ?? {};
-  for (const [property, alias] of Object.entries(raw)) {
-    const aliases = Array.isArray(alias) ? alias : [alias];
-    const first = aliases[0];
-    if (!first) continue;
-    const v = variables?.meta.variables[first.id];
+
+  const setBinding = (property: string, alias: FigmaVariableAlias): void => {
+    const v = variables?.meta.variables[alias.id];
     if (!v) {
-      out[property] = { tokenName: first.id };
-      continue;
+      out[property] = { tokenName: alias.id };
+      return;
     }
     const resolved =
-      v.resolvedType === "COLOR" ? resolveColorVariable(first.id, variables!) : undefined;
+      v.resolvedType === "COLOR" ? resolveColorVariable(alias.id, variables!) : undefined;
     const binding: FigmaBinding = { tokenName: v.name };
     if (resolved?.modes) binding.modes = resolved.modes;
     out[property] = binding;
-  }
-  // Also surface fill-bound variables under "background-color".
-  const fillAlias = node.fills?.[0]?.boundVariables?.color;
-  if (fillAlias && variables) {
-    const v = variables.meta.variables[fillAlias.id];
-    if (v) {
-      const resolved = resolveColorVariable(fillAlias.id, variables);
-      const binding: FigmaBinding = { tokenName: v.name };
-      if (resolved?.modes) binding.modes = resolved.modes;
-      out["background-color"] = binding;
+  };
+
+  for (const [figmaKey, alias] of Object.entries(raw)) {
+    if (figmaKey === "rectangleCornerRadii") {
+      // Expand the nested per-corner map into individual CSS-prop keys.
+      const corners = alias as unknown as Record<string, FigmaVariableAlias>;
+      for (const [cornerKey, cornerAlias] of Object.entries(corners)) {
+        const cssProp = FIGMA_CORNER_TO_CSS[cornerKey];
+        if (cssProp && cornerAlias) setBinding(cssProp, cornerAlias);
+      }
+      continue;
     }
+    const aliases = Array.isArray(alias) ? alias : [alias];
+    const first = aliases[0];
+    if (!first) continue;
+    const cssProp = FIGMA_KEY_TO_CSS[figmaKey] ?? figmaKey;
+    setBinding(cssProp, first);
+  }
+
+  // Fall back to fills[0].boundVariables.color when the node has no top-level
+  // `fills` boundVariable (some shapes carry it on the paint instead).
+  if (!out["background-color"]) {
+    const fillAlias = node.fills?.[0]?.boundVariables?.color;
+    if (fillAlias) setBinding("background-color", fillAlias);
   }
   return out;
 }

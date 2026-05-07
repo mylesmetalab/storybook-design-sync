@@ -7,7 +7,8 @@ once the tool is in daily use.
 
 | #  | Title                                              | Why                                                           |
 | -- | -------------------------------------------------- | ------------------------------------------------------------- |
-| 1  | `feat: story-declared token bindings`              | Flips ~6 `flag-only` rows per story to real signal.           |
+| 1  | ✅ `feat: story-declared token bindings`            | Flips ~6 `flag-only` rows per story to real signal. (Downmark#13, addon v0.0.2) |
+| 1.5| ✅ `feat: inherit COMPONENT_SET bindings`           | When a variant is registered, padding/radius bindings live on the parent. Engine now fetches parent and merges. (addon v0.0.3) |
 | 2  | `feat: dual-mode drift detection`                  | Today only the rendered theme is compared; dark-mode drift is invisible. |
 | 3  | `refactor: smarter default snapshot target`        | The single-child walker fails on multi-child story roots; current escape hatch is per-story config. |
 | 4  | `feat: hash-based skip path (lastSyncedHash)`      | Re-checking unchanged stories should be ~free.                |

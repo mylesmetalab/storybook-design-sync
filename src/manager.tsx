@@ -295,8 +295,20 @@ const Row: React.FC<RowProps> = ({ d, codeResult, figmaResult, onApply }) => {
       <td style={styles.td}>
         {fixable ? (
           <div style={styles.applyButtons}>
-            <ApplyButton label="→ code" scope="code" result={codeResult} onClick={() => onApply("code")} />
-            <ApplyButton label="→ figma" scope="figma" result={figmaResult} onClick={() => onApply("figma")} />
+            <ApplyButton
+              label="Update code"
+              scope="code"
+              result={codeResult}
+              onClick={() => onApply("code")}
+              title={`Write ${stringifyValue(d.figmaValue)} to code (Figma value wins)`}
+            />
+            <ApplyButton
+              label="Update Figma"
+              scope="figma"
+              result={figmaResult}
+              onClick={() => onApply("figma")}
+              title={`Write ${stringifyValue(d.codeValue)} to Figma (code value wins)`}
+            />
           </div>
         ) : (
           <span style={styles.muted}>—</span>
@@ -311,15 +323,21 @@ interface ApplyButtonProps {
   scope: ApplyScope;
   result: ApplyResult | undefined;
   onClick: () => void;
+  title: string;
 }
 
-const ApplyButton: React.FC<ApplyButtonProps> = ({ label, scope, result, onClick }) => {
+const ApplyButton: React.FC<ApplyButtonProps> = ({ label, scope, result, onClick, title }) => {
   const loading = result?.status === "loading";
   const applied = result?.status === "applied";
-  const text = loading ? "…" : applied ? "✓" : label;
+  const text = loading ? "…" : applied ? `✓ ${label}` : label;
   return (
     <div style={styles.applyButtonGroup}>
-      <button style={styles.applyButton} onClick={onClick} disabled={loading} title={`Apply ${scope === "code" ? "→ code" : "→ Figma"}`}>
+      <button
+        style={{ ...styles.applyButton, ...(applied ? styles.applyButtonApplied : {}) }}
+        onClick={onClick}
+        disabled={loading}
+        title={title}
+      >
         {text}
       </button>
       {result && !loading && !applied && (
@@ -331,6 +349,12 @@ const ApplyButton: React.FC<ApplyButtonProps> = ({ label, scope, result, onClick
     </div>
   );
 };
+
+function stringifyValue(value: unknown): string {
+  if (value === null || value === undefined) return "(empty)";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+}
 
 const ValueCell: React.FC<{ value: unknown }> = ({ value }) => {
   if (value === null || value === undefined) return <span style={styles.muted}>—</span>;
@@ -412,13 +436,20 @@ const styles: Record<string, React.CSSProperties> = {
   applyButtons: { display: "flex", flexDirection: "column", gap: 4 },
   applyButtonGroup: { display: "flex", flexDirection: "column", gap: 2 },
   applyButton: {
-    padding: "2px 8px",
+    padding: "3px 10px",
     fontSize: 11,
     borderRadius: 3,
     border: "1px solid #d4d4d4",
     background: "#fff",
     cursor: "pointer",
-    minWidth: 56,
+    minWidth: 100,
+    textAlign: "left" as const,
+    whiteSpace: "nowrap" as const,
+  },
+  applyButtonApplied: {
+    background: "#e6f4ea",
+    borderColor: "#86c79a",
+    color: "#0a7d3e",
   },
   applyMessage: { color: "#7a7a7a", fontSize: 11, marginTop: 2 },
   error: {

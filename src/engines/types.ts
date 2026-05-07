@@ -29,6 +29,13 @@ export interface CheckDriftInput {
   nodeRef: NodeRef;
   /** Optional snapshot of the rendered code-side story. */
   snapshot?: CodeSnapshot;
+  /**
+   * Active mode name (e.g. "light", "dark") read from the rendered DOM.
+   * The engine uses this to pick matching values when resolving Figma
+   * variables, so dark-mode comparisons aren't always made against the
+   * file's default (Light) mode.
+   */
+  mode?: string;
 }
 
 export interface Engine {

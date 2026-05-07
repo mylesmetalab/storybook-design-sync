@@ -16,7 +16,7 @@ interface ChannelLike {
 
 export async function registerServerChannel(channel: ChannelLike): Promise<ChannelLike> {
   channel.on(EVENTS.CodeSnapshot, async (payload: unknown) => {
-    const { storyId, snapshot } = payload as CodeSnapshotPayload;
+    const { storyId, snapshot, mode } = payload as CodeSnapshotPayload;
     try {
       const config = await loadConfig();
       const registry = await loadRegistry(config.registryPath);
@@ -34,11 +34,13 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       if (process.env.FIGMA_PAT) ctx.figmaPat = process.env.FIGMA_PAT;
       const engine = resolveEngine(config.engine, ctx);
 
-      const report = await engine.checkDrift({
+      const checkInput: import("./engines/types.js").CheckDriftInput = {
         storyId,
         nodeRef: { fileKey: registry.fileKey || config.fileKey, nodeId: entry.nodeId },
-        snapshot,
-      });
+      };
+      if (snapshot) checkInput.snapshot = snapshot;
+      if (mode) checkInput.mode = mode;
+      const report = await engine.checkDrift(checkInput);
 
       channel.emit(EVENTS.DriftReport, { report });
     } catch (err: unknown) {

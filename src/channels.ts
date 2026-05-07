@@ -27,11 +27,19 @@ export interface CheckDriftRequestPayload {
   target?: string;
   /** Code-side token bindings declared by the story (CSS prop → token name). */
   tokens?: Record<string, string>;
+  /** Element attribute (on `<html>`) that carries the active mode name. */
+  modeAttribute?: string;
 }
 
 export interface CodeSnapshotPayload {
   storyId: string;
   snapshot: CodeSnapshot;
+  /**
+   * The active mode name as read from the rendered DOM (e.g. "light", "dark").
+   * The engine uses this to pick the matching value when resolving Figma
+   * variables, instead of always defaulting to the file's default mode.
+   */
+  mode?: string;
 }
 
 export interface DriftReportPayload {

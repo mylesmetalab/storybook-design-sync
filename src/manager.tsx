@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { addons, types, useChannel, useParameter, useStorybookState } from "storybook/manager-api";
+import { addons, types, useArgs, useChannel, useParameter, useStorybookState } from "storybook/manager-api";
 import {
   ADDON_ID,
   PANEL_ID,
@@ -29,6 +29,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     tokens?: Record<string, string>;
     modeAttribute?: string;
   }>("designSync", {}) ?? {};
+  const [args] = useArgs();
 
   const emit = useChannel({
     [EVENTS.DriftReport]: (payload: DriftReportPayload) => {
@@ -54,8 +55,9 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     if (designSync.target) payload.target = designSync.target;
     if (designSync.tokens) payload.tokens = designSync.tokens;
     if (designSync.modeAttribute) payload.modeAttribute = designSync.modeAttribute;
+    if (args && Object.keys(args).length > 0) payload.args = args as Record<string, unknown>;
     emit(EVENTS.CheckDriftRequest, payload);
-  }, [emit, storyId, designSync.target, designSync.tokens, designSync.modeAttribute]);
+  }, [emit, storyId, designSync.target, designSync.tokens, designSync.modeAttribute, args]);
 
   if (!active) return null;
 

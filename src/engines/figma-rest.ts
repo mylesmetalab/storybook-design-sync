@@ -95,10 +95,10 @@ class FigmaRestEngine implements Engine {
     dimensions.push(...this.diffTokenBindings(node, snapshot, variables, activeMode));
     dimensions.push(...this.diffVariantSet(node, snapshot));
     dimensions.push(...this.diffCopy(node, snapshot));
+    dimensions.push(...this.diffProps(node, input.args));
 
     // Reserved kinds — engine fills as flag-only placeholders.
     dimensions.push(
-      this.placeholder("props", "story.props"),
       this.placeholder("structure", "story.structure"),
       this.placeholder("motion", "story.motion"),
     );
@@ -411,6 +411,61 @@ class FigmaRestEngine implements Engine {
   }
 
   /**
+   * Compare Figma's variant properties (parsed from the registered variant
+   * node's name) against Storybook story args. One row per Figma property.
+   *
+   * Matching strategy:
+   *   - Falsy/default Figma values (false/default/off/no/none) → match by
+   *     absence (no arg expected to carry that value)
+   *   - "True" → look for an arg whose name resembles the Figma property
+   *     (with `is`/`has` prefixes stripped) and is truthy
+   *   - Anything else → look for any arg whose stringified value equals
+   *     the Figma value (case-insensitive)
+   *
+   * If the registered node isn't a variant (or no args were provided),
+   * emits a single flag-only row.
+   */
+  private diffProps(node: FigmaNode, args: Record<string, unknown> | undefined): DimensionDiff[] {
+    if (!args) {
+      return [this.placeholder("props", "story.args (no args sent)")];
+    }
+    if (node.type !== "COMPONENT" || !node.name.includes("=")) {
+      return [
+        {
+          kind: "props",
+          property: "story.args",
+          codeValue: args,
+          figmaValue: null,
+          status: "flag-only",
+          note: "Registered node has no Figma variant properties to compare against.",
+        },
+      ];
+    }
+
+    const figmaProps = parseVariantName(node.name);
+    return Object.entries(figmaProps).map(([prop, value]): DimensionDiff => {
+      if (isFalsyVariantValue(value)) {
+        return {
+          kind: "props",
+          property: prop,
+          codeValue: null,
+          figmaValue: value,
+          status: "match",
+          note: "Falsy/default — no arg expected.",
+        };
+      }
+      const matchingArg = findMatchingArg(args, prop, value);
+      return {
+        kind: "props",
+        property: prop,
+        codeValue: matchingArg ? { [matchingArg[0]]: matchingArg[1] } : null,
+        figmaValue: value,
+        status: matchingArg ? "match" : "drift",
+      };
+    });
+  }
+
+  /**
    * Compare each Figma TEXT-node's `characters` against visible text in the
    * rendered story. We allow case-insensitive substring containment (a
    * Figma label "Send" still matches a code button reading "Send →").
@@ -491,6 +546,57 @@ function mergeInheritedBindings(variant: FigmaNode, parent: FigmaNode): FigmaNod
     }
   }
   return { ...variant, boundVariables: merged };
+}
+
+/**
+ * Find a Storybook arg that matches a Figma variant property using three
+ * strategies, in priority order:
+ *   1. Direct value match — any arg whose stringified value equals the
+ *      Figma value (case-insensitive). Catches "variant: 'accent'" → "Accent".
+ *   2. Property-name match for booleans — when Figma value is "True", any
+ *      arg whose name matches the Figma property name (with optional
+ *      is/has prefix) and is truthy. Catches "isDirty: true" → IsDirty=True.
+ *   3. Value-as-name match for boolean states — any arg whose name (with
+ *      is/has prefix stripped) equals the Figma value, and is truthy.
+ *      Catches "isActive: true" → State=Active.
+ *
+ * Returns the matching [key, value] tuple or null.
+ */
+function findMatchingArg(
+  args: Record<string, unknown>,
+  figmaProp: string,
+  figmaValue: string,
+): [string, unknown] | null {
+  const lowerValue = figmaValue.toLowerCase();
+  const isBoolish = lowerValue === "true" || lowerValue === "false";
+  const propClean = figmaProp.toLowerCase().replace(/[-_]/g, "");
+  const propStripped = propClean.replace(/^(is|has)/, "");
+
+  // For boolean Figma values, strategy 2 (property-name) runs first because
+  // strategy 1 would match the FIRST truthy arg regardless of whose property
+  // it represents. For non-boolean values, strategy 1 (direct value match) is
+  // the most specific signal.
+  if (isBoolish) {
+    if (lowerValue === "true") {
+      for (const [k, v] of Object.entries(args)) {
+        if (!v) continue;
+        const kClean = k.toLowerCase().replace(/[-_]/g, "");
+        if (kClean === propClean || kClean === propStripped) return [k, v];
+      }
+    }
+  } else {
+    for (const [k, v] of Object.entries(args)) {
+      if (String(v).toLowerCase() === lowerValue) return [k, v];
+    }
+  }
+
+  // Strategy 3: value-as-name (Figma "Active" → code `isActive: true`)
+  for (const [k, v] of Object.entries(args)) {
+    if (!v) continue;
+    const kClean = k.toLowerCase().replace(/[-_]/g, "").replace(/^(is|has)/, "");
+    if (kClean === lowerValue) return [k, v];
+  }
+  return null;
 }
 
 /**

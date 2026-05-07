@@ -29,6 +29,8 @@ export interface CheckDriftRequestPayload {
   tokens?: Record<string, string>;
   /** Element attribute (on `<html>`) that carries the active mode name. */
   modeAttribute?: string;
+  /** Storybook story args at request time (used by the props dimension). */
+  args?: Record<string, unknown>;
 }
 
 export interface CodeSnapshotPayload {
@@ -40,6 +42,8 @@ export interface CodeSnapshotPayload {
    * variables, instead of always defaulting to the file's default mode.
    */
   mode?: string;
+  /** Storybook story args, relayed from the manager. Used by `props` diff. */
+  args?: Record<string, unknown>;
 }
 
 export interface DriftReportPayload {

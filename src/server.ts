@@ -16,7 +16,7 @@ interface ChannelLike {
 
 export async function registerServerChannel(channel: ChannelLike): Promise<ChannelLike> {
   channel.on(EVENTS.CodeSnapshot, async (payload: unknown) => {
-    const { storyId, snapshot, mode } = payload as CodeSnapshotPayload;
+    const { storyId, snapshot, mode, args } = payload as CodeSnapshotPayload;
     try {
       const config = await loadConfig();
       const registry = await loadRegistry(config.registryPath);
@@ -40,6 +40,7 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       };
       if (snapshot) checkInput.snapshot = snapshot;
       if (mode) checkInput.mode = mode;
+      if (args) checkInput.args = args;
       const report = await engine.checkDrift(checkInput);
 
       channel.emit(EVENTS.DriftReport, { report });

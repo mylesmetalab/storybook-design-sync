@@ -26,12 +26,16 @@ const SNAPSHOT_PROPERTIES = [
  * Find the element that actually represents the rendered story.
  *
  * Resolution order:
- *   1. Element with `data-design-sync-target` (explicit opt-in)
- *   2. Storybook story root (`#storybook-root`) — drill down through any
- *      single-child wrappers Storybook/Preact decorators introduce
- *   3. null
+ *   1. Explicit `parameters.designSync.target` selector (most specific)
+ *   2. Element with `data-design-sync-target` (explicit opt-in)
+ *   3. Class-name match: descendant whose class name (with hyphens stripped)
+ *      starts with the kebab-collapsed component segment of the storyId
+ *      (e.g. "atoms-iconbutton--accent" → look for ".icon-button" or
+ *      ".iconbutton" on a descendant). Skips Storybook decorator wrappers
+ *      automatically.
+ *   4. Deepest single-child walker fallback
  */
-function findStoryRoot(selector?: string): HTMLElement | null {
+function findStoryRoot(selector?: string, storyId?: string): HTMLElement | null {
   if (selector) {
     const el = document.querySelector<HTMLElement>(selector);
     if (el) return el;
@@ -42,11 +46,68 @@ function findStoryRoot(selector?: string): HTMLElement | null {
   const root = document.getElementById("storybook-root");
   if (!root) return null;
 
+  if (storyId) {
+    const matched = findByComponentSegment(root, storyId);
+    if (matched) return matched;
+  }
+
   let el: HTMLElement = root;
   while (el.children.length === 1 && el.firstElementChild instanceof HTMLElement) {
     el = el.firstElementChild;
   }
   return el;
+}
+
+/**
+ * Walk descendants and return the first one whose classList carries a class
+ * matching the component segment of the storyId.
+ *
+ * Component segment is the last hyphen-separated piece of the part before "--":
+ *   "atoms-iconbutton--accent" → "iconbutton"
+ *   "organisms-ai-popover--default" → "popover"   (false hit on multi-word)
+ *
+ * To compensate for SB collapsing component names ("IconButton" → "iconbutton"),
+ * we strip hyphens from candidate class names before comparing — so
+ * `.icon-button` matches "iconbutton" and `.ai-popover` matches "aipopover".
+ *
+ * Returns null if no match — caller falls back to the single-child walker.
+ */
+function findByComponentSegment(root: HTMLElement, storyId: string): HTMLElement | null {
+  const beforeDoubleDash = storyId.split("--")[0] ?? "";
+  // Use the WHOLE pre-double-dash segment (collapsed) to handle both
+  // "atoms-iconbutton" and "organisms-aipopover" without losing the "ai" prefix.
+  // We try increasingly specific matches: full pre-segment, then just the last word.
+  const candidates = new Set<string>();
+  const collapsed = beforeDoubleDash.replace(/-/g, "").toLowerCase();
+  if (collapsed) candidates.add(collapsed);
+  const lastSegment = beforeDoubleDash.split("-").pop()?.toLowerCase();
+  if (lastSegment) candidates.add(lastSegment);
+
+  // Prefer the deepest match so we land on the leafmost component element
+  // (`.icon-button.icon-button--accent` rather than a wrapping container).
+  let best: HTMLElement | null = null;
+  let bestDepth = -1;
+
+  function walk(el: HTMLElement, depth: number): void {
+    for (const cls of Array.from(el.classList)) {
+      const stripped = cls.replace(/-/g, "").toLowerCase();
+      for (const candidate of candidates) {
+        if (stripped === candidate || stripped.startsWith(candidate)) {
+          if (depth > bestDepth) {
+            best = el;
+            bestDepth = depth;
+          }
+          break;
+        }
+      }
+    }
+    for (const child of Array.from(el.children)) {
+      if (child instanceof HTMLElement) walk(child, depth + 1);
+    }
+  }
+
+  walk(root, 0);
+  return best;
 }
 
 function snapshotElement(el: HTMLElement): CodeSnapshot {
@@ -102,7 +163,7 @@ function readActiveMode(modeAttribute = "data-theme"): string {
 }
 
 channel.on(EVENTS.CheckDriftRequest, (payload: CheckDriftRequestPayload) => {
-  const target = findStoryRoot(payload.target);
+  const target = findStoryRoot(payload.target, payload.storyId);
   if (!target) {
     channel.emit(EVENTS.DriftError, {
       storyId: payload.storyId,

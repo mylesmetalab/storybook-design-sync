@@ -125,6 +125,20 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
     }
   }
 
+  // Visible text content: split innerText on whitespace-y separators and
+  // keep non-empty trimmed strings. Used by the `copy` dimension to check
+  // that each Figma TEXT-node character string appears somewhere in the
+  // rendered story.
+  const rawText = el.innerText ?? "";
+  const texts = Array.from(
+    new Set(
+      rawText
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0),
+    ),
+  );
+
   // Variant signals — collect both styles consumers actually use:
   //  - BEM modifiers:    ".icon-button--accent"  → suffix "accent"
   //  - Adjacent classes: ".file-item.active"     → "active" (any class
@@ -143,7 +157,7 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
   }
   const variantClasses = [...candidates];
 
-  return { styles, bindings, variantClasses };
+  return { styles, bindings, variantClasses, texts };
 }
 
 const channel = addons.getChannel();

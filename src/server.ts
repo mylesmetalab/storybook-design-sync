@@ -16,6 +16,25 @@ interface ChannelLike {
 }
 
 export async function registerServerChannel(channel: ChannelLike): Promise<ChannelLike> {
+  channel.on(EVENTS.ListRegisteredRequest, async () => {
+    try {
+      const config = await loadConfig();
+      const registry = await loadRegistry(config.registryPath);
+      const stories = Object.entries(registry.stories).map(([storyId, entry]) => ({
+        storyId,
+        nodeId: entry.nodeId,
+      }));
+      channel.emit(EVENTS.RegisteredStories, {
+        stories,
+        fileKey: registry.fileKey || config.fileKey,
+      });
+    } catch (err: unknown) {
+      // Emit an empty list rather than failing silently — the manager UI
+      // can render "no stories registered" sensibly.
+      channel.emit(EVENTS.RegisteredStories, { stories: [], fileKey: "" });
+    }
+  });
+
   channel.on(EVENTS.CodeSnapshot, async (payload: unknown) => {
     const { storyId, snapshot, mode, args, additionalSnapshots } = payload as CodeSnapshotPayload;
     try {

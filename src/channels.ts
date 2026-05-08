@@ -15,6 +15,13 @@ export const EVENTS = {
   /** Server → manager: error during a check. */
   DriftError: "design-sync:driftError",
   /**
+   * Manager → server: list every story registered in .design-sync/registry.json.
+   * Used by the bulk-check flow.
+   */
+  ListRegisteredRequest: "design-sync:listRegisteredRequest",
+  /** Server → manager: registered stories with their Figma node ids. */
+  RegisteredStories: "design-sync:registeredStories",
+  /**
    * Sibling addons → this addon. v0 listens & lists read-only.
    * Reserved contract for the inspector ↔ sync handshake in v1.
    */
@@ -70,6 +77,16 @@ export interface DriftReportPayload {
 export interface DriftErrorPayload {
   storyId: string;
   message: string;
+}
+
+export interface RegisteredStoryEntry {
+  storyId: string;
+  nodeId: string;
+}
+
+export interface RegisteredStoriesPayload {
+  stories: RegisteredStoryEntry[];
+  fileKey: string;
 }
 
 /**

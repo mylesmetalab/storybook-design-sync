@@ -39,9 +39,16 @@ interface BulkState {
 }
 
 interface ApplyResult {
-  status: "applied" | "rejected" | "needs_review" | "error" | "no_op" | "loading";
+  status: "applied" | "rejected" | "needs_review" | "error" | "no_op" | "loading" | "undone";
   message?: string;
   diff?: string;
+  /**
+   * On a successful apply, we stash the inverse edit (oldValue ⇄ newValue
+   * swapped) so we can offer a one-click Undo. Cleared once the user clicks
+   * undo (status → "undone") or after a manual Check drift refreshes the
+   * row.
+   */
+  inverse?: Record<string, unknown>;
 }
 
 const PIPELINE_DEFAULT_URL = "http://127.0.0.1:7099";
@@ -340,7 +347,27 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
               designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL,
               edit,
             );
+            // On success, stash the inverse edit so the row can offer Undo.
+            if (result.status === "applied") {
+              result.inverse = inverseEdit(edit);
+            }
             setApplyResults((prev) => ({ ...prev, [key + ":" + scope]: result }));
+          }}
+          onUndo={async (key, scope, inverse) => {
+            setApplyResults((prev) => ({ ...prev, [key + ":" + scope]: { status: "loading" } }));
+            const result = await postEdit(
+              designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL,
+              inverse,
+            );
+            // After undo, the row is back to its original drift state.
+            // Reflect that as `undone` so users see the action took effect.
+            setApplyResults((prev) => ({
+              ...prev,
+              [key + ":" + scope]:
+                result.status === "applied" || result.status === "no_op"
+                  ? { status: "undone", message: "Reverted." }
+                  : result,
+            }));
           }}
         />
       )}
@@ -362,9 +389,10 @@ interface DiffTableProps {
   report: DriftReport;
   applyResults: Record<string, ApplyResult>;
   onApply: (d: DimensionDiff, key: string, scope: ApplyScope) => void;
+  onUndo: (key: string, scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply }) => (
+const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, onUndo }) => (
   <div style={styles.section}>
     <h3 style={styles.h3}>
       Drift report{" "}
@@ -397,6 +425,7 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply }) 
               codeResult={applyResults[`${key}:code`]}
               figmaResult={applyResults[`${key}:figma`]}
               onApply={(scope) => onApply(d, key, scope)}
+              onUndo={(scope, inverse) => onUndo(key, scope, inverse)}
             />
           );
         })}
@@ -410,9 +439,10 @@ interface RowProps {
   codeResult: ApplyResult | undefined;
   figmaResult: ApplyResult | undefined;
   onApply: (scope: ApplyScope) => void;
+  onUndo: (scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-const Row: React.FC<RowProps> = ({ d, codeResult, figmaResult, onApply }) => {
+const Row: React.FC<RowProps> = ({ d, codeResult, figmaResult, onApply, onUndo }) => {
   const fixable =
     d.kind === "token-binding" &&
     d.status === "drift" &&
@@ -445,6 +475,7 @@ const Row: React.FC<RowProps> = ({ d, codeResult, figmaResult, onApply }) => {
               scope="code"
               result={codeResult}
               onClick={() => onApply("code")}
+              onUndo={(inverse) => onUndo("code", inverse)}
               title={`Write ${stringifyValue(d.figmaValue)} to code (Figma value wins)`}
             />
             <ApplyButton
@@ -452,6 +483,7 @@ const Row: React.FC<RowProps> = ({ d, codeResult, figmaResult, onApply }) => {
               scope="figma"
               result={figmaResult}
               onClick={() => onApply("figma")}
+              onUndo={(inverse) => onUndo("figma", inverse)}
               title={`Write ${stringifyValue(d.codeValue)} to Figma (code value wins)`}
             />
           </div>
@@ -468,24 +500,41 @@ interface ApplyButtonProps {
   scope: ApplyScope;
   result: ApplyResult | undefined;
   onClick: () => void;
+  onUndo?: (inverse: Record<string, unknown>) => void;
   title: string;
 }
 
-const ApplyButton: React.FC<ApplyButtonProps> = ({ label, scope, result, onClick, title }) => {
+const ApplyButton: React.FC<ApplyButtonProps> = ({ label, scope, result, onClick, onUndo, title }) => {
   const loading = result?.status === "loading";
   const applied = result?.status === "applied";
-  const text = loading ? "…" : applied ? `✓ ${label}` : label;
+  const undone = result?.status === "undone";
+  const text = loading
+    ? "…"
+    : applied
+    ? `✓ ${label}`
+    : undone
+    ? `↶ ${label}`
+    : label;
+  const buttonStyle = {
+    ...styles.applyButton,
+    ...(applied ? styles.applyButtonApplied : {}),
+    ...(undone ? styles.applyButtonUndone : {}),
+  };
   return (
     <div style={styles.applyButtonGroup}>
-      <button
-        style={{ ...styles.applyButton, ...(applied ? styles.applyButtonApplied : {}) }}
-        onClick={onClick}
-        disabled={loading}
-        title={title}
-      >
+      <button style={buttonStyle} onClick={onClick} disabled={loading} title={title}>
         {text}
       </button>
-      {result && !loading && !applied && (
+      {applied && result?.inverse && onUndo && (
+        <button
+          style={styles.undoButton}
+          onClick={() => onUndo(result.inverse!)}
+          title="Revert this change"
+        >
+          ↶ undo
+        </button>
+      )}
+      {result && !loading && !applied && !undone && (
         <div style={styles.applyMessage}>
           <code>{result.status}</code>
           {result.message && <div>{result.message}</div>}
@@ -494,6 +543,26 @@ const ApplyButton: React.FC<ApplyButtonProps> = ({ label, scope, result, onClick
     </div>
   );
 };
+
+/**
+ * Build the inverse of an Edit by swapping oldValue and newValue.
+ * Generates a fresh id so the pipeline treats it as a separate operation
+ * (preserves engine idempotency and audit trails).
+ */
+function inverseEdit(edit: Record<string, unknown>): Record<string, unknown> {
+  const newId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${edit.id}-undo-${Date.now()}`;
+  return {
+    ...edit,
+    id: newId,
+    oldValue: edit.newValue,
+    newValue: edit.oldValue,
+    timestamp: new Date().toISOString(),
+    source: `${edit.source ?? "design-sync"}:undo`,
+  };
+}
 
 function stringifyValue(value: unknown): string {
   if (value === null || value === undefined) return "(empty)";
@@ -843,6 +912,21 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#e6f4ea",
     borderColor: "#86c79a",
     color: "#0a7d3e",
+  },
+  applyButtonUndone: {
+    background: "#fff8e6",
+    borderColor: "#e0c178",
+    color: "#856404",
+  },
+  undoButton: {
+    padding: "1px 6px",
+    fontSize: 10,
+    borderRadius: 3,
+    border: "1px dashed #d4d4d4",
+    background: "transparent",
+    color: "#7a7a7a",
+    cursor: "pointer",
+    marginTop: 2,
   },
   applyMessage: { color: "#7a7a7a", fontSize: 11, marginTop: 2 },
   error: {

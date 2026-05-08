@@ -179,6 +179,13 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     [EVENTS.RegisteredStories]: (payload: RegisteredStoriesPayload) => {
       void runBulk(payload.stories);
     },
+    // Bridge: storybook-design-inspector emits its own STYLE_UPDATE events
+    // when a user live-tweaks a token. Normalize → ProposedEdit and surface
+    // in our Staged edits panel for review/push.
+    "storybook/design-inspector/style-update": (raw: unknown) => {
+      const edit = normalizeInspectorPayload(raw, storyId);
+      if (edit) setEdits((prev) => [edit, ...prev].slice(0, 50));
+    },
   });
 
   // Reset when the story changes.
@@ -338,7 +345,15 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         />
       )}
 
-      <StagedEdits edits={edits} />
+      <StagedEdits
+        edits={edits}
+        applyResults={applyResults}
+        pipelineUrl={designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL}
+        target={designSync.target}
+        onResult={(key, result) =>
+          setApplyResults((prev) => ({ ...prev, [key]: result }))
+        }
+      />
     </div>
   );
 };
@@ -487,6 +502,53 @@ function stringifyValue(value: unknown): string {
 }
 
 /**
+ * Normalize a `storybook/design-inspector/style-update` payload into our
+ * ProposedEdit shape. The inspector's payload structure isn't strictly
+ * typed (different sections of the inspector emit slightly different
+ * shapes), so we duck-type — pull out whatever fields we can find, fall
+ * back to "unknown" for the rest. Better to surface a partial edit the
+ * user can review than to drop it because of a missing field.
+ */
+function normalizeInspectorPayload(raw: unknown, storyId: string | undefined): ProposedEdit | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+
+  const property =
+    (typeof r.property === "string" && r.property) ||
+    (typeof r.cssProperty === "string" && r.cssProperty) ||
+    (typeof r.name === "string" && r.name) ||
+    null;
+  if (!property) return null;
+
+  const newValue =
+    (typeof r.value === "string" && r.value) ||
+    (typeof r.newValue === "string" && r.newValue) ||
+    (typeof r.token === "string" && r.token) ||
+    "";
+  const oldValue =
+    (typeof r.previousValue === "string" && r.previousValue) ||
+    (typeof r.oldValue === "string" && r.oldValue) ||
+    "";
+
+  const kind: ProposedEdit["kind"] =
+    typeof r.token === "string" || /color|size|space|radius|font/i.test(property)
+      ? "token-value"
+      : "token-value";
+
+  const edit: ProposedEdit = {
+    kind,
+    scope: "component",
+    property,
+    oldValue,
+    newValue,
+    source: "design-inspector",
+    timestamp: new Date().toISOString(),
+  };
+  if (storyId) edit.storyId = storyId;
+  return edit;
+}
+
+/**
  * Navigate Storybook to a story, wait for it to render, then fire a
  * single Check drift and resolve when the report comes back. Used by
  * the bulk-check loop. 8-second timeout per story.
@@ -557,53 +619,106 @@ const ValueCell: React.FC<{ value: unknown }> = ({ value }) => {
   return <code>{JSON.stringify(value)}</code>;
 };
 
-const StagedEdits: React.FC<{ edits: ProposedEdit[] }> = ({ edits }) => (
-  <div style={styles.section}>
-    <h3 style={styles.h3}>
-      Staged edits (v1){" "}
-      <span style={styles.muted} title="Subscribed to design-sync:proposedEdit. Read-only in v0; v1 will route these to engines.">
-        ⓘ
-      </span>
-    </h3>
-    {edits.length === 0 ? (
-      <div style={styles.muted}>No proposed edits received on this channel yet.</div>
-    ) : (
-      <table style={styles.table}>
-        <thead>
-          <tr>
-            <th style={styles.th}>Source</th>
-            <th style={styles.th}>Kind</th>
-            <th style={styles.th}>Scope</th>
-            <th style={styles.th}>Property</th>
-            <th style={styles.th}>Old → New</th>
-            <th style={styles.th}>When</th>
-          </tr>
-        </thead>
-        <tbody>
-          {edits.map((e, i) => (
-            <tr key={i}>
-              <td style={styles.td}>{e.source}</td>
-              <td style={styles.td}>{e.kind}</td>
-              <td style={styles.td}>{e.scope}</td>
-              <td style={styles.td}>
-                <code>{e.property}</code>
-              </td>
-              <td style={styles.td}>
-                <code>{e.oldValue}</code> → <code>{e.newValue}</code>
-                {e.modes && (
-                  <div style={styles.modes}>
-                    light: {e.modes.light} · dark: {e.modes.dark}
-                  </div>
-                )}
-              </td>
-              <td style={styles.td}>{new Date(e.timestamp).toLocaleTimeString()}</td>
+interface StagedEditsProps {
+  edits: ProposedEdit[];
+  applyResults: Record<string, ApplyResult>;
+  pipelineUrl: string;
+  target: string | undefined;
+  onResult: (key: string, result: ApplyResult) => void;
+}
+
+const StagedEdits: React.FC<StagedEditsProps> = ({ edits, applyResults, pipelineUrl, target, onResult }) => {
+  const apply = useCallback(
+    async (e: ProposedEdit, i: number, scope: ApplyScope) => {
+      const key = `staged-${i}-${scope}`;
+      onResult(key, { status: "loading" });
+      const id =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `staged-${i}-${Date.now()}`;
+      const payload: Record<string, unknown> = {
+        id,
+        kind: e.kind,
+        scope,
+        target: scope === "code"
+          ? { selector: target, property: e.property, storyId: e.storyId }
+          : { property: e.property, storyId: e.storyId },
+        oldValue: e.oldValue,
+        newValue: e.newValue,
+        source: e.source,
+        timestamp: new Date().toISOString(),
+      };
+      const result = await postEdit(pipelineUrl, payload);
+      onResult(key, result);
+    },
+    [onResult, pipelineUrl, target],
+  );
+
+  return (
+    <div style={styles.section}>
+      <h3 style={styles.h3}>
+        Staged edits{" "}
+        <span style={styles.muted} title="Edits proposed by sibling addons (e.g. design-inspector live tweaks). Apply to either side via the pipeline.">
+          ⓘ
+        </span>
+      </h3>
+      {edits.length === 0 ? (
+        <div style={styles.muted}>
+          No proposed edits yet — try editing a token in the Design Inspector panel.
+        </div>
+      ) : (
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>Source</th>
+              <th style={styles.th}>Property</th>
+              <th style={styles.th}>Old → New</th>
+              <th style={styles.th}>When</th>
+              <th style={styles.th}>Apply</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    )}
-  </div>
-);
+          </thead>
+          <tbody>
+            {edits.map((e, i) => (
+              <tr key={i}>
+                <td style={styles.td}>{e.source}</td>
+                <td style={styles.td}>
+                  <code>{e.property}</code>
+                </td>
+                <td style={styles.td}>
+                  <code>{e.oldValue || "—"}</code> → <code>{e.newValue || "—"}</code>
+                  {e.modes && (
+                    <div style={styles.modes}>
+                      light: {e.modes.light} · dark: {e.modes.dark}
+                    </div>
+                  )}
+                </td>
+                <td style={styles.td}>{new Date(e.timestamp).toLocaleTimeString()}</td>
+                <td style={styles.td}>
+                  <div style={styles.applyButtons}>
+                    <ApplyButton
+                      label="Update code"
+                      scope="code"
+                      result={applyResults[`staged-${i}-code`]}
+                      onClick={() => apply(e, i, "code")}
+                      title={`Write ${e.newValue} to code`}
+                    />
+                    <ApplyButton
+                      label="Update Figma"
+                      scope="figma"
+                      result={applyResults[`staged-${i}-figma`]}
+                      onClick={() => apply(e, i, "figma")}
+                      title={`Write ${e.newValue} to Figma`}
+                    />
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+};
 
 interface BulkSummaryProps {
   bulk: BulkState;

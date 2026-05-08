@@ -10,6 +10,7 @@ import type {
   DriftReport,
   ModeAwareValue,
 } from "../dimensions/types.js";
+import { PersistentCache } from "../cache.js";
 
 const FIGMA_API = "https://api.figma.com/v1";
 
@@ -108,9 +109,14 @@ class FigmaRestEngine implements Engine {
    * the user just modified pick up the change.
    */
   private readonly nodeCache = new TtlCache<FigmaNode>(30_000);
+  /** File metadata (lastModified) — 60s TTL. Used for cross-restart cache invalidation. */
+  private readonly fileMetaCache = new TtlCache<string>(60_000);
+  /** Persistent on-disk cache (gitignored sidecar). Optional. */
+  private readonly persistentCache: PersistentCache | null;
 
   constructor(ctx: EngineContext) {
     this.pat = ctx.figmaPat;
+    this.persistentCache = ctx.cachePath ? new PersistentCache(ctx.cachePath) : null;
   }
 
   async checkDrift(input: CheckDriftInput): Promise<DriftReport> {
@@ -123,6 +129,28 @@ class FigmaRestEngine implements Engine {
     const startedAt = Date.now();
     const hitsBefore = this.variablesCache.hits + this.nodeCache.hits;
     const missesBefore = this.variablesCache.misses + this.nodeCache.misses;
+
+    // Persistent-cache short-circuit. Cheap path: fetch only file metadata
+    // (one tiny HTTP call, cached for 60s) and check whether the cached
+    // report is still valid for this story + snapshot. Hit → return
+    // immediately, no node/variables fetch, no engine work.
+    if (this.persistentCache) {
+      await this.persistentCache.load();
+      const fileLastModified = await this.fetchFileLastModified(fileKey).catch(() => "");
+      const cached = this.persistentCache.get(input.storyId, fileLastModified, input.snapshot);
+      if (cached) {
+        return {
+          ...cached,
+          generatedAt: new Date().toISOString(),
+          timing: {
+            totalMs: Date.now() - startedAt,
+            figmaFetchMs: 0,
+            cacheHits: 1,
+            cacheMisses: 0,
+          },
+        };
+      }
+    }
 
     const figmaT0 = Date.now();
     const node = await this.fetchNodeWithInheritedBindings(fileKey, nodeId);
@@ -158,7 +186,36 @@ class FigmaRestEngine implements Engine {
       },
     };
     if (activeMode) report.mode = activeMode;
+
+    // Stash for future short-circuits.
+    if (this.persistentCache) {
+      const fileLastModified = await this.fetchFileLastModified(fileKey).catch(() => "");
+      if (fileLastModified) {
+        this.persistentCache.set(input.storyId, fileLastModified, input.snapshot, report);
+      }
+    }
+
     return report;
+  }
+
+  /**
+   * Fetch the file's `lastModified` timestamp via the lightest possible
+   * call. `depth=1` keeps the response small; only the top-level metadata
+   * is needed. Cached in-process for 60s — bulk runs share one fetch.
+   */
+  private async fetchFileLastModified(fileKey: string): Promise<string> {
+    const cached = this.fileMetaCache.get(fileKey);
+    if (cached) return cached;
+    const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}?depth=1`;
+    const res = await fetch(url, { headers: this.headers() });
+    if (!res.ok) {
+      // Swallow — without a metadata fetch we just skip the persistent cache.
+      return "";
+    }
+    const data = (await res.json()) as { lastModified?: string };
+    const value = data.lastModified ?? "";
+    if (value) this.fileMetaCache.set(fileKey, value);
+    return value;
   }
 
   // ---- HTTP ---------------------------------------------------------------

@@ -54,6 +54,12 @@ export interface Engine {
 export interface EngineContext {
   /** PAT or other secret material; engines must never log this. */
   figmaPat?: string;
+  /**
+   * Absolute path to the persistent cache sidecar. When set, engines may
+   * use it to short-circuit re-checks of unchanged stories. Optional —
+   * engines should work without it.
+   */
+  cachePath?: string;
 }
 
 export type EngineFactory = (ctx: EngineContext) => Engine;

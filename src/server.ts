@@ -50,7 +50,10 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         return;
       }
 
-      const ctx: { figmaPat?: string } = {};
+      const { resolve: resolvePath } = await import("node:path");
+      const ctx: { figmaPat?: string; cachePath?: string } = {
+        cachePath: resolvePath(process.cwd(), ".design-sync/cache.json"),
+      };
       if (process.env.FIGMA_PAT) ctx.figmaPat = process.env.FIGMA_PAT;
       const engine = resolveEngine(config.engine, ctx);
 

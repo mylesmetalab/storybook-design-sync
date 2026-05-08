@@ -67,11 +67,47 @@ interface FigmaVariableCollection {
   defaultModeId: string;
 }
 
+/**
+ * Tiny TTL cache. Process-lifetime by default; entries expire after `ttlMs`.
+ * Used to amortize Figma REST calls across a bulk drift check (86 stories
+ * pointing at the same Figma file should not re-fetch variables 86 times).
+ */
+class TtlCache<V> {
+  private readonly store = new Map<string, { value: V; expires: number }>();
+  constructor(private readonly ttlMs: number) {}
+  get(key: string): V | undefined {
+    const entry = this.store.get(key);
+    if (!entry) return undefined;
+    if (entry.expires < Date.now()) {
+      this.store.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+  set(key: string, value: V): void {
+    this.store.set(key, { value, expires: Date.now() + this.ttlMs });
+  }
+  size(): number {
+    return this.store.size;
+  }
+}
+
 class FigmaRestEngine implements Engine {
   readonly name = "figma-rest";
   private readonly pat: string | undefined;
   /** Cache of `node_id → containing_frame.nodeId` per fileKey. */
   private readonly parentMaps = new Map<string, Map<string, string>>();
+  /**
+   * Variables are stable for the lifetime of a working session; 5 min TTL
+   * is generous and saves ~200ms per drift check during bulk runs.
+   */
+  private readonly variablesCache = new TtlCache<FigmaLocalVariablesResponse>(5 * 60_000);
+  /**
+   * Per-node fetches are cached for 30s — long enough that a bulk run
+   * fully benefits, short enough that single-story checks against a node
+   * the user just modified pick up the change.
+   */
+  private readonly nodeCache = new TtlCache<FigmaNode>(30_000);
 
   constructor(ctx: EngineContext) {
     this.pat = ctx.figmaPat;
@@ -138,6 +174,10 @@ class FigmaRestEngine implements Engine {
   }
 
   private async fetchNode(fileKey: string, nodeId: string): Promise<FigmaNode> {
+    const cacheKey = `${fileKey}:${nodeId}`;
+    const cached = this.nodeCache.get(cacheKey);
+    if (cached) return cached;
+
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/nodes?ids=${encodeURIComponent(nodeId)}`;
     const res = await fetch(url, { headers: this.headers() });
     if (!res.ok) {
@@ -148,6 +188,7 @@ class FigmaRestEngine implements Engine {
     if (!entry) {
       throw new Error(`[design-sync] Figma node ${nodeId} not found in ${fileKey}.`);
     }
+    this.nodeCache.set(cacheKey, entry.document);
     return entry.document;
   }
 
@@ -181,13 +222,18 @@ class FigmaRestEngine implements Engine {
   }
 
   private async fetchLocalVariables(fileKey: string): Promise<FigmaLocalVariablesResponse | null> {
+    const cached = this.variablesCache.get(fileKey);
+    if (cached) return cached;
+
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/variables/local`;
     const res = await fetch(url, { headers: this.headers() });
     if (res.status === 404 || res.status === 403) return null; // not enterprise / no access
     if (!res.ok) {
       throw new Error(`[design-sync] Figma variables ${res.status} for ${fileKey}.`);
     }
-    return (await res.json()) as FigmaLocalVariablesResponse;
+    const data = (await res.json()) as FigmaLocalVariablesResponse;
+    this.variablesCache.set(fileKey, data);
+    return data;
   }
 
   private headers(): Record<string, string> {

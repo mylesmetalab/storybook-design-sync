@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useCallback } from "react";
-import { addons, types, useArgs, useChannel, useParameter, useStorybookState } from "storybook/manager-api";
+import React, { useEffect, useState, useCallback, useRef } from "react";
+import { addons, types, useArgs, useChannel, useParameter, useStorybookApi, useStorybookState } from "storybook/manager-api";
 import {
   ADDON_ID,
   PANEL_ID,
@@ -8,13 +8,34 @@ import {
   type DriftReportPayload,
   type DriftErrorPayload,
   type ProposedEdit,
+  type RegisteredStoriesPayload,
+  type RegisteredStoryEntry,
 } from "./channels.js";
 import type { DriftReport, DimensionDiff } from "./dimensions/types.js";
+
+const STORY_RENDERED_EVENT = "storyRendered";
 
 interface PanelState {
   loading: boolean;
   report: DriftReport | null;
   error: string | null;
+}
+
+interface BulkRow {
+  storyId: string;
+  status: "pending" | "running" | "done" | "error";
+  match: number;
+  drift: number;
+  flagOnly: number;
+  durationMs: number;
+  error?: string;
+}
+
+interface BulkState {
+  running: boolean;
+  startedAt: number;
+  finishedAt?: number;
+  rows: BulkRow[];
 }
 
 interface ApplyResult {
@@ -125,16 +146,38 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   }>("designSync", {}) ?? {};
   const [args] = useArgs();
   const [applyResults, setApplyResults] = useState<Record<string, ApplyResult>>({});
+  const [bulk, setBulk] = useState<BulkState | null>(null);
+  const sbApi = useStorybookApi();
+  const pendingResolversRef = useRef<{
+    resolve: (report: DriftReport) => void;
+    reject: (err: string) => void;
+    storyId: string;
+  } | null>(null);
 
   const emit = useChannel({
     [EVENTS.DriftReport]: (payload: DriftReportPayload) => {
+      const pending = pendingResolversRef.current;
+      if (pending && pending.storyId === payload.report.storyId) {
+        pending.resolve(payload.report);
+        pendingResolversRef.current = null;
+        return;
+      }
       setState({ loading: false, report: payload.report, error: null });
     },
     [EVENTS.DriftError]: (payload: DriftErrorPayload) => {
+      const pending = pendingResolversRef.current;
+      if (pending && pending.storyId === payload.storyId) {
+        pending.reject(payload.message);
+        pendingResolversRef.current = null;
+        return;
+      }
       setState({ loading: false, report: null, error: payload.message });
     },
     [EVENTS.ProposedEdit]: (edit: ProposedEdit) => {
       setEdits((prev) => [edit, ...prev].slice(0, 50));
+    },
+    [EVENTS.RegisteredStories]: (payload: RegisteredStoriesPayload) => {
+      void runBulk(payload.stories);
     },
   });
 
@@ -155,6 +198,80 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     emit(EVENTS.CheckDriftRequest, payload);
   }, [emit, storyId, designSync.target, designSync.tokens, designSync.modeAttribute, args, dualMode]);
 
+  /**
+   * Bulk Check drift — iterates every registered story, navigates Storybook
+   * to each, waits for STORY_RENDERED, fires the existing single-story
+   * Check drift, aggregates results into a summary table.
+   *
+   * Per-story timeout: 8s (gives slow stories room without hanging the loop).
+   * Errors don't abort — they just mark that row as `error` and continue.
+   */
+  const runBulk = useCallback(async (stories: RegisteredStoryEntry[]) => {
+    if (stories.length === 0) {
+      setBulk({ running: false, startedAt: Date.now(), finishedAt: Date.now(), rows: [] });
+      return;
+    }
+    const startedAt = Date.now();
+    setBulk({
+      running: true,
+      startedAt,
+      rows: stories.map((s) => ({
+        storyId: s.storyId,
+        status: "pending",
+        match: 0,
+        drift: 0,
+        flagOnly: 0,
+        durationMs: 0,
+      })),
+    });
+
+    for (let i = 0; i < stories.length; i++) {
+      const entry = stories[i]!;
+      setBulk((prev) =>
+        prev ? { ...prev, rows: prev.rows.map((r, j) => (j === i ? { ...r, status: "running" } : r)) } : prev,
+      );
+
+      const t0 = Date.now();
+      try {
+        const report = await checkOneStory(entry.storyId, sbApi, emit, pendingResolversRef);
+        const counts = countRows(report);
+        const durationMs = Date.now() - t0;
+        setBulk((prev) =>
+          prev
+            ? {
+                ...prev,
+                rows: prev.rows.map((r, j) =>
+                  j === i
+                    ? { ...r, status: "done", durationMs, match: counts.match, drift: counts.drift, flagOnly: counts.flagOnly }
+                    : r,
+                ),
+              }
+            : prev,
+        );
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        const durationMs = Date.now() - t0;
+        setBulk((prev) =>
+          prev
+            ? {
+                ...prev,
+                rows: prev.rows.map((r, j) =>
+                  j === i ? { ...r, status: "error", durationMs, error: message } : r,
+                ),
+              }
+            : prev,
+        );
+      }
+    }
+
+    setBulk((prev) => (prev ? { ...prev, running: false, finishedAt: Date.now() } : prev));
+  }, [emit, sbApi]);
+
+  const onCheckAll = useCallback(() => {
+    setBulk(null);
+    emit(EVENTS.ListRegisteredRequest);
+  }, [emit]);
+
   if (!active) return null;
 
   return (
@@ -162,6 +279,14 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       <div style={styles.header}>
         <button style={styles.button} onClick={onCheck} disabled={!storyId || state.loading}>
           {state.loading ? "Checking…" : "Check drift"}
+        </button>
+        <button
+          style={styles.button}
+          onClick={onCheckAll}
+          disabled={bulk?.running ?? false}
+          title="Iterate every registered story and produce a summary"
+        >
+          {bulk?.running ? "Running…" : "Check all"}
         </button>
         <label style={styles.checkboxLabel}>
           <input
@@ -173,6 +298,8 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         </label>
         {storyId && <span style={styles.storyId}>{storyId}</span>}
       </div>
+
+      {bulk && <BulkSummary bulk={bulk} onSelect={(id) => sbApi?.selectStory(id)} />}
 
       {state.error && <div style={styles.error}>{state.error}</div>}
 
@@ -356,6 +483,71 @@ function stringifyValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/**
+ * Navigate Storybook to a story, wait for it to render, then fire a
+ * single Check drift and resolve when the report comes back. Used by
+ * the bulk-check loop. 8-second timeout per story.
+ */
+function checkOneStory(
+  storyId: string,
+  sbApi: { selectStory: (id: string) => void } | undefined,
+  emit: (event: string, ...args: unknown[]) => void,
+  pendingRef: React.MutableRefObject<{
+    resolve: (report: DriftReport) => void;
+    reject: (err: string) => void;
+    storyId: string;
+  } | null>,
+): Promise<DriftReport> {
+  return new Promise<DriftReport>((resolve, reject) => {
+    if (!sbApi) {
+      reject("Storybook API unavailable");
+      return;
+    }
+    const timeout = setTimeout(() => {
+      pendingRef.current = null;
+      reject(`Timed out (>8s) on ${storyId}`);
+    }, 8000);
+
+    pendingRef.current = {
+      storyId,
+      resolve: (r) => {
+        clearTimeout(timeout);
+        resolve(r);
+      },
+      reject: (e) => {
+        clearTimeout(timeout);
+        reject(e);
+      },
+    };
+
+    // Storybook will fire STORY_RENDERED once the new story is up. We
+    // listen via the addons channel.
+    const channel = addons.getChannel();
+    const onRendered = (renderedId: string): void => {
+      if (renderedId !== storyId) return;
+      channel.off(STORY_RENDERED_EVENT, onRendered);
+      // Emit the request — the snapshot will come from this freshly-rendered
+      // story. parameters.designSync.target/tokens are read by the preview
+      // from the active story's parameters, so we don't need to pass them.
+      const payload: CheckDriftRequestPayload = { storyId };
+      emit(EVENTS.CheckDriftRequest, payload);
+    };
+    channel.on(STORY_RENDERED_EVENT, onRendered);
+
+    sbApi.selectStory(storyId);
+  });
+}
+
+function countRows(report: DriftReport): { match: number; drift: number; flagOnly: number } {
+  const counts = { match: 0, drift: 0, flagOnly: 0 };
+  for (const d of report.dimensions) {
+    if (d.status === "match") counts.match++;
+    else if (d.status === "drift") counts.drift++;
+    else if (d.status === "flag-only") counts.flagOnly++;
+  }
+  return counts;
+}
+
 const ValueCell: React.FC<{ value: unknown }> = ({ value }) => {
   if (value === null || value === undefined) return <span style={styles.muted}>—</span>;
   if (typeof value === "string") return <code>{value}</code>;
@@ -410,6 +602,84 @@ const StagedEdits: React.FC<{ edits: ProposedEdit[] }> = ({ edits }) => (
   </div>
 );
 
+interface BulkSummaryProps {
+  bulk: BulkState;
+  onSelect: (storyId: string) => void;
+}
+
+const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
+  const total = bulk.rows.reduce(
+    (acc, r) => ({
+      match: acc.match + r.match,
+      drift: acc.drift + r.drift,
+      flagOnly: acc.flagOnly + r.flagOnly,
+    }),
+    { match: 0, drift: 0, flagOnly: 0 },
+  );
+  const done = bulk.rows.filter((r) => r.status === "done" || r.status === "error").length;
+  const elapsed = (bulk.finishedAt ?? Date.now()) - bulk.startedAt;
+
+  return (
+    <div style={styles.section}>
+      <h3 style={styles.h3}>
+        Bulk check{" "}
+        <span style={styles.muted}>
+          — {done}/{bulk.rows.length} stories · {(elapsed / 1000).toFixed(1)}s ·{" "}
+          <span style={{ color: "#0a7d3e" }}>{total.match} match</span>{" "}
+          · <span style={{ color: "#b91c1c" }}>{total.drift} drift</span>{" "}
+          · {total.flagOnly} flag-only
+        </span>
+      </h3>
+      <table style={styles.table}>
+        <thead>
+          <tr>
+            <th style={styles.th}>Story</th>
+            <th style={styles.th}>Match</th>
+            <th style={styles.th}>Drift</th>
+            <th style={styles.th}>Flag-only</th>
+            <th style={styles.th}>Time</th>
+            <th style={styles.th}>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {bulk.rows.map((r) => (
+            <tr key={r.storyId}>
+              <td style={styles.td}>
+                <a
+                  href="#"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onSelect(r.storyId);
+                  }}
+                  style={styles.storyLink}
+                >
+                  <code>{r.storyId}</code>
+                </a>
+              </td>
+              <td style={{ ...styles.td, color: "#0a7d3e" }}>{r.match || "—"}</td>
+              <td style={{ ...styles.td, color: r.drift > 0 ? "#b91c1c" : "#7a7a7a", fontWeight: r.drift > 0 ? 600 : 400 }}>
+                {r.drift || "—"}
+              </td>
+              <td style={{ ...styles.td, color: "#7a7a7a" }}>{r.flagOnly || "—"}</td>
+              <td style={styles.td}>{r.durationMs ? `${r.durationMs}ms` : "—"}</td>
+              <td style={styles.td}>
+                {r.status === "pending" && <span style={styles.muted}>queued</span>}
+                {r.status === "running" && <span>running…</span>}
+                {r.status === "done" && <span style={{ color: "#0a7d3e" }}>✓</span>}
+                {r.status === "error" && (
+                  <span style={{ color: "#b91c1c" }} title={r.error}>
+                    ✕ {r.error?.slice(0, 40)}
+                  </span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
 function statusStyle(status: DimensionDiff["status"]): React.CSSProperties {
   switch (status) {
     case "match":
@@ -432,6 +702,7 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
   },
   storyId: { color: "#7a7a7a", fontFamily: "monospace" },
+  storyLink: { color: "#1f2937", textDecoration: "none" },
   checkboxLabel: { display: "flex", alignItems: "center", gap: 4, color: "#525252", fontSize: 12 },
   applyButtons: { display: "flex", flexDirection: "column", gap: 4 },
   applyButtonGroup: { display: "flex", flexDirection: "column", gap: 2 },

@@ -7,32 +7,38 @@
 > [architecture](https://github.com/mylesmetalab/design-sync-pipeline/blob/main/ARCHITECTURE.md)
 
 A Storybook 10 addon that detects drift between a story and its Figma
-counterpart, and surfaces it as a per-dimension diff table inside a Storybook
-panel.
+counterpart, surfaces it as a per-dimension diff table, and lets you fix
+drift in either direction with one click.
 
-The addon is the *surface*. The thing that computes drift is an *engine*
-behind a small adapter interface. v0 ships one engine — `figma-rest` — that
-calls the Figma REST API directly. Future engines (a local daemon called
-Syncything; a SQLite-backed tool called Baluarte) slot in by implementing
-the same interface.
+The addon is the *surface*. Drift detection runs through an engine adapter
+(today: `figma-rest`); writes go through the [`design-sync-pipeline`](https://github.com/mylesmetalab/design-sync-pipeline)
+orchestrator + engines (CSS token swap for code, [Figma plugin](https://github.com/mylesmetalab/design-sync-figma-plugin)
+for binding writes, REST for variable values).
 
-## What v0 does
+## What it does
 
 - Adds a **Sync** panel to every story
-- "Check drift" button runs the configured engine for the current story
-- Renders a table: `dimension | property | code value | figma value | status`
-- Real diffs for: `token-value` (color, padding, radius), `token-binding`,
-  `variant-set`
-- Reserved as `flag-only` placeholders: `copy`, `props`, `structure`,
-  `motion` (engines fill in over time)
-- Listens for `design-sync:proposedEdit` events from sibling addons (e.g.
-  `storybook-design-inspector`) and shows them read-only in a "Staged edits
-  (v1)" section. v0 never writes — anywhere.
+- **Check drift** runs the engine for the current story
+- **Check all** runs every registered story sequentially with a summary
+  table (match / drift / flag-only counts, perf stats, click to drill in)
+- Diff dimensions: `token-value` (color, padding, radius), `token-binding`,
+  `variant-set`, `copy`, `props`
+- Reserved as `flag-only` placeholders: `structure`, `motion` (no engine yet)
+- **Apply** column on each fixable row with `Update code` / `Update Figma`
+  buttons. Clicks POST to the pipeline; success shows a `↶ undo` for
+  one-click revert.
+- **Both modes** checkbox runs dual-mode comparison; rows where light
+  and dark agree are still fixable.
+- Listens for `storybook-design-inspector` `STYLE_UPDATE` events and
+  surfaces them in the **Staged edits** panel with the same `Update code` /
+  `Update Figma` actions.
+- Persistent cache (`.design-sync/cache.json`) — repeat bulk runs after
+  no Figma changes return cached reports in <10ms each.
 
 ## Install
 
 ```sh
-npm i -D @metalab/storybook-design-sync
+npm i -D mylesmetalab/storybook-design-sync#v0.0.21
 ```
 
 In `.storybook/main.ts`:

@@ -85,6 +85,23 @@ async function postEdit(
 type ApplyScope = "code" | "figma";
 
 /**
+ * If a value is a `{light, dark}` map produced by dual-mode merging,
+ * flatten it to a single string when both modes agree. If modes disagree,
+ * return null — that's a per-mode edit which v0 doesn't model.
+ */
+function flattenDualModeValue(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const v = value as Record<string, unknown>;
+    const modeValues = Object.values(v).filter((x): x is string => typeof x === "string");
+    if (modeValues.length === 0) return null;
+    const first = modeValues[0]!;
+    if (modeValues.every((m) => m === first)) return first;
+  }
+  return null;
+}
+
+/**
  * Build a pipeline Edit from a drift row + story context. The scope
  * decides which side wins on this drift:
  *
@@ -92,6 +109,11 @@ type ApplyScope = "code" | "figma";
  *   - scope=figma  → "Figma is wrong, change Figma to match code" (oldValue=figma, newValue=code).
  *                    Requires `nodeId` (passed in) and is processed by the
  *                    Figma plugin worker via the pipeline's queue.
+ *
+ * Dual-mode rows (codeValue/figmaValue are `{light, dark}` maps) are
+ * flattened when both modes agree on each side. If they disagree, the
+ * row needs per-mode handling which is deferred to a future PR; we
+ * return null with a sentinel that the caller surfaces as a message.
  *
  * Returns null if the row isn't fixable in the requested direction.
  */
@@ -103,7 +125,9 @@ function buildEdit(
   nodeId: string | undefined,
 ): Record<string, unknown> | null {
   if (d.kind !== "token-binding") return null;
-  if (typeof d.codeValue !== "string" || typeof d.figmaValue !== "string") return null;
+  const codeFlat = flattenDualModeValue(d.codeValue);
+  const figmaFlat = flattenDualModeValue(d.figmaValue);
+  if (codeFlat === null || figmaFlat === null) return null;
   if (scope === "code" && !selector) return null;
   if (scope === "figma" && !nodeId) return null;
 
@@ -118,20 +142,19 @@ function buildEdit(
       kind: "token-binding",
       scope: "code",
       target: { selector, property: d.property, storyId },
-      oldValue: d.codeValue,
-      newValue: d.figmaValue,
+      oldValue: codeFlat,
+      newValue: figmaFlat,
       source: "storybook-design-sync",
       timestamp: new Date().toISOString(),
     };
   }
-  // figma scope: swap old/new — Figma is being asked to match code.
   return {
     id,
     kind: "token-binding",
     scope: "figma",
     target: { nodeId, property: d.property, storyId },
-    oldValue: d.figmaValue,
-    newValue: d.codeValue,
+    oldValue: figmaFlat,
+    newValue: codeFlat,
     source: "storybook-design-sync",
     timestamp: new Date().toISOString(),
   };
@@ -446,8 +469,8 @@ const Row: React.FC<RowProps> = ({ d, codeResult, figmaResult, onApply, onUndo }
   const fixable =
     d.kind === "token-binding" &&
     d.status === "drift" &&
-    typeof d.codeValue === "string" &&
-    typeof d.figmaValue === "string";
+    flattenDualModeValue(d.codeValue) !== null &&
+    flattenDualModeValue(d.figmaValue) !== null;
   return (
     <tr>
       <td style={styles.td}>{d.kind}</td>

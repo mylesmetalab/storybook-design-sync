@@ -69,9 +69,12 @@ await Promise.all([
   }),
 ]);
 
-// Emit .d.ts via tsc
+// Emit .d.ts via tsc.
+// `shell: true` is load-bearing for Windows — without it spawnSync can't
+// resolve `npx` (it would only find `npx.cmd`). CI runs on windows-latest.
 const { spawnSync } = await import("node:child_process");
 const r = spawnSync("npx", ["tsc", "-p", "tsconfig.json", "--emitDeclarationOnly"], {
   stdio: "inherit",
+  shell: true,
 });
 if (r.status !== 0) process.exit(r.status ?? 1);

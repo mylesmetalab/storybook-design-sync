@@ -356,6 +356,9 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply }) 
       <span style={styles.muted}>
         — node {report.nodeId}
         {report.mode ? ` · mode: ${report.mode}` : ""} · {new Date(report.generatedAt).toLocaleTimeString()}
+        {report.timing && (
+          <> · {report.timing.totalMs}ms (fetch {report.timing.figmaFetchMs}ms · {report.timing.cacheHits} cache hits / {report.timing.cacheMisses} misses)</>
+        )}
       </span>
     </h3>
     <table style={styles.table}>
@@ -613,9 +616,12 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
       match: acc.match + r.match,
       drift: acc.drift + r.drift,
       flagOnly: acc.flagOnly + r.flagOnly,
+      totalEngineMs: acc.totalEngineMs + r.durationMs,
     }),
-    { match: 0, drift: 0, flagOnly: 0 },
+    { match: 0, drift: 0, flagOnly: 0, totalEngineMs: 0 },
   );
+  const completed = bulk.rows.filter((r) => r.status === "done").length;
+  const avgMs = completed > 0 ? Math.round(total.totalEngineMs / completed) : 0;
   const done = bulk.rows.filter((r) => r.status === "done" || r.status === "error").length;
   const elapsed = (bulk.finishedAt ?? Date.now()) - bulk.startedAt;
 
@@ -624,7 +630,8 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
       <h3 style={styles.h3}>
         Bulk check{" "}
         <span style={styles.muted}>
-          — {done}/{bulk.rows.length} stories · {(elapsed / 1000).toFixed(1)}s ·{" "}
+          — {done}/{bulk.rows.length} stories · {(elapsed / 1000).toFixed(1)}s
+          {avgMs > 0 ? ` · avg ${avgMs}ms/story` : ""} ·{" "}
           <span style={{ color: "#0a7d3e" }}>{total.match} match</span>{" "}
           · <span style={{ color: "#b91c1c" }}>{total.drift} drift</span>{" "}
           · {total.flagOnly} flag-only

@@ -26,6 +26,17 @@ export interface DimensionDiff {
   note?: string;
 }
 
+export interface DriftTiming {
+  /** Total wall time the engine spent on this report. */
+  totalMs: number;
+  /** Figma REST fetch time (excludes any cache hits). */
+  figmaFetchMs: number;
+  /** Number of cache hits during this check (variables, nodes, components). */
+  cacheHits: number;
+  /** Number of cache misses (i.e. real HTTP fetches that happened). */
+  cacheMisses: number;
+}
+
 export interface DriftReport {
   storyId: string;
   nodeId: string;
@@ -33,4 +44,6 @@ export interface DriftReport {
   generatedAt: string;
   /** Active mode name used for comparison (e.g. "light", "dark"). */
   mode?: string;
+  /** Timing + cache stats — shown in the panel for visibility into perf. */
+  timing?: DriftTiming;
 }

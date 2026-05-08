@@ -74,21 +74,21 @@ interface FigmaVariableCollection {
  */
 class TtlCache<V> {
   private readonly store = new Map<string, { value: V; expires: number }>();
+  hits = 0;
+  misses = 0;
   constructor(private readonly ttlMs: number) {}
   get(key: string): V | undefined {
     const entry = this.store.get(key);
-    if (!entry) return undefined;
-    if (entry.expires < Date.now()) {
-      this.store.delete(key);
+    if (!entry || entry.expires < Date.now()) {
+      if (entry) this.store.delete(key);
+      this.misses++;
       return undefined;
     }
+    this.hits++;
     return entry.value;
   }
   set(key: string, value: V): void {
     this.store.set(key, { value, expires: Date.now() + this.ttlMs });
-  }
-  size(): number {
-    return this.store.size;
   }
 }
 
@@ -120,8 +120,14 @@ class FigmaRestEngine implements Engine {
       );
     }
     const { fileKey, nodeId } = input.nodeRef;
+    const startedAt = Date.now();
+    const hitsBefore = this.variablesCache.hits + this.nodeCache.hits;
+    const missesBefore = this.variablesCache.misses + this.nodeCache.misses;
+
+    const figmaT0 = Date.now();
     const node = await this.fetchNodeWithInheritedBindings(fileKey, nodeId);
     const variables = await this.fetchLocalVariables(fileKey).catch(() => null);
+    const figmaFetchMs = Date.now() - figmaT0;
 
     const dimensions: DimensionDiff[] = [];
     const snapshot = input.snapshot;
@@ -144,6 +150,12 @@ class FigmaRestEngine implements Engine {
       nodeId,
       dimensions,
       generatedAt: new Date().toISOString(),
+      timing: {
+        totalMs: Date.now() - startedAt,
+        figmaFetchMs,
+        cacheHits: this.variablesCache.hits + this.nodeCache.hits - hitsBefore,
+        cacheMisses: this.variablesCache.misses + this.nodeCache.misses - missesBefore,
+      },
     };
     if (activeMode) report.mode = activeMode;
     return report;

@@ -27,18 +27,29 @@ for how the pieces fit together.
 | 9d | ✅ Apply scope toggle (code vs figma)              | addon v0.0.12                                                  |
 | 9e | ✅ Clearer Apply labels ("Update code"/"…Figma")   | addon v0.0.13                                                  |
 
+## Shipped (continued)
+
+| #  | Title                                              | Where                                                          |
+| -- | -------------------------------------------------- | -------------------------------------------------------------- |
+| S1 | ✅ Bulk Check drift + summary table                | addon v0.0.14                                                  |
+| S2 | ✅ In-memory cache for Figma fetches              | addon v0.0.15                                                  |
+| S3 | ✅ Visible perf stats in panel + bulk header      | addon v0.0.16                                                  |
+| S4 | ✅ Windows build fix (spawn shell)                 | addon v0.0.17                                                  |
+| S5 | ✅ Registry-seeding script                         | pipeline v0.0.3                                                |
+| S6 | ✅ Inspector edits → Staged edits bridge          | addon v0.0.18                                                  |
+| S7 | ✅ Per-row undo                                    | addon v0.0.19                                                  |
+| S8 | ✅ Apply on dual-mode rows when modes agree       | addon v0.0.20                                                  |
+| S9 | ✅ figma-rest-write engine (variable values)      | pipeline v0.0.4                                                |
+
 ## Open
 
 | #  | Title                                              | Why                                                            |
 | -- | -------------------------------------------------- | -------------------------------------------------------------- |
-| 4  | `feat: hash-based skip path (lastSyncedHash)`     | Re-checking unchanged stories should be ~free at scale.        |
-| 6  | `chore: registry-seeding script`                   | Walks Figma + Storybook `index.json`, best-effort matches.     |
-| 8  | `feat: Apply for dual-mode rows`                   | Today only single-mode rows are auto-fixable. Need to flatten `{light, dark}` value maps into per-mode Edits. |
-| 9f | `feat: figma-rest-write engine (variable values)` | Complement to the plugin's binding writes. For drift like "the value of `radius/lg` should be 8 not 6". |
 | 9g | `feat: Baluarte engine adapter`                    | AST-aware code edits. Sits next to the regex CSS swapper.       |
 | 10 | `feat: CI runner`                                   | Block PRs that introduce drift.                                |
-| 11 | `feat: per-row undo`                                | After a successful Apply, store the inverse Edit and offer "Undo". |
 | 12 | `feat: real-time push from Figma`                   | Webhook or polling so drift checks don't have to be manual.     |
+| 13 | `feat: persistent lastSyncedHash skip path`         | Skip Figma fetch entirely when the file's lastModified hasn't changed. Bigger perf win than S2's in-memory cache. |
+| 14 | `feat: per-mode Apply (modes disagree)`             | Today rows where light ≠ dark stay unfixable; need per-mode Edits. |
 
 ## Architecture decisions worth keeping
 

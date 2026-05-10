@@ -3,3 +3,7 @@ dist/
 *.log
 .DS_Store
 *.tsbuildinfo
+# Local working notes for Claude / agents — intent, conventions, decisions
+# we don't want to forget. Not for upstream consumption.
+CLAUDE.md
+.claude/

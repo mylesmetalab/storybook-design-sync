@@ -24,6 +24,12 @@ export interface DimensionDiff {
   modes?: ModeAwareValue;
   /** Optional human-readable note (e.g. "variable not found in file"). */
   note?: string;
+  /**
+   * For `token-value` rows where the Figma side resolves through a named
+   * variable, the bare token name (e.g. `"space/4"`). Used by the value-
+   * drift Apply path to construct a `var(--token)` rewrite in code.
+   */
+  tokenName?: string;
 }
 
 export interface DriftTiming {

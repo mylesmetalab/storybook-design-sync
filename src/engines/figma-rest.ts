@@ -338,6 +338,7 @@ class FigmaRestEngine implements Engine {
         status,
       };
       if (modes) diff.modes = modes;
+      if (figmaBg?.tokenName) diff.tokenName = figmaBg.tokenName;
       out.push(diff);
     }
 
@@ -368,6 +369,7 @@ class FigmaRestEngine implements Engine {
         codeValue: codeValue ?? null,
         figmaValue: `${figmaPx}px (token: ${v.name})`,
         status,
+        tokenName: v.name,
       });
     }
 
@@ -401,7 +403,337 @@ class FigmaRestEngine implements Engine {
           codeValue: codeValue ?? null,
           figmaValue: `${figmaPx}px (token: ${v.name})`,
           status,
+          tokenName: v.name,
         });
+      }
+    }
+
+    // Gap — frames carry `itemSpacing` either bound to a variable or as a
+    // raw number on `node.itemSpacing`. Match-on-px first, then fall back
+    // to raw.
+    {
+      const gapAlias = node.boundVariables?.itemSpacing;
+      const aliasObj = Array.isArray(gapAlias) ? gapAlias[0] : gapAlias;
+      let figmaGap: { value: number; tokenName?: string } | undefined;
+      if (aliasObj && variables) {
+        const v = variables.meta.variables[aliasObj.id];
+        if (v && v.resolvedType === "FLOAT") {
+          const collection = variables.meta.variableCollections[v.variableCollectionId];
+          if (collection) {
+            const px = resolveNumericForMode(v, collection, activeMode);
+            if (px !== null) figmaGap = { value: px, tokenName: v.name };
+          }
+        }
+      }
+      if (!figmaGap && typeof node.itemSpacing === "number") {
+        figmaGap = { value: node.itemSpacing as number };
+      }
+      const codeValue = snapshot.styles["gap"];
+      const codePx = parsePx(codeValue);
+      if (figmaGap || codePx !== null) {
+        const status: DimensionDiff["status"] =
+          figmaGap && codePx !== null && Math.abs(codePx - figmaGap.value) < 0.5 ? "match" : "drift";
+        out.push({
+          kind: "token-value",
+          property: "gap",
+          codeValue: codeValue ?? null,
+          figmaValue: figmaGap
+            ? figmaGap.tokenName
+              ? `${figmaGap.value}px (token: ${figmaGap.tokenName})`
+              : `${figmaGap.value}px`
+            : null,
+          status,
+          ...(figmaGap?.tokenName ? { tokenName: figmaGap.tokenName } : {}),
+        });
+      }
+    }
+
+    // Border width & color — only report when Figma actually has a visible
+    // border (non-empty `strokes` array OR a bound stroke variable). Figma's
+    // `strokeWeight` defaults to 1 on every variant template even when no
+    // stroke is drawn, so guarding on `strokeWeight > 0` alone produces
+    // false-positive rows for icon-only / borderless components.
+    const figmaHasVisibleStroke =
+      Array.isArray(node.strokes) && (node.strokes as FigmaPaint[]).length > 0;
+
+    const codeBorderPx = parsePx(snapshot.styles["border-top-width"]) ?? 0;
+    if (figmaHasVisibleStroke || codeBorderPx > 0) {
+      const weightAlias = node.boundVariables?.strokeWeight;
+      const aliasObj = Array.isArray(weightAlias) ? weightAlias[0] : weightAlias;
+      let figmaWeight: { value: number; tokenName?: string } | undefined;
+      if (aliasObj && variables) {
+        const v = variables.meta.variables[aliasObj.id];
+        if (v && v.resolvedType === "FLOAT") {
+          const collection = variables.meta.variableCollections[v.variableCollectionId];
+          if (collection) {
+            const px = resolveNumericForMode(v, collection, activeMode);
+            if (px !== null) figmaWeight = { value: px, tokenName: v.name };
+          }
+        }
+      }
+      if (!figmaWeight && figmaHasVisibleStroke && typeof node.strokeWeight === "number") {
+        figmaWeight = { value: node.strokeWeight as number };
+      }
+      const codeValue = snapshot.styles["border-top-width"];
+      const codePx = parsePx(codeValue);
+      if (figmaWeight || (codePx !== null && codePx > 0)) {
+        const status: DimensionDiff["status"] =
+          figmaWeight && codePx !== null && Math.abs(codePx - figmaWeight.value) < 0.5 ? "match" : "drift";
+        out.push({
+          kind: "token-value",
+          property: "border-width",
+          codeValue: codeValue ?? null,
+          figmaValue: figmaWeight
+            ? figmaWeight.tokenName
+              ? `${figmaWeight.value}px (token: ${figmaWeight.tokenName})`
+              : `${figmaWeight.value}px`
+            : null,
+          status,
+          ...(figmaWeight?.tokenName ? { tokenName: figmaWeight.tokenName } : {}),
+        });
+      }
+    }
+
+    // Border color — same guard. `strokes[0]` mirrors `fills[0]` shape.
+    if (figmaHasVisibleStroke) {
+      const stroke = (node.strokes as FigmaPaint[])?.[0];
+      let figmaStroke: ResolvedFill | undefined;
+      let strokeTokenName: string | undefined;
+      if (stroke) {
+        const alias = stroke.boundVariables?.color;
+        if (alias && variables) {
+          figmaStroke = resolveColorVariable(alias.id, variables, activeMode);
+          const v = variables.meta.variables[alias.id];
+          if (v) strokeTokenName = v.name;
+        }
+        if (!figmaStroke && stroke.color) {
+          figmaStroke = { value: rgbaToCss(stroke.color) };
+        }
+      }
+      const codeValue = snapshot.styles["border-top-color"];
+      if (figmaStroke || (codeValue && codeValue !== "rgba(0, 0, 0, 0)")) {
+        const status: DimensionDiff["status"] =
+          codeValue && figmaStroke && normalizeColor(codeValue) === normalizeColor(figmaStroke.value)
+            ? "match"
+            : "drift";
+        const diff: DimensionDiff = {
+          kind: "token-value",
+          property: "border-color",
+          codeValue: codeValue ?? null,
+          figmaValue: figmaStroke?.value ?? null,
+          status,
+        };
+        if (figmaStroke?.modes) diff.modes = figmaStroke.modes;
+        if (strokeTokenName) diff.tokenName = strokeTokenName;
+        out.push(diff);
+      }
+    }
+
+    // Effects (DROP_SHADOW / INNER_SHADOW → box-shadow). Figma may bind the
+    // whole `effects` array to a single variable representing the shadow
+    // token (e.g. `shadow/popover`). We can't resolve the variable's value
+    // to a CSS string without inspecting its raw value shape (it's stored as
+    // an effect object, not a number/color), so we surface the *resolved
+    // effect array on the node itself* — Figma's REST node response already
+    // includes the resolved effect — and compare to the code's computed
+    // `box-shadow`. If both sides have any non-NONE shadow, compare strings
+    // after normalization.
+    {
+      const effects = node.effects as
+        | Array<{
+            type?: string;
+            visible?: boolean;
+            offset?: { x: number; y: number };
+            radius?: number;
+            spread?: number;
+            color?: { r: number; g: number; b: number; a?: number };
+          }>
+        | undefined;
+      const codeValue = snapshot.styles["box-shadow"];
+      const figmaShadows = (effects ?? [])
+        .filter((e) => e.visible !== false && (e.type === "DROP_SHADOW" || e.type === "INNER_SHADOW"))
+        .map((e) => {
+          const inset = e.type === "INNER_SHADOW" ? "inset " : "";
+          const x = e.offset?.x ?? 0;
+          const y = e.offset?.y ?? 0;
+          const blur = e.radius ?? 0;
+          const spread = e.spread ?? 0;
+          const color = e.color ? rgbaToCss(e.color) : "rgba(0, 0, 0, 0.25)";
+          return `${inset}${x}px ${y}px ${blur}px ${spread}px ${color}`;
+        });
+      // Try to resolve the bound `effects` variable's name for display.
+      let tokenName: string | undefined;
+      const effectAlias = pickAlias(
+        node.boundVariables?.effects as FigmaVariableAlias | FigmaVariableAlias[] | undefined,
+      );
+      if (effectAlias && variables) {
+        const v = variables.meta.variables[effectAlias.id];
+        if (v) tokenName = v.name;
+      }
+      if (figmaShadows.length > 0 || (codeValue && codeValue !== "none")) {
+        const figmaShadow = figmaShadows.join(", ");
+        const normalize = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
+        const status: DimensionDiff["status"] =
+          codeValue && figmaShadow && normalize(codeValue) === normalize(figmaShadow)
+            ? "match"
+            : figmaShadow
+              ? "drift"
+              : "drift";
+        out.push({
+          kind: "token-value",
+          property: "box-shadow",
+          codeValue: codeValue ?? null,
+          figmaValue: figmaShadow
+            ? tokenName
+              ? `${figmaShadow} (token: ${tokenName})`
+              : figmaShadow
+            : null,
+          status,
+          ...(tokenName ? { tokenName } : {}),
+        });
+      }
+    }
+
+    // Typography — find the first TEXT descendant (or the node itself if it's
+    // TEXT) and read its style + first fill. Inherited values resolve on the
+    // code side via getComputedStyle even when the snapshot target isn't a
+    // text element, so this gives consistent comparisons for buttons, tabs,
+    // menu items, etc.
+    const textNode = findFirstTextNode(node);
+    if (textNode) {
+      const ts = textNode.style as
+        | {
+            fontFamily?: string;
+            fontPostScriptName?: string;
+            fontWeight?: number;
+            fontSize?: number;
+            lineHeightPx?: number;
+            lineHeightPercent?: number;
+            lineHeightUnit?: string;
+          }
+        | undefined;
+      const bound = textNode.boundVariables ?? {};
+
+      // font-size
+      pushTypographyNumeric({
+        out,
+        snapshot,
+        variables,
+        activeMode,
+        cssProp: "font-size",
+        rawValue: ts?.fontSize,
+        alias: pickAlias(bound["fontSize"]),
+      });
+      // font-weight
+      pushTypographyNumeric({
+        out,
+        snapshot,
+        variables,
+        activeMode,
+        cssProp: "font-weight",
+        rawValue: ts?.fontWeight,
+        alias: pickAlias(bound["fontWeight"]),
+        // weights aren't pixel values; compare as plain numbers
+        unitless: true,
+      });
+      // line-height — Figma may store as px directly or as a percentage of
+      // font size. We normalize to px before comparing.
+      let lineHeightPx: number | undefined;
+      if (typeof ts?.lineHeightPx === "number" && ts.lineHeightPx > 0) {
+        lineHeightPx = ts.lineHeightPx;
+      } else if (
+        typeof ts?.lineHeightPercent === "number" &&
+        ts.lineHeightPercent > 0 &&
+        typeof ts.fontSize === "number"
+      ) {
+        lineHeightPx = (ts.lineHeightPercent / 100) * ts.fontSize;
+      }
+      pushTypographyNumeric({
+        out,
+        snapshot,
+        variables,
+        activeMode,
+        cssProp: "line-height",
+        rawValue: lineHeightPx,
+        alias: pickAlias(bound["lineHeight"]),
+      });
+      // font-family — string compare. Figma gives the display name; CSS
+      // computed font-family returns a quoted, possibly multi-fallback string
+      // (e.g. `"Nunito Sans", system-ui`). Match if Figma's value appears as
+      // a substring of code's value (case-insensitive).
+      {
+        const codeValue = snapshot.styles["font-family"];
+        let figmaFamily: string | undefined = ts?.fontFamily;
+        let tokenName: string | undefined;
+        const familyAlias = pickAlias(bound["fontFamily"]);
+        if (familyAlias && variables) {
+          const v = variables.meta.variables[familyAlias.id];
+          if (v) {
+            tokenName = v.name;
+            if (v.resolvedType === "STRING") {
+              const collection = variables.meta.variableCollections[v.variableCollectionId];
+              const raw =
+                (activeMode && collection
+                  ? v.valuesByMode[
+                      collection.modes.find((m) => m.name.toLowerCase() === activeMode)?.modeId ?? ""
+                    ]
+                  : undefined) ??
+                v.valuesByMode[collection?.defaultModeId ?? ""];
+              if (typeof raw === "string") figmaFamily = raw;
+            }
+          }
+        }
+        if (figmaFamily || codeValue) {
+          const codeNorm = (codeValue ?? "").toLowerCase().replace(/['"]/g, "");
+          const figmaNorm = (figmaFamily ?? "").toLowerCase();
+          const status: DimensionDiff["status"] =
+            figmaFamily && codeNorm.includes(figmaNorm) ? "match" : "drift";
+          out.push({
+            kind: "token-value",
+            property: "font-family",
+            codeValue: codeValue ?? null,
+            figmaValue: figmaFamily
+              ? tokenName
+                ? `${figmaFamily} (token: ${tokenName})`
+                : figmaFamily
+              : null,
+            status,
+            ...(tokenName ? { tokenName } : {}),
+          });
+        }
+      }
+
+      // color — text node's first fill (color or alias to color variable).
+      {
+        const codeValue = snapshot.styles["color"];
+        let figmaColor: ResolvedFill | undefined;
+        let colorTokenName: string | undefined;
+        const fill = textNode.fills?.[0];
+        if (fill) {
+          const alias = fill.boundVariables?.color;
+          if (alias && variables) {
+            figmaColor = resolveColorVariable(alias.id, variables, activeMode);
+            const v = variables.meta.variables[alias.id];
+            if (v) colorTokenName = v.name;
+          }
+          if (!figmaColor && fill.color) figmaColor = { value: rgbaToCss(fill.color) };
+        }
+        if (codeValue || figmaColor) {
+          const status: DimensionDiff["status"] =
+            codeValue && figmaColor && normalizeColor(codeValue) === normalizeColor(figmaColor.value)
+              ? "match"
+              : "drift";
+          const diff: DimensionDiff = {
+            kind: "token-value",
+            property: "color",
+            codeValue: codeValue ?? null,
+            figmaValue: figmaColor?.value ?? null,
+            status,
+          };
+          if (figmaColor?.modes) diff.modes = figmaColor.modes;
+          if (colorTokenName) diff.tokenName = colorTokenName;
+          out.push(diff);
+        }
       }
     }
 
@@ -435,7 +767,17 @@ class FigmaRestEngine implements Engine {
         status = "flag-only";
         note = "Figma node has no bound variable for this property.";
       } else {
-        status = codeValue === figma.tokenName ? "match" : "drift";
+        // Naming-convention difference is NOT drift. Figma stores tokens as
+        // `radius/xl` (group/name); CSS custom properties can't contain
+        // slashes so codebases typically use `radius-xl` or `--radius-xl`.
+        // Normalize both sides (strip leading dashes, collapse all separators
+        // to "-", lowercase) before comparing — anything that resolves to
+        // the same conceptual token is a match.
+        const sameToken = normalizeTokenName(codeValue) === normalizeTokenName(figma.tokenName);
+        status = sameToken ? "match" : "drift";
+        if (sameToken && codeValue !== figma.tokenName) {
+          note = `Same token, different naming convention (${codeValue} vs ${figma.tokenName}).`;
+        }
       }
       const diff: DimensionDiff = {
         kind: "token-binding",
@@ -764,6 +1106,30 @@ function isFalsyVariantValue(value: string): boolean {
   return v === "false" || v === "default" || v === "off" || v === "no" || v === "none";
 }
 
+/**
+ * Reduce a token name to a canonical key for "do these mean the same thing"
+ * comparisons. Strips a leading `--`, collapses `/` `.` and runs of `-` into
+ * a single `-`, lowercases. Examples:
+ *   "radius/xl"     → "radius-xl"
+ *   "radius-xl"     → "radius-xl"
+ *   "--radius-xl"   → "radius-xl"
+ *   "Radius/XL"     → "radius-xl"
+ *   "color/bg/kbd"  → "color-bg-kbd"
+ *
+ * Used by the binding diff so that the same token expressed in different
+ * naming conventions doesn't produce false-positive drift. Figma uses
+ * `group/name`; CSS custom properties can't contain `/` so codebases use
+ * `group-name` or `--group-name`.
+ */
+function normalizeTokenName(name: string | undefined): string {
+  if (!name) return "";
+  return name
+    .replace(/^--/, "")
+    .replace(/[\/.]/g, "-")
+    .replace(/-+/g, "-")
+    .toLowerCase();
+}
+
 function parsePx(value: string | undefined): number | null {
   if (!value) return null;
   const m = /^(-?\d+(?:\.\d+)?)\s*px$/.exec(value);
@@ -785,6 +1151,7 @@ function normalizeColor(value: string): string {
 interface ResolvedFill {
   value: string;
   modes?: ModeAwareValue;
+  tokenName?: string;
 }
 
 function resolveFillColor(
@@ -797,7 +1164,11 @@ function resolveFillColor(
   const alias = fill.boundVariables?.color;
   if (alias && variables) {
     const resolved = resolveColorVariable(alias.id, variables, activeMode);
-    if (resolved) return resolved;
+    if (resolved) {
+      const v = variables.meta.variables[alias.id];
+      if (v) resolved.tokenName = v.name;
+      return resolved;
+    }
   }
   if (fill.color) return { value: rgbaToCss(fill.color) };
   return undefined;
@@ -879,6 +1250,37 @@ const FIGMA_KEY_TO_CSS: Record<string, string> = {
   paddingLeft: "padding-left",
   itemSpacing: "gap",
   fills: "background-color",
+  strokeWeight: "border-width",
+  strokes: "border-color",
+  effects: "box-shadow",
+  // Typography — surface from either the variant root or its TEXT
+  // descendants (the latter via `collectFigmaBindings`' tree walk).
+  fontFamily: "font-family",
+  fontSize: "font-size",
+  fontWeight: "font-weight",
+  fontStyle: "font-style",
+  lineHeight: "line-height",
+  letterSpacing: "letter-spacing",
+  textCase: "text-transform",
+  textDecoration: "text-decoration-line",
+  textAlignHorizontal: "text-align",
+};
+
+/** Figma's TEXT-node binding keys that should bubble up to the parent FRAME
+ *  for wiring purposes, since the snapshot target is usually the FRAME-level
+ *  element in code (e.g. `.text-button`) which receives the cascaded text
+ *  styles. The string values are the CSS-prop keys the story tokens use. */
+const TEXT_CHILD_BUBBLE: Record<string, string> = {
+  fills: "color",
+  fontFamily: "font-family",
+  fontSize: "font-size",
+  fontWeight: "font-weight",
+  fontStyle: "font-style",
+  lineHeight: "line-height",
+  letterSpacing: "letter-spacing",
+  textCase: "text-transform",
+  textDecoration: "text-decoration-line",
+  textAlignHorizontal: "text-align",
 };
 
 const FIGMA_CORNER_TO_CSS: Record<string, string> = {
@@ -932,7 +1334,114 @@ function collectFigmaBindings(
     const fillAlias = node.fills?.[0]?.boundVariables?.color;
     if (fillAlias) setBinding("background-color", fillAlias);
   }
+
+  // Bubble TEXT-descendant bindings up to the variant root. Designers
+  // typically bind typography vars on the inner TEXT layer; consumers
+  // declare those same tokens on the FRAME-level element (e.g. `color`
+  // and `font-size` on `.text-button`). Without this bubbling, the Wiring
+  // column would falsely say "Figma has no bound variable for this
+  // property" for color/font-* even though the design clearly does.
+  const textNode = findFirstTextNode(node);
+  if (textNode) {
+    const textBound = textNode.boundVariables ?? {};
+    for (const [figmaKey, cssProp] of Object.entries(TEXT_CHILD_BUBBLE)) {
+      if (out[cssProp]) continue; // root-level binding wins
+      const alias = pickAlias(textBound[figmaKey]);
+      if (alias) {
+        setBinding(cssProp, alias);
+        continue;
+      }
+      // `fills` on TEXT is the color paint — try fills[0].boundVariables.color.
+      if (figmaKey === "fills" && !out["color"]) {
+        const fillAlias = textNode.fills?.[0]?.boundVariables?.color;
+        if (fillAlias) setBinding("color", fillAlias);
+      }
+    }
+  }
+
   return out;
+}
+
+/**
+ * Walk a Figma node tree depth-first and return the first TEXT node. Used
+ * by the typography diffs to source font-size / line-height / family /
+ * color from a node that actually has them — most component variants are
+ * FRAMEs with a TEXT child rather than text nodes themselves.
+ */
+function findFirstTextNode(node: FigmaNode): FigmaNode | undefined {
+  if (node.type === "TEXT") return node;
+  for (const child of node.children ?? []) {
+    const found = findFirstTextNode(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function pickAlias(value: FigmaVariableAlias | FigmaVariableAlias[] | undefined): FigmaVariableAlias | undefined {
+  if (!value) return undefined;
+  return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * Compare a numeric Figma value against the code-side CSS for `cssProp`.
+ * Pushes a `token-value` row if either side has data. When `alias` is set
+ * (Figma variable bound), the resolved variable value wins over the raw
+ * one and its name appears in the figma cell as "(token: …)".
+ */
+function pushTypographyNumeric(opts: {
+  out: DimensionDiff[];
+  snapshot: CodeSnapshot;
+  variables: FigmaLocalVariablesResponse | null;
+  activeMode: string | undefined;
+  cssProp: string;
+  rawValue: number | undefined;
+  alias: FigmaVariableAlias | undefined;
+  /** Skip the "px" suffix in the figma cell — useful for unitless props
+   *  like font-weight. CSS comparison is on the parsed number either way. */
+  unitless?: boolean;
+}): void {
+  const { out, snapshot, variables, activeMode, cssProp, rawValue, alias, unitless } = opts;
+  let figmaValue: number | undefined = rawValue;
+  let tokenName: string | undefined;
+  if (alias && variables) {
+    const v = variables.meta.variables[alias.id];
+    if (v && v.resolvedType === "FLOAT") {
+      const collection = variables.meta.variableCollections[v.variableCollectionId];
+      if (collection) {
+        const resolved = resolveNumericForMode(v, collection, activeMode);
+        if (resolved !== null) {
+          figmaValue = resolved;
+          tokenName = v.name;
+        }
+      }
+    }
+  }
+  const codeValue = snapshot.styles[cssProp];
+  // For font-weight, computed style can be "400" (unitless). parsePx will
+  // return null. Fall back to parseFloat for unitless cases.
+  const codeNum = unitless
+    ? codeValue
+      ? Number(codeValue)
+      : null
+    : parsePx(codeValue);
+  if (figmaValue === undefined && codeNum === null) return;
+  const status: DimensionDiff["status"] =
+    figmaValue !== undefined && codeNum !== null && Math.abs(codeNum - figmaValue) < 0.5
+      ? "match"
+      : "drift";
+  out.push({
+    kind: "token-value",
+    property: cssProp,
+    codeValue: codeValue ?? null,
+    figmaValue:
+      figmaValue !== undefined
+        ? tokenName
+          ? `${figmaValue}${unitless ? "" : "px"} (token: ${tokenName})`
+          : `${figmaValue}${unitless ? "" : "px"}`
+        : null,
+    status,
+    ...(tokenName ? { tokenName } : {}),
+  });
 }
 
 export const createFigmaRestEngine: EngineFactory = (ctx) => new FigmaRestEngine(ctx);

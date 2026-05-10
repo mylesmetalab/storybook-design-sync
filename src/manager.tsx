@@ -124,10 +124,9 @@ function buildEdit(
   scope: ApplyScope,
   nodeId: string | undefined,
 ): Record<string, unknown> | null {
-  if (d.kind !== "token-binding") return null;
+  if (d.kind !== "token-binding" && d.kind !== "token-value") return null;
   const codeFlat = flattenDualModeValue(d.codeValue);
   const figmaFlat = flattenDualModeValue(d.figmaValue);
-  if (codeFlat === null || figmaFlat === null) return null;
   if (scope === "code" && !selector) return null;
   if (scope === "figma" && !nodeId) return null;
 
@@ -136,10 +135,30 @@ function buildEdit(
       ? crypto.randomUUID()
       : `${storyId}-${d.property}-${Date.now()}`;
 
+  // token-value, code: rewrite the raw literal in CSS to `var(--token)` using
+  // the Figma-side token name from the diff. The engine's swap looks for
+  // <property>: <oldValue>; in the rule body and replaces with
+  // <property>: var(--<token>);. Skip if we don't have a token name.
+  if (d.kind === "token-value" && scope === "code") {
+    if (!d.tokenName || codeFlat === null) return null;
+    return {
+      id,
+      kind: "token-value",
+      scope: "code",
+      target: { selector, property: d.property, storyId },
+      oldValue: codeFlat,
+      newValue: d.tokenName,
+      source: "storybook-design-sync",
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  if (codeFlat === null || figmaFlat === null) return null;
+
   if (scope === "code") {
     return {
       id,
-      kind: "token-binding",
+      kind: d.kind,
       scope: "code",
       target: { selector, property: d.property, storyId },
       oldValue: codeFlat,
@@ -150,7 +169,7 @@ function buildEdit(
   }
   return {
     id,
-    kind: "token-binding",
+    kind: d.kind,
     scope: "figma",
     target: { nodeId, property: d.property, storyId },
     oldValue: figmaFlat,
@@ -375,6 +394,15 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
               result.inverse = inverseEdit(edit);
             }
             setApplyResults((prev) => ({ ...prev, [key + ":" + scope]: result }));
+
+            // Auto-recheck after a successful write — the drift snapshot is
+            // a moment-in-time read, and the side we just modified is now
+            // ahead of it. Re-running puts the panel back in sync with the
+            // file and Figma, so subsequent Update <other side> clicks
+            // operate on fresh data instead of stale token names.
+            if (result.status === "applied") {
+              onCheck();
+            }
           }}
           onUndo={async (key, scope, inverse) => {
             setApplyResults((prev) => ({ ...prev, [key + ":" + scope]: { status: "loading" } }));
@@ -427,22 +455,46 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, on
         )}
       </span>
     </h3>
+    <div style={styles.legend}>
+      <span>
+        <strong>Value</strong> — does it look right today (px, color match)?
+      </span>
+      <span style={styles.legendDivider}>·</span>
+      <span>
+        <strong>Wiring</strong> — is the code declaring the same token as Figma, so it follows when the token changes?
+      </span>
+    </div>
     <table style={styles.table}>
       <thead>
         <tr>
-          <th style={styles.th}>Dimension</th>
           <th style={styles.th}>Property</th>
           <th style={styles.th}>Code</th>
           <th style={styles.th}>Figma</th>
-          <th style={styles.th}>Status</th>
+          <th style={styles.th}>Value</th>
+          <th style={styles.th}>Wiring</th>
           <th style={styles.th}>Apply</th>
         </tr>
       </thead>
       <tbody>
-        {report.dimensions.map((d, i) => {
+        {groupDimensions(report.dimensions).map((row, i) => {
+          if (row.kind === "token") {
+            return (
+              <TokenRow
+                key={`token-${row.property}-${i}`}
+                rowKey={`token-${row.property}-${i}`}
+                property={row.property}
+                value={row.value}
+                binding={row.binding}
+                applyResults={applyResults}
+                onApply={onApply}
+                onUndo={onUndo}
+              />
+            );
+          }
+          const d = row.diff;
           const key = `${d.kind}-${d.property}-${i}`;
           return (
-            <Row
+            <OtherRow
               key={key}
               d={d}
               codeResult={applyResults[`${key}:code`]}
@@ -457,7 +509,157 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, on
   </div>
 );
 
-interface RowProps {
+type GroupedRow =
+  | { kind: "token"; property: string; value?: DimensionDiff; binding?: DimensionDiff }
+  | { kind: "other"; diff: DimensionDiff };
+
+function groupDimensions(diffs: DimensionDiff[]): GroupedRow[] {
+  const indexByProp = new Map<string, number>();
+  const rows: GroupedRow[] = [];
+  for (const d of diffs) {
+    if (d.kind === "token-value" || d.kind === "token-binding") {
+      let idx = indexByProp.get(d.property);
+      if (idx === undefined) {
+        idx = rows.length;
+        indexByProp.set(d.property, idx);
+        rows.push({ kind: "token", property: d.property });
+      }
+      const row = rows[idx] as Extract<GroupedRow, { kind: "token" }>;
+      if (d.kind === "token-value") row.value = d;
+      else row.binding = d;
+    } else {
+      rows.push({ kind: "other", diff: d });
+    }
+  }
+  return rows;
+}
+
+const STATUS_LABEL: Record<DimensionDiff["status"], string> = {
+  match: "match",
+  drift: "drift",
+  "flag-only": "needs setup",
+};
+
+const StatusPill: React.FC<{ status: DimensionDiff["status"] | undefined; title: string | undefined }> = ({ status, title }) => {
+  if (!status) return <span style={styles.muted}>—</span>;
+  const props: { title?: string } = {};
+  if (title) props.title = title;
+  return (
+    <span style={{ ...styles.pill, ...statusStyle(status) }} {...props}>
+      {STATUS_LABEL[status]}
+    </span>
+  );
+};
+
+interface TokenRowProps {
+  rowKey: string;
+  property: string;
+  value: DimensionDiff | undefined;
+  binding: DimensionDiff | undefined;
+  applyResults: Record<string, ApplyResult>;
+  onApply: (d: DimensionDiff, key: string, scope: ApplyScope) => void;
+  onUndo: (key: string, scope: ApplyScope, inverse: Record<string, unknown>) => void;
+}
+
+const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, applyResults, onApply, onUndo }) => {
+  // Prefer value diff for the Code/Figma cells (concrete px/rgb is more
+  // useful than a token name); fall back to binding if value is absent.
+  const display = value ?? binding;
+  const codeShown = display?.codeValue ?? null;
+  const figmaShown = display?.figmaValue ?? null;
+  const modes = display?.modes;
+
+  const bindingFixable =
+    binding &&
+    binding.status === "drift" &&
+    flattenDualModeValue(binding.codeValue) !== null &&
+    flattenDualModeValue(binding.figmaValue) !== null;
+
+  // Value-drift "Update code" — when the computed CSS value disagrees with
+  // Figma even though Wiring matches (or is undeclared in code), we can
+  // rewrite the literal in CSS to `var(--token)`. The engine attaches the
+  // bare token name to value-drift diffs as `d.tokenName`; use that when
+  // present.
+  const valueTokenName = value?.tokenName ?? null;
+  const valueFixable =
+    !bindingFixable && value && value.status === "drift" && valueTokenName !== null;
+
+  const valueTitle = value
+    ? value.status === "match"
+      ? `Code and Figma both resolve to ${stringifyValue(value.figmaValue)}.`
+      : value.status === "drift"
+      ? `Code resolves to ${stringifyValue(value.codeValue)}, Figma to ${stringifyValue(value.figmaValue)}.`
+      : value.note
+    : undefined;
+
+  const wiringTitle = binding
+    ? binding.status === "match"
+      ? `Code is wired to ${stringifyValue(binding.codeValue)}.`
+      : binding.status === "drift"
+      ? `Code declares ${stringifyValue(binding.codeValue)} but Figma uses ${stringifyValue(binding.figmaValue)}.`
+      : binding.note ?? "Code hasn't declared which token it uses, so we can't tell whether it will follow when the token changes."
+    : undefined;
+
+  return (
+    <tr>
+      <td style={styles.td}>{property}</td>
+      <td style={styles.td}>
+        <ValueCell value={codeShown} />
+      </td>
+      <td style={styles.td}>
+        <ValueCell value={figmaShown} />
+        {modes && (
+          <div style={styles.modes}>
+            light: {modes.light} · dark: {modes.dark}
+          </div>
+        )}
+      </td>
+      <td style={styles.td}>
+        <StatusPill status={value?.status} title={valueTitle} />
+      </td>
+      <td style={styles.td}>
+        <StatusPill status={binding?.status} title={wiringTitle} />
+      </td>
+      <td style={styles.td}>
+        {bindingFixable && binding ? (
+          <div style={styles.applyButtons}>
+            <ApplyButton
+              label="Update code"
+              scope="code"
+              result={applyResults[`${rowKey}:code`]}
+              onClick={() => onApply(binding, rowKey, "code")}
+              onUndo={(inverse) => onUndo(rowKey, "code", inverse)}
+              title={`Write ${stringifyValue(binding.figmaValue)} to code (Figma value wins)`}
+            />
+            <ApplyButton
+              label="Update Figma"
+              scope="figma"
+              result={applyResults[`${rowKey}:figma`]}
+              onClick={() => onApply(binding, rowKey, "figma")}
+              onUndo={(inverse) => onUndo(rowKey, "figma", inverse)}
+              title={`Write ${stringifyValue(binding.codeValue)} to Figma (code value wins)`}
+            />
+          </div>
+        ) : valueFixable && value ? (
+          <div style={styles.applyButtons}>
+            <ApplyButton
+              label="Use token"
+              scope="code"
+              result={applyResults[`${rowKey}:code`]}
+              onClick={() => onApply(value, rowKey, "code")}
+              onUndo={(inverse) => onUndo(rowKey, "code", inverse)}
+              title={`Replace ${stringifyValue(value.codeValue)} with var(--${valueTokenName}) in CSS`}
+            />
+          </div>
+        ) : (
+          <span style={styles.muted}>—</span>
+        )}
+      </td>
+    </tr>
+  );
+};
+
+interface OtherRowProps {
   d: DimensionDiff;
   codeResult: ApplyResult | undefined;
   figmaResult: ApplyResult | undefined;
@@ -465,16 +667,13 @@ interface RowProps {
   onUndo: (scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-const Row: React.FC<RowProps> = ({ d, codeResult, figmaResult, onApply, onUndo }) => {
-  const fixable =
-    d.kind === "token-binding" &&
-    d.status === "drift" &&
-    flattenDualModeValue(d.codeValue) !== null &&
-    flattenDualModeValue(d.figmaValue) !== null;
+const OtherRow: React.FC<OtherRowProps> = ({ d, codeResult, figmaResult, onApply, onUndo }) => {
   return (
     <tr>
-      <td style={styles.td}>{d.kind}</td>
-      <td style={styles.td}>{d.property}</td>
+      <td style={styles.td}>
+        {d.property}
+        <div style={styles.muted}>{d.kind}</div>
+      </td>
       <td style={styles.td}>
         <ValueCell value={d.codeValue} />
       </td>
@@ -486,33 +685,29 @@ const Row: React.FC<RowProps> = ({ d, codeResult, figmaResult, onApply, onUndo }
           </div>
         )}
       </td>
-      <td style={{ ...styles.td, ...statusStyle(d.status) }}>
-        {d.status}
+      <td style={styles.td} colSpan={2}>
+        <StatusPill status={d.status} title={d.note} />
         {d.note && <div style={styles.muted}>{d.note}</div>}
       </td>
       <td style={styles.td}>
-        {fixable ? (
-          <div style={styles.applyButtons}>
-            <ApplyButton
-              label="Update code"
-              scope="code"
-              result={codeResult}
-              onClick={() => onApply("code")}
-              onUndo={(inverse) => onUndo("code", inverse)}
-              title={`Write ${stringifyValue(d.figmaValue)} to code (Figma value wins)`}
-            />
-            <ApplyButton
-              label="Update Figma"
-              scope="figma"
-              result={figmaResult}
-              onClick={() => onApply("figma")}
-              onUndo={(inverse) => onUndo("figma", inverse)}
-              title={`Write ${stringifyValue(d.codeValue)} to Figma (code value wins)`}
-            />
-          </div>
-        ) : (
-          <span style={styles.muted}>—</span>
-        )}
+        <div style={styles.applyButtons}>
+          <ApplyButton
+            label="Update code"
+            scope="code"
+            result={codeResult}
+            onClick={() => onApply("code")}
+            onUndo={(inverse) => onUndo("code", inverse)}
+            title={`Write ${stringifyValue(d.figmaValue)} to code (Figma value wins)`}
+          />
+          <ApplyButton
+            label="Update Figma"
+            scope="figma"
+            result={figmaResult}
+            onClick={() => onApply("figma")}
+            onUndo={(inverse) => onUndo("figma", inverse)}
+            title={`Write ${stringifyValue(d.codeValue)} to Figma (code value wins)`}
+          />
+        </div>
       </td>
     </tr>
   );
@@ -906,7 +1101,36 @@ function statusStyle(status: DimensionDiff["status"]): React.CSSProperties {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  root: { padding: "12px 16px", fontFamily: "system-ui, sans-serif", fontSize: 13 },
+  root: {
+    padding: "12px 16px",
+    fontFamily: "system-ui, sans-serif",
+    fontSize: 13,
+    boxSizing: "border-box",
+  },
+  pill: {
+    display: "inline-block",
+    padding: "1px 8px",
+    borderRadius: 999,
+    fontSize: 11,
+    fontWeight: 600,
+    border: "1px solid currentColor",
+    lineHeight: "16px",
+  },
+  legend: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 6,
+    alignItems: "center",
+    color: "#525252",
+    fontSize: 11,
+    background: "#fafafa",
+    border: "1px solid #eee",
+    borderRadius: 4,
+    padding: "6px 10px",
+    marginBottom: 8,
+    lineHeight: 1.4,
+  },
+  legendDivider: { color: "#c4c4c4" },
   header: { display: "flex", alignItems: "center", gap: 12, marginBottom: 12 },
   button: {
     padding: "6px 12px",
@@ -976,6 +1200,19 @@ const styles: Record<string, React.CSSProperties> = {
 };
 
 addons.register(ADDON_ID, () => {
+  // Storybook 10's tabpanel container has `overflow-y: hidden`, which clips
+  // our content when it exceeds the panel height. Inject a global style
+  // scoped to our panel id (the tabpanel element gets an id that ends with
+  // PANEL_ID, e.g. `react-aria…:tabpanel-metalab/design-sync/panel`) to
+  // force the wrapper to scroll. CSS attribute selector handles the slashes
+  // fine.
+  if (typeof document !== "undefined" && !document.getElementById("design-sync-scroll-fix")) {
+    const style = document.createElement("style");
+    style.id = "design-sync-scroll-fix";
+    style.textContent = `[id$="${PANEL_ID}"][role="tabpanel"]{overflow-y:auto !important;}`;
+    document.head.appendChild(style);
+  }
+
   addons.add(PANEL_ID, {
     type: types.PANEL,
     title: "Sync",

@@ -7,8 +7,8 @@ import {
 import type { CodeSnapshot } from "./engines/types.js";
 
 const SNAPSHOT_PROPERTIES = [
+  // Box / background
   "background-color",
-  "color",
   "padding-top",
   "padding-right",
   "padding-bottom",
@@ -17,9 +17,33 @@ const SNAPSHOT_PROPERTIES = [
   "border-top-right-radius",
   "border-bottom-left-radius",
   "border-bottom-right-radius",
+  // Borders — uniform borders read from the top side; longhands available
+  // for completeness if a component declares them per-side.
+  "border-top-width",
+  "border-right-width",
+  "border-bottom-width",
+  "border-left-width",
+  "border-top-color",
+  "border-right-color",
+  "border-bottom-color",
+  "border-left-color",
+  // Layout
+  "gap",
+  // Typography — useful for components with text content. Inherited values
+  // resolve on `getComputedStyle`, so a button with no inner text still
+  // reports the cascaded font.
+  "color",
   "font-size",
   "font-weight",
+  "font-family",
   "line-height",
+  "letter-spacing",
+  "text-decoration-line",
+  "text-transform",
+  "text-align",
+  // Effects
+  "box-shadow",
+  "opacity",
 ] as const;
 
 /**

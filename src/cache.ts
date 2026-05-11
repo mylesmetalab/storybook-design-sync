@@ -124,6 +124,23 @@ export class PersistentCache {
  */
 function hashSnapshot(snapshot: CodeSnapshot | undefined): string {
   if (!snapshot) return "no-snapshot";
-  const stable = JSON.stringify(snapshot, Object.keys(snapshot).sort());
+  // Recursively sort keys so the serialization is stable regardless of the
+  // insertion order the snapshot is built in. We previously passed
+  // `Object.keys(snapshot).sort()` as the second arg, but that's an *allowlist*
+  // applied at every level — nested keys (e.g. CSS prop names inside
+  // `bindings`) didn't appear in the allowlist and were silently dropped from
+  // the hash. Result: changing tokens didn't bust the cache, and every check
+  // reused a stale "no bindings declared" report.
+  const stable = JSON.stringify(snapshot, (_key, value) => {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return Object.keys(value)
+        .sort()
+        .reduce<Record<string, unknown>>((acc, k) => {
+          acc[k] = (value as Record<string, unknown>)[k];
+          return acc;
+        }, {});
+    }
+    return value;
+  });
   return createHash("sha1").update(stable).digest("hex");
 }

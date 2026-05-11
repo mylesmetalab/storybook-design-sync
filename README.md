@@ -17,23 +17,35 @@ for binding writes, REST for variable values).
 
 ## What it does
 
-- Adds a **Sync** panel to every story
-- **Check drift** runs the engine for the current story
+- Adds a **Sync** panel to every story.
+- **Check drift** runs the engine for the current story.
 - **Check all** runs every registered story sequentially with a summary
-  table (match / drift / flag-only counts, perf stats, click to drill in)
-- Diff dimensions: `token-value` (color, padding, radius), `token-binding`,
-  `variant-set`, `copy`, `props`
-- Reserved as `flag-only` placeholders: `structure`, `motion` (no engine yet)
-- **Apply** column on each fixable row with `Update code` / `Update Figma`
-  buttons. Clicks POST to the pipeline; success shows a `↶ undo` for
-  one-click revert.
+  table (match / drift / flag-only counts, perf stats, click to drill in).
+- One row per property with two status pills:
+  - **Value** — does Figma resolve to the same px / color as the rendered CSS?
+  - **Wiring** — does the code declare the same design token as Figma, so
+    the code follows automatically when the token's value changes?
+- Properties compared today: `background-color`, `padding-*` (×4),
+  `border-*-radius` (×4), `gap`, `border-width`, `border-color`, `color`,
+  `font-size`, `font-weight`, `font-family`, `font-style`, `line-height`,
+  `letter-spacing`, `text-transform`, `text-decoration`, `text-align`,
+  `box-shadow`. Diff dimensions: `token-value`, `token-binding`,
+  `variant-set`, `copy`, `props`. (`structure`, `motion` reserved.)
+- **Token-name normalization.** `radius/xl` ≡ `radius-xl` ≡ `--radius-xl`.
+  Wiring doesn't false-flag drift on a naming convention difference.
+- **Apply** column on every fixable row:
+  - `Update code` / `Update Figma` for wiring drift.
+  - `Use token` on value drift (rewrites the literal in CSS to `var(--token)`).
+  - Success shows `↶ undo` for one-click revert.
+- **Stale check.** Figma writes refuse if the binding has moved since the
+  drift snapshot — re-run Check drift, try again. Avoids stomping on
+  changes you made manually.
+- **Auto-recheck after Apply.** A successful write triggers a fresh
+  drift check so subsequent clicks operate on current data.
 - **Both modes** checkbox runs dual-mode comparison; rows where light
   and dark agree are still fixable.
 - Listens for `storybook-design-inspector` `STYLE_UPDATE` events and
-  surfaces them in the **Staged edits** panel with the same `Update code` /
-  `Update Figma` actions.
-- Persistent cache (`.design-sync/cache.json`) — repeat bulk runs after
-  no Figma changes return cached reports in <10ms each.
+  surfaces them in the **Staged edits** panel.
 
 ## Install
 
@@ -124,6 +136,11 @@ Both fields are optional. Without `target`, the addon walks `#storybook-root`
 down through single-child wrappers. Without `tokens`, the addon reads
 `data-token-*` attributes on the snapshotted element.
 
+> **Phase 1 of the roadmap** removes the need to maintain `tokens` by hand.
+> A PostCSS scanner derives the selector → tokens map from `style.css` at
+> startup. Stories will only need to declare `target`. See
+> [`docs/roadmap.md`](docs/roadmap.md) → P1.1.
+
 ## How code-side values are read
 
 The preview hook reads:
@@ -148,28 +165,29 @@ them.
 ```
 Drift report — node 37:30 — 5:31:55 PM
 
-Dimension       Property                Code              Figma                         Status
-token-value     background-color        rgb(37,99,235)    rgb(37,99,235)                match
-                                                          light: rgb(37,99,235) ·
-                                                          dark: rgb(96,165,250)
-token-value     padding-top             8px               8px (token: space/8)          match
-token-value     padding-right           8px               8px (token: space/8)          match
-token-value     padding-bottom          8px               8px (token: space/8)          match
-token-value     padding-left            8px               8px (token: space/8)          match
-token-value     border-top-left-radius  8px               6px (token: radius/lg)        drift
-token-value     border-top-right-rad…   8px               6px (token: radius/lg)        drift
-token-value     border-bottom-left-…    8px               6px (token: radius/lg)        drift
-token-value     border-bottom-right-…   8px               6px (token: radius/lg)        drift
-variant-set     active-variant          ["accent"]        ["accent"]                    match
-copy            story.copy              —                 —                             flag-only
-props           story.props             —                 —                             flag-only
-structure       story.structure         —                 —                             flag-only
-motion          story.motion            —                 —                             flag-only
+Property                 Code              Figma                          Value   Wiring   Apply
+background-color         rgb(37,99,235)    rgb(37,99,235)                 match   match    —
+                                            light: rgb(37,99,235) ·
+                                            dark:  rgb(96,165,250)
+padding-top              8px               8px (token: space/8)           match   match    —
+padding-right            8px               8px (token: space/8)           match   match    —
+padding-bottom           8px               8px (token: space/8)           match   match    —
+padding-left             8px               8px (token: space/8)           match   match    —
+border-top-left-radius   8px               6px (token: radius/lg)         drift   match    Use token
+border-top-right-radius  8px               6px (token: radius/lg)         drift   match    Use token
+border-bottom-left-…     8px               6px (token: radius/lg)         drift   match    Use token
+border-bottom-right-…    8px               6px (token: radius/lg)         drift   match    Use token
+gap                      8px               4px (token: space/4)           drift   match    Use token
+font-size                13px              13px (token: typography/ui/13) match   match    —
+color                    rgb(31,30,30)     rgb(31,30,30)                  match   match    —
+active-variant           ["accent"]        ["accent"]                     match            —
 ```
 
 The four `border-*-radius` rows above are a real finding: code uses
 `var(--radius-xl)` (8px) but the Figma variant binds to `radius/lg` (6px).
-Either the design or the code is wrong.
+**Use token** rewrites the CSS literal to `var(--radius-lg)` in one click.
+Either the design or the code is wrong — the Apply column resolves it
+without leaving Storybook.
 
 ## What this addon is NOT
 

@@ -66,6 +66,7 @@ system. Highlights of the work already done:
 | S16 | Stale check on Figma writes                        | figma-plugin                                |
 | S17 | Auto-recheck after successful Apply                | addon                                       |
 | S18 | Longhand `border-radius` corners across mde        | mde                                         |
+| P1.1 | Auto-derive tokens from CSS (kill the third copy) | addon v0.0.23 + Downmark#21                |
 
 ## Active roadmap
 
@@ -84,7 +85,7 @@ of bug; finishing unfinished features afterwards becomes much cheaper.
 
 | #     | Title                                                   | Done when                                                                                   | Effort |
 | ----- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------ |
-| P1.1  | Auto-derive tokens from CSS (kill the third copy)       | Stories declare only `target`. PostCSS scanner generates the selector → tokens map at startup. | 1d   |
+| ~~P1.1~~ | ~~Auto-derive tokens from CSS (kill the third copy)~~ | ✅ Shipped — addon v0.0.23, mde stories codemodded (Downmark#21).                          | 1d   |
 | P1.2  | PostCSS-based code-write engine (replace regex swap)    | Every Apply we've debugged works first try, no fallbacks needed. One path, not three.        | 2d   |
 | P1.3  | Shared types + normalizers package                      | One `Edit` definition, one `normalizeTokenName`, imported by all three repos.               | 0.5d   |
 | P1.4  | Move CSS writes from pipeline into addon preset         | Update code works without the pipeline binary running. Pipeline only needed for Figma writes. | 0.5–1d |

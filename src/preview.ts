@@ -273,6 +273,7 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
       additionalSnapshots: [{ mode: modeB, snapshot: snapB }],
     };
     if (payload.args) out.args = payload.args;
+    if (payload.target) out.target = payload.target;
     channel.emit(EVENTS.CodeSnapshot, out);
     return;
   }
@@ -284,5 +285,6 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
   const mode = readActiveMode(modeAttribute);
   const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot, mode };
   if (payload.args) out.args = payload.args;
+  if (payload.target) out.target = payload.target;
   channel.emit(EVENTS.CodeSnapshot, out);
 });

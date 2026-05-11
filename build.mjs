@@ -16,12 +16,22 @@ const EXTERNAL = [
   "node:*",
 ];
 
+// Bare node built-ins (no `node:` prefix). CJS deps like postcss
+// `require("path")` without the prefix, so we list them explicitly for
+// the Node-platform bundles. Browser bundles (manager, preview) don't
+// pull these in, so listing them globally is harmless.
+const NODE_BUILTINS = ["path", "fs", "fs/promises", "url", "events", "util", "stream", "os"];
+
+const NODE_REQUIRE_BANNER =
+  "import { createRequire as __designSyncCreateRequire } from 'node:module';" +
+  "const require = __designSyncCreateRequire(import.meta.url);";
+
 const shared = {
   bundle: true,
   format: "esm",
   platform: "neutral",
   target: "es2022",
-  external: EXTERNAL,
+  external: [...EXTERNAL, ...NODE_BUILTINS],
   sourcemap: true,
   logLevel: "info",
 };
@@ -47,12 +57,15 @@ await Promise.all([
     outfile: "dist/preview.js",
     platform: "browser",
   }),
-  // Server runs in Node (Storybook's dev server process)
+  // Server runs in Node (Storybook's dev server process). The banner gives
+  // the ESM bundle a real `require` so CJS deps (postcss, etc.) that call
+  // `require("path")` work — without it, esbuild emits a throwing stub.
   build({
     ...shared,
     entryPoints: ["src/server.ts"],
     outfile: "dist/server.js",
     platform: "node",
+    banner: { js: NODE_REQUIRE_BANNER },
   }),
   // Preset is loaded by Storybook in Node
   build({
@@ -60,6 +73,7 @@ await Promise.all([
     entryPoints: ["src/preset.ts"],
     outfile: "dist/preset.js",
     platform: "node",
+    banner: { js: NODE_REQUIRE_BANNER },
   }),
   // Public types entry
   build({

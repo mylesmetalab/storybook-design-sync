@@ -55,6 +55,13 @@ export interface CodeSnapshotPayload {
   storyId: string;
   snapshot: CodeSnapshot;
   /**
+   * The selector the preview used to find the story root. Relayed so the
+   * server can look up CSS-derived token bindings for that selector and
+   * merge them into `snapshot.bindings` before running the engine. Only
+   * present when the story declared `parameters.designSync.target`.
+   */
+  target?: string;
+  /**
    * The active mode name as read from the rendered DOM (e.g. "light", "dark").
    * The engine uses this to pick the matching value when resolving Figma
    * variables, instead of always defaulting to the file's default mode.

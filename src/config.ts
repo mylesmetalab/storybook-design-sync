@@ -5,11 +5,19 @@ export interface DesignSyncConfig {
   engine: string;
   registryPath: string;
   fileKey: string;
+  /**
+   * Glob patterns (relative to the consumer's cwd) for the CSS files the
+   * scanner reads at startup to build the selector → token map. Default
+   * picks up `src/**\/*.css`, which covers the common Storybook layout.
+   * Set this if your CSS lives elsewhere (e.g. `styles/**\/*.css`).
+   */
+  cssEntries: string[];
 }
 
 const DEFAULTS = {
   engine: "figma-rest",
   registryPath: ".design-sync/registry.json",
+  cssEntries: ["src/**/*.css"],
 } as const;
 
 const CANDIDATES = [
@@ -47,6 +55,7 @@ function normalize(raw: unknown): DesignSyncConfig {
     engine: r.engine ?? DEFAULTS.engine,
     registryPath: r.registryPath ?? DEFAULTS.registryPath,
     fileKey: r.fileKey,
+    cssEntries: r.cssEntries ?? [...DEFAULTS.cssEntries],
   };
 }
 

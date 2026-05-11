@@ -3,6 +3,8 @@ import { loadRegistry, lookup } from "./registry.js";
 import { resolveEngine } from "./engines/index.js";
 import { EVENTS, type CodeSnapshotPayload } from "./channels.js";
 import type { DimensionDiff, DriftReport } from "./dimensions/types.js";
+import { getAutoTokenMap } from "./auto-tokens.js";
+import { lookupBindings } from "./scan-css.js";
 
 /**
  * Storybook 10 server channel. Registered via the addon's preset.
@@ -36,8 +38,14 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
   });
 
   channel.on(EVENTS.CodeSnapshot, async (payload: unknown) => {
-    const { storyId, snapshot, mode, args, additionalSnapshots } = payload as CodeSnapshotPayload;
+    const { storyId, snapshot, mode, args, additionalSnapshots, target } = payload as CodeSnapshotPayload;
     try {
+      mergeAutoBindings(storyId, target, snapshot);
+      if (additionalSnapshots) {
+        for (const extra of additionalSnapshots) {
+          mergeAutoBindings(storyId, target, extra.snapshot);
+        }
+      }
       const config = await loadConfig();
       const registry = await loadRegistry(config.registryPath);
       const entry = lookup(registry, storyId);
@@ -87,6 +95,24 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
   });
 
   return channel;
+}
+
+/**
+ * Merge CSS-derived bindings into the snapshot. The auto-derived map (built
+ * by the preset's PostCSS scanner) takes precedence over story-param
+ * `tokens` and per-element `data-token-*` attrs for any property the
+ * scanner found a binding for. Properties the scanner didn't see fall
+ * through to whatever the snapshot already carried.
+ */
+function mergeAutoBindings(
+  storyId: string,
+  target: string | undefined,
+  snapshot: import("./engines/types.js").CodeSnapshot | undefined,
+): void {
+  if (!snapshot || !target) return;
+  const auto = lookupBindings(getAutoTokenMap(), target);
+  if (Object.keys(auto).length === 0) return;
+  snapshot.bindings = { ...(snapshot.bindings ?? {}), ...auto };
 }
 
 /**

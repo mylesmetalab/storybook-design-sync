@@ -54,6 +54,24 @@ interface ApplyResult {
 const PIPELINE_DEFAULT_URL = "http://127.0.0.1:7099";
 
 /**
+ * One-time-per-story deprecation warning for the legacy
+ * `parameters.designSync.tokens` story param. Token bindings are now
+ * derived from CSS by the preset's scanner; the param is kept as a
+ * fallback for a single release before removal.
+ */
+const tokensDeprecationWarned = new Set<string>();
+function warnTokensDeprecated(storyId: string): void {
+  if (tokensDeprecationWarned.has(storyId)) return;
+  tokensDeprecationWarned.add(storyId);
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[design-sync] ${storyId}: parameters.designSync.tokens is deprecated. ` +
+      "Bindings are now derived from your CSS — you can remove the `tokens` " +
+      "block. CSS-derived bindings take precedence where they exist.",
+  );
+}
+
+/**
  * POST a single drift row to the design-sync-pipeline. Returns an
  * ApplyResult that the panel renders inline. Errors (including the pipeline
  * not running) become `status: "error"` with a human-readable message.
@@ -247,7 +265,10 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     setState({ loading: true, report: null, error: null });
     const payload: CheckDriftRequestPayload = { storyId };
     if (designSync.target) payload.target = designSync.target;
-    if (designSync.tokens) payload.tokens = designSync.tokens;
+    if (designSync.tokens) {
+      payload.tokens = designSync.tokens;
+      warnTokensDeprecated(storyId);
+    }
     if (designSync.modeAttribute) payload.modeAttribute = designSync.modeAttribute;
     if (args && Object.keys(args).length > 0) payload.args = args as Record<string, unknown>;
     if (dualMode) payload.dualMode = true;

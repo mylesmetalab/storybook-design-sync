@@ -1,6 +1,6 @@
 {
   "name": "@metalab/storybook-design-sync",
-  "version": "0.0.22",
+  "version": "0.0.23",
   "description": "Storybook 10 addon that detects drift between a story and its Figma counterpart.",
   "license": "MIT",
   "type": "module",
@@ -43,9 +43,11 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "esbuild": "^0.28.0",
+    "postcss": "^8.5.14",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "storybook": "^10.0.0",
+    "tinyglobby": "^0.2.16",
     "typescript": "^5.5.0"
   },
   "storybook": {

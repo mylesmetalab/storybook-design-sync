@@ -114,32 +114,27 @@ export const Accent: StoryObj<typeof IconButton> = {
   args: { iconName: "arrowRight", variant: "accent" },
   parameters: {
     designSync: {
-      // Optional: CSS selector for the element to snapshot. Defaults to
-      // walking #storybook-root → first non-branching descendant.
-      target: ".icon-button",
-      // Optional: declare which tokens the component intends to use, so
-      // the engine can compare bindings without DOM annotations.
-      tokens: {
-        "background-color": "color/accent/blue",
-        "padding-top": "space/8",
-        "padding-right": "space/8",
-        "padding-bottom": "space/8",
-        "padding-left": "space/8",
-        "border-radius": "radius/xl",
-      },
+      // CSS selector for the element to snapshot. The scanner uses this
+      // same selector to look up the component's token bindings.
+      target: ".icon-button--accent",
     },
   },
 };
 ```
 
-Both fields are optional. Without `target`, the addon walks `#storybook-root`
-down through single-child wrappers. Without `tokens`, the addon reads
-`data-token-*` attributes on the snapshotted element.
+`target` is the only field most stories need. The addon's PostCSS scanner
+runs once at Storybook startup and builds a map of `selector → { CSS
+property → token name }` from the consumer's CSS, then looks up the
+story's `target` to find its bindings (with cascade fallback — `.icon-button--accent`
+falls back to `.icon-button` when a property isn't redeclared on the variant rule).
 
-> **Phase 1 of the roadmap** removes the need to maintain `tokens` by hand.
-> A PostCSS scanner derives the selector → tokens map from `style.css` at
-> startup. Stories will only need to declare `target`. See
-> [`docs/roadmap.md`](docs/roadmap.md) → P1.1.
+Where the CSS lives is configured by `cssEntries` in `design-sync.config.json`
+(default: `["src/**/*.css"]`).
+
+> **Deprecated:** `parameters.designSync.tokens` (a hand-maintained map from
+> CSS property → token name) is still accepted for one release for backwards
+> compat, but logs a deprecation warning in the manager console. CSS-derived
+> bindings take precedence where they exist. The field will be removed in v0.1.
 
 ## How code-side values are read
 
@@ -147,8 +142,11 @@ The preview hook reads:
 
 - a small set of computed CSS properties (background, padding, border
   radius, color, font-*)
+- token bindings derived from the consumer's CSS at startup (PostCSS scan
+  of `cssEntries`, keyed by the story's `target` selector)
 - `data-token-*` attributes (e.g. `data-token-background-color="color/accent/blue"`)
-- `parameters.designSync.tokens` declared in the story
+  on the snapshotted element (overrides per-element only)
+- `parameters.designSync.tokens` declared in the story *(deprecated — see above)*
 - BEM-style modifier classes (anything containing `--`) for variant diffs
 
 If the registry doesn't list the current story, the panel shows:

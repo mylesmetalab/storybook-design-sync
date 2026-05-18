@@ -323,7 +323,7 @@ class FigmaRestEngine implements Engine {
     // Background color: code "background-color" vs Figma fills[0] (resolved).
     const codeBg = snapshot.styles["background-color"];
     const figmaBg = resolveFillColor(node, variables, activeMode);
-    if ((codeBg && codeBg !== "rgba(0, 0, 0, 0)") || figmaBg !== undefined) {
+    if (!isTransparentColor(codeBg) || figmaBg !== undefined) {
       const modes = figmaBg?.modes;
       const figmaValue = figmaBg?.value;
       const status: DimensionDiff["status"] =
@@ -430,9 +430,15 @@ class FigmaRestEngine implements Engine {
       }
       const codeValue = snapshot.styles["gap"];
       const codePx = parsePx(codeValue);
+      // `getComputedStyle().gap` returns the keyword `"normal"` when no
+      // gap is set on a non-flex/non-grid element — code has no opinion
+      // there. Treat as flag-only when Figma has a value, otherwise skip.
+      const codeHasNoOpinion = codeValue === "normal" || codeValue === undefined || codeValue === "";
       if (figmaGap || codePx !== null) {
-        const status: DimensionDiff["status"] =
-          figmaGap && codePx !== null && Math.abs(codePx - figmaGap.value) < 0.5 ? "match" : "drift";
+        let status: DimensionDiff["status"];
+        if (codeHasNoOpinion && figmaGap) status = "flag-only";
+        else if (figmaGap && codePx !== null && Math.abs(codePx - figmaGap.value) < 0.5) status = "match";
+        else status = "drift";
         out.push({
           kind: "token-value",
           property: "gap",
@@ -444,6 +450,9 @@ class FigmaRestEngine implements Engine {
             : null,
           status,
           ...(figmaGap?.tokenName ? { tokenName: figmaGap.tokenName } : {}),
+          ...(codeHasNoOpinion && figmaGap
+            ? { note: "Code has no `gap` declared (default `normal`); Figma specifies a value." }
+            : {}),
         });
       }
     }
@@ -516,7 +525,7 @@ class FigmaRestEngine implements Engine {
         }
       }
       const codeValue = snapshot.styles[`border-${codeBorderEdge}-color`];
-      if (figmaStroke || (codeValue && codeValue !== "rgba(0, 0, 0, 0)")) {
+      if (figmaStroke || !isTransparentColor(codeValue)) {
         const status: DimensionDiff["status"] =
           codeValue && figmaStroke && normalizeColor(codeValue) === normalizeColor(figmaStroke.value)
             ? "match"
@@ -641,27 +650,39 @@ class FigmaRestEngine implements Engine {
         // weights aren't pixel values; compare as plain numbers
         unitless: true,
       });
-      // line-height — Figma may store as px directly or as a percentage of
-      // font size. We normalize to px before comparing.
+      // line-height — Figma may store as px directly, percent of font size,
+      // or `AUTO` / `INTRINSIC_%` (let the font metrics decide). The browser's
+      // `line-height: normal` also resolves to a font-metric-derived px, so
+      // when Figma is on auto we can't meaningfully compare against the
+      // computed code value — both sides are "no opinion". Skip the row in
+      // that case rather than reporting a guaranteed-drift number.
+      const lineHeightUnit = (ts as { lineHeightUnit?: string } | undefined)?.lineHeightUnit;
+      const figmaLineHeightIsAuto = lineHeightUnit === "AUTO" || lineHeightUnit === "INTRINSIC_%";
       let lineHeightPx: number | undefined;
-      if (typeof ts?.lineHeightPx === "number" && ts.lineHeightPx > 0) {
-        lineHeightPx = ts.lineHeightPx;
-      } else if (
-        typeof ts?.lineHeightPercent === "number" &&
-        ts.lineHeightPercent > 0 &&
-        typeof ts.fontSize === "number"
-      ) {
-        lineHeightPx = (ts.lineHeightPercent / 100) * ts.fontSize;
+      if (!figmaLineHeightIsAuto) {
+        if (typeof ts?.lineHeightPx === "number" && ts.lineHeightPx > 0) {
+          lineHeightPx = ts.lineHeightPx;
+        } else if (
+          typeof ts?.lineHeightPercent === "number" &&
+          ts.lineHeightPercent > 0 &&
+          typeof ts.fontSize === "number"
+        ) {
+          lineHeightPx = (ts.lineHeightPercent / 100) * ts.fontSize;
+        }
       }
-      pushTypographyNumeric({
-        out,
-        snapshot,
-        variables,
-        activeMode,
-        cssProp: "line-height",
-        rawValue: lineHeightPx,
-        alias: pickAlias(bound["lineHeight"]),
-      });
+      // Only emit a row when Figma has an explicit opinion. When AUTO, both
+      // sides are font-metric-driven — comparing px to px would always drift.
+      if (!figmaLineHeightIsAuto) {
+        pushTypographyNumeric({
+          out,
+          snapshot,
+          variables,
+          activeMode,
+          cssProp: "line-height",
+          rawValue: lineHeightPx,
+          alias: pickAlias(bound["lineHeight"]),
+        });
+      }
       // font-family — string compare. Figma gives the display name; CSS
       // computed font-family returns a quoted, possibly multi-fallback string
       // (e.g. `"Nunito Sans", system-ui`). Match if Figma's value appears as
@@ -1180,8 +1201,27 @@ function rgbaToCss(c: { r: number; g: number; b: number; a?: number }): string {
   return a === 1 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${a})`;
 }
 
+/** Treat browser's "no opinion" color sentinels as equivalent. */
+function isTransparentColor(value: string | undefined): boolean {
+  if (!value) return true;
+  const v = value.replace(/\s+/g, "").toLowerCase();
+  return v === "rgba(0,0,0,0)" || v === "transparent" || v === "rgba(0,0,0,0.0)";
+}
+
+/**
+ * Fold colors into a canonical form so semantically-equivalent expressions
+ * compare equal. `rgba(R,G,B,1)` ≡ `rgb(R,G,B)`; whitespace and case are
+ * ignored. Returns "transparent" for any zero-alpha or fully-transparent
+ * value so the engine can treat them as "no opinion."
+ */
 function normalizeColor(value: string): string {
-  return value.replace(/\s+/g, "").toLowerCase();
+  if (isTransparentColor(value)) return "transparent";
+  const stripped = value.replace(/\s+/g, "").toLowerCase();
+  // rgba(R, G, B, 1) → rgb(R, G, B). The same channel triple should match
+  // regardless of whether the producer wrote it with an alpha=1 suffix.
+  const m = /^rgba\((\d+),(\d+),(\d+),1(?:\.0+)?\)$/.exec(stripped);
+  if (m) return `rgb(${m[1]},${m[2]},${m[3]})`;
+  return stripped;
 }
 
 interface ResolvedFill {

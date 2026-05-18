@@ -45,9 +45,17 @@ interface BulkState {
 /** Live state for an "Apply all fixable" run launched from the bulk summary. */
 interface BulkApplyState {
   running: boolean;
+  /** True when the run is in preview mode (pipeline returns diffs, doesn't
+   *  write). First-touch is always dry-run; "Apply for real" sets this false. */
+  dryRun: boolean;
   total: number;
   applied: number;
+  /** Pipeline returned no_op (already-applied or refused-as-safe). */
   skipped: number;
+  /** The drift row exists but the addon can't build an Edit for it (variant-set,
+   *  copy, props, etc. — kinds outside `token-binding`/`token-value`). Counted
+   *  separately so users see how much of the "fix" actually fixes. */
+  notFixable: number;
   errored: number;
   /** storyId currently being processed (for inline progress UI). */
   current?: string;
@@ -379,7 +387,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
    * `sbApi.getStoryData(storyId)?.parameters` — populated because bulk
    * Check all navigated to every story before snapshotting.
    */
-  const onApplyAll = useCallback(async () => {
+  const onApplyAll = useCallback(async (opts: { dryRun: boolean }) => {
     setBulk((prev) => {
       if (!prev) return prev;
       const drifted = prev.rows.filter((r) => r.report && r.drift > 0);
@@ -389,7 +397,15 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       );
       return {
         ...prev,
-        apply: { running: true, total, applied: 0, skipped: 0, errored: 0 },
+        apply: {
+          running: true,
+          dryRun: opts.dryRun,
+          total,
+          applied: 0,
+          skipped: 0,
+          notFixable: 0,
+          errored: 0,
+        },
       };
     });
 
@@ -412,31 +428,29 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
 
         const edit = buildEdit(d, row.storyId, selector, "code", report.nodeId);
         if (!edit) {
+          // Row exists but addon has no Edit-shape for this dimension kind
+          // (variant-set, copy, props, etc.). Surface separately so the
+          // summary tells the user how much of the drift was actually
+          // addressable, not just lump it into "skipped".
           setBulk((prev) =>
-            prev?.apply ? { ...prev, apply: { ...prev.apply, skipped: prev.apply.skipped + 1 } } : prev,
+            prev?.apply ? { ...prev, apply: { ...prev.apply, notFixable: prev.apply.notFixable + 1 } } : prev,
           );
           continue;
         }
+        if (opts.dryRun) edit.dryRun = true;
         try {
           const result = await postEdit(pipelineUrl, edit);
           if (result.status === "applied") {
             setBulk((prev) =>
               prev?.apply ? { ...prev, apply: { ...prev.apply, applied: prev.apply.applied + 1 } } : prev,
             );
+          } else if (result.status === "no_op") {
+            setBulk((prev) =>
+              prev?.apply ? { ...prev, apply: { ...prev.apply, skipped: prev.apply.skipped + 1 } } : prev,
+            );
           } else {
             setBulk((prev) =>
-              prev?.apply
-                ? {
-                    ...prev,
-                    apply: {
-                      ...prev.apply,
-                      [result.status === "no_op" ? "skipped" : "errored"]:
-                        result.status === "no_op"
-                          ? prev.apply.skipped + 1
-                          : prev.apply.errored + 1,
-                    },
-                  }
-                : prev,
+              prev?.apply ? { ...prev, apply: { ...prev.apply, errored: prev.apply.errored + 1 } } : prev,
             );
           }
         } catch {
@@ -486,7 +500,8 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         <BulkSummary
           bulk={bulk}
           onSelect={(id) => sbApi?.selectStory(id)}
-          onApplyAll={onApplyAll}
+          onPreviewAll={() => onApplyAll({ dryRun: true })}
+          onApplyAllForReal={() => onApplyAll({ dryRun: false })}
         />
       )}
 
@@ -1148,10 +1163,18 @@ const StagedEdits: React.FC<StagedEditsProps> = ({ edits, applyResults, pipeline
 interface BulkSummaryProps {
   bulk: BulkState;
   onSelect: (storyId: string) => void;
-  onApplyAll: () => void;
+  /** First-touch: dry-run only. Pipeline returns diffs without writing. */
+  onPreviewAll: () => void;
+  /** Real writes. Should only be offered after a successful preview run. */
+  onApplyAllForReal: () => void;
 }
 
-const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect, onApplyAll }) => {
+const BulkSummary: React.FC<BulkSummaryProps> = ({
+  bulk,
+  onSelect,
+  onPreviewAll,
+  onApplyAllForReal,
+}) => {
   const total = bulk.rows.reduce(
     (acc, r) => ({
       match: acc.match + r.match,
@@ -1228,24 +1251,48 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect, onApplyAll })
               bulk.apply?.running ||
               !bulk.rows.some((r) => r.drift > 0)
             }
-            onClick={onApplyAll}
-            title="Apply every fixable code-side drift through the addon's write engine"
+            onClick={onPreviewAll}
+            title="Run every fixable code-side drift through the pipeline in dry-run — no files are written"
           >
-            {bulk.apply?.running
-              ? `Applying… (${bulk.apply.applied + bulk.apply.skipped + bulk.apply.errored}/${bulk.apply.total})`
-              : "Apply all (code)"}
+            {bulk.apply?.running && bulk.apply.dryRun
+              ? `Previewing… (${bulk.apply.applied + bulk.apply.skipped + bulk.apply.notFixable + bulk.apply.errored}/${bulk.apply.total})`
+              : "Preview all (dry-run)"}
           </button>
+          {/* Apply for real only appears after a successful preview, mirroring
+              the project's read-only-by-default principle (pipeline and
+              figma-plugin both default to dry-run). Disabled while another
+              run is in flight. */}
+          {bulk.apply && !bulk.apply.running && bulk.apply.dryRun && bulk.apply.applied > 0 && (
+            <button
+              style={{ ...styles.button, borderColor: "#b91c1c", color: "#b91c1c" }}
+              onClick={onApplyAllForReal}
+              title="Run for real — files will be written through the pipeline"
+            >
+              Apply for real ({bulk.apply.applied})
+            </button>
+          )}
+          {bulk.apply?.running && !bulk.apply.dryRun && (
+            <button style={styles.button} disabled>
+              Applying… ({bulk.apply.applied + bulk.apply.skipped + bulk.apply.notFixable + bulk.apply.errored}/{bulk.apply.total})
+            </button>
+          )}
         </span>
       </h3>
       {bulk.apply && !bulk.apply.running && bulk.apply.finishedAt && (
         <div style={{ ...styles.muted, marginBottom: 8 }}>
-          Apply all finished —{" "}
-          <span style={{ color: "#0a7d3e" }}>{bulk.apply.applied} applied</span>{" "}
-          · {bulk.apply.skipped} skipped (not auto-fixable){" "}
-          · <span style={{ color: bulk.apply.errored > 0 ? "#b91c1c" : "#7a7a7a" }}>
+          {bulk.apply.dryRun ? "Dry-run finished" : "Apply finished"} —{" "}
+          <span style={{ color: "#0a7d3e" }}>
+            {bulk.apply.applied} {bulk.apply.dryRun ? "would change" : "applied"}
+          </span>
+          {" · "}
+          <span style={{ color: "#7a7a7a" }}>{bulk.apply.skipped} no-op</span>
+          {" · "}
+          <span style={{ color: "#7a7a7a" }}>{bulk.apply.notFixable} not auto-fixable</span>
+          {" · "}
+          <span style={{ color: bulk.apply.errored > 0 ? "#b91c1c" : "#7a7a7a" }}>
             {bulk.apply.errored} errored
           </span>
-          {bulk.apply.applied > 0 && " · Re-run Check all to refresh the summary."}
+          {!bulk.apply.dryRun && bulk.apply.applied > 0 && " · Re-run Check all to refresh the summary."}
         </div>
       )}
       <table style={styles.table}>

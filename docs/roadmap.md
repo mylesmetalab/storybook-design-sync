@@ -68,6 +68,8 @@ system. Highlights of the work already done:
 | S18 | Longhand `border-radius` corners across mde        | mde                                         |
 | P1.1 | Auto-derive tokens from CSS (kill the third copy) | addon v0.0.23 + Downmark#21                |
 | P1.2 | PostCSS AST code-write engine (replace regex swap) | pipeline v0.0.8                            |
+| H1   | Bulk drift export + Apply-all (dry-run default)    | addon #27                                   |
+| H2   | Bulk Check all honors "Both modes" + drift-engine honesty pass (mode default, gap normal, transparent guards, alpha-1, lineHeight AUTO, border-edge, primary-text-node heuristic) | addon #27 |
 
 ## Active roadmap
 
@@ -90,6 +92,8 @@ of bug; finishing unfinished features afterwards becomes much cheaper.
 | ~~P1.2~~ | ~~PostCSS-based code-write engine (replace regex swap)~~ | ✅ Shipped — pipeline v0.0.8. Regex engine deleted, AST engine has 21 unit tests, stale-check tightened. | 2d   |
 | P1.3  | Shared types + normalizers package                      | One `Edit` definition, one `normalizeTokenName`, imported by all three repos.               | 0.5d   |
 | P1.4  | Move CSS writes from pipeline into addon preset         | Update code works without the pipeline binary running. Pipeline only needed for Figma writes. | 0.5–1d |
+| ~~P1.5~~ | ~~Drift-engine honesty pass~~ | ✅ Shipped — addon #27. Bulk Check all now honors "Both modes", `findFirstTextNode` prefers alphanumeric labels over single-glyph children, border read from drawn edge (not always `border-top-*`), mode-detection no longer guesses "light" on missing attribute, `gap: normal` / transparent / `rgba(R,G,B,1)` / Figma `lineHeight: AUTO` all stop producing false-positive drift. | 1d |
+| P1.6  | Inline-style binding scan (read side of P5.2) | Token-binding rows populate on inline-styled codebases (no `.css` files). Either JS-AST scanner or codemod that emits `data-token-*`. Currently every binding row reads `flag-only` "Code binding not declared" on inline-styled consumers. | 1.5d |
 
 ### Phase 2 — Finish the dimensions (~7.5 days)
 

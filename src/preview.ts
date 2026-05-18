@@ -194,10 +194,20 @@ const channel = addons.getChannel();
  * a wrapping element can override via `parameters.designSync.modeAttribute`
  * pointing to a different attribute.
  */
-function readActiveMode(modeAttribute = "data-theme"): string {
+/**
+ * Read the active mode from the host document. Returns the attribute's
+ * value when set (e.g. "light" / "dark"), `undefined` when the attribute
+ * is missing so the engine can resolve mode-aware values from Figma's
+ * default mode rather than silently guessing "light".
+ *
+ * Pre-fix this returned "light" on missing — every Storybook iframe
+ * without a theme attribute looked like an explicit light-mode opinion,
+ * which produced cross-mode false drift against dark-default Figma files.
+ */
+function readActiveMode(modeAttribute = "data-theme"): string | undefined {
   const root = document.documentElement;
   const value = root.getAttribute(modeAttribute);
-  return (value || "light").toLowerCase();
+  return value ? value.toLowerCase() : undefined;
 }
 
 /**
@@ -283,7 +293,8 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     snapshot.bindings = { ...(snapshot.bindings ?? {}), ...payload.tokens };
   }
   const mode = readActiveMode(modeAttribute);
-  const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot, mode };
+  const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot };
+  if (mode) out.mode = mode;
   if (payload.args) out.args = payload.args;
   if (payload.target) out.target = payload.target;
   channel.emit(EVENTS.CodeSnapshot, out);

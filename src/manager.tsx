@@ -29,6 +29,9 @@ interface BulkRow {
   flagOnly: number;
   durationMs: number;
   error?: string;
+  /** Full drift report from the engine — kept so the bulk Export action
+   *  can build a per-property markdown / JSON dump without re-running. */
+  report?: DriftReport;
 }
 
 interface BulkState {
@@ -319,7 +322,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
                 ...prev,
                 rows: prev.rows.map((r, j) =>
                   j === i
-                    ? { ...r, status: "done", durationMs, match: counts.match, drift: counts.drift, flagOnly: counts.flagOnly }
+                    ? { ...r, status: "done", durationMs, match: counts.match, drift: counts.drift, flagOnly: counts.flagOnly, report }
                     : r,
                 ),
               }
@@ -1047,6 +1050,33 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
   const avgMs = completed > 0 ? Math.round(total.totalEngineMs / completed) : 0;
   const done = bulk.rows.filter((r) => r.status === "done" || r.status === "error").length;
   const elapsed = (bulk.finishedAt ?? Date.now()) - bulk.startedAt;
+  const exportable = bulk.rows.some((r) => r.report);
+  const exportDisabled = bulk.running || !exportable;
+  const [copied, setCopied] = React.useState<"markdown" | "json" | null>(null);
+
+  const onExport = async (format: "markdown" | "json"): Promise<void> => {
+    const payload =
+      format === "markdown" ? buildMarkdownReport(bulk) : buildJsonReport(bulk);
+    try {
+      await navigator.clipboard.writeText(payload);
+      setCopied(format);
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      // Clipboard write can fail in restricted contexts; fall back to a
+      // download so the user still gets the artifact.
+      const blob = new Blob([payload], {
+        type: format === "markdown" ? "text/markdown" : "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `drift-report-${new Date().toISOString().replace(/[:.]/g, "-")}.${
+        format === "markdown" ? "md" : "json"
+      }`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  };
 
   return (
     <div style={styles.section}>
@@ -1058,6 +1088,24 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
           <span style={{ color: "#0a7d3e" }}>{total.match} match</span>{" "}
           · <span style={{ color: "#b91c1c" }}>{total.drift} drift</span>{" "}
           · {total.flagOnly} flag-only
+        </span>
+        <span style={{ marginLeft: 12, display: "inline-flex", gap: 6 }}>
+          <button
+            style={styles.button}
+            disabled={exportDisabled}
+            onClick={() => onExport("markdown")}
+            title="Copy a Markdown drift summary for sharing or review"
+          >
+            {copied === "markdown" ? "Copied!" : "Export markdown"}
+          </button>
+          <button
+            style={styles.button}
+            disabled={exportDisabled}
+            onClick={() => onExport("json")}
+            title="Copy the full DriftReport JSON for tooling / automation"
+          >
+            {copied === "json" ? "Copied!" : "Export JSON"}
+          </button>
         </span>
       </h3>
       <table style={styles.table}>
@@ -1109,6 +1157,118 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
     </div>
   );
 };
+
+/**
+ * Build a Markdown drift report for a bulk-check run. Skips `match` rows
+ * (they're noise), groups by story, and highlights drift before flag-only.
+ *
+ * Format chosen so the artifact reads cleanly in a PR description, can be
+ * pasted into a chat, and remains greppable.
+ */
+function buildMarkdownReport(bulk: BulkState): string {
+  const lines: string[] = [];
+  const generated = new Date(bulk.startedAt).toISOString();
+  const totals = bulk.rows.reduce(
+    (acc, r) => ({
+      match: acc.match + r.match,
+      drift: acc.drift + r.drift,
+      flagOnly: acc.flagOnly + r.flagOnly,
+    }),
+    { match: 0, drift: 0, flagOnly: 0 },
+  );
+  lines.push(`# Design-sync drift report`);
+  lines.push("");
+  lines.push(`Generated: ${generated}`);
+  lines.push(
+    `Stories: ${bulk.rows.length} · Drift: ${totals.drift} · Flag-only: ${totals.flagOnly} · Match: ${totals.match}`,
+  );
+  lines.push("");
+
+  const driftedStories = bulk.rows.filter((r) => r.drift > 0);
+  const flaggedStories = bulk.rows.filter((r) => r.drift === 0 && r.flagOnly > 0);
+  const errorStories = bulk.rows.filter((r) => r.status === "error");
+
+  if (driftedStories.length === 0 && flaggedStories.length === 0 && errorStories.length === 0) {
+    lines.push(`No drift detected.`);
+    return lines.join("\n");
+  }
+
+  if (driftedStories.length > 0) {
+    lines.push(`## Drift`);
+    lines.push("");
+    for (const row of driftedStories) {
+      renderStorySection(lines, row, ["drift"]);
+    }
+  }
+  if (flaggedStories.length > 0) {
+    lines.push(`## Flag-only (review)`);
+    lines.push("");
+    for (const row of flaggedStories) {
+      renderStorySection(lines, row, ["flag-only"]);
+    }
+  }
+  if (errorStories.length > 0) {
+    lines.push(`## Errors`);
+    lines.push("");
+    for (const row of errorStories) {
+      lines.push(`- \`${row.storyId}\` — ${row.error ?? "unknown"}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function renderStorySection(
+  lines: string[],
+  row: BulkRow,
+  include: DimensionDiff["status"][],
+): void {
+  const report = row.report;
+  if (!report) return;
+  const rows = report.dimensions.filter((d) => include.includes(d.status));
+  if (rows.length === 0) return;
+  lines.push(`### \`${row.storyId}\` — node ${report.nodeId}`);
+  lines.push("");
+  lines.push(`| Kind | Property | Code | Figma | Note |`);
+  lines.push(`| --- | --- | --- | --- | --- |`);
+  for (const d of rows) {
+    lines.push(
+      `| ${d.kind} | ${d.property} | ${cellValue(d.codeValue)} | ${cellValue(d.figmaValue)} | ${escapeCell(d.note ?? "")} |`,
+    );
+  }
+  lines.push("");
+}
+
+function cellValue(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "string") return escapeCell(v);
+  return escapeCell(JSON.stringify(v));
+}
+
+function escapeCell(s: string): string {
+  return s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+function buildJsonReport(bulk: BulkState): string {
+  return JSON.stringify(
+    {
+      generatedAt: new Date(bulk.startedAt).toISOString(),
+      finishedAt: bulk.finishedAt ? new Date(bulk.finishedAt).toISOString() : null,
+      stories: bulk.rows.map((r) => ({
+        storyId: r.storyId,
+        status: r.status,
+        match: r.match,
+        drift: r.drift,
+        flagOnly: r.flagOnly,
+        durationMs: r.durationMs,
+        error: r.error ?? null,
+        report: r.report ?? null,
+      })),
+    },
+    null,
+    2,
+  );
+}
 
 function statusStyle(status: DimensionDiff["status"]): React.CSSProperties {
   switch (status) {

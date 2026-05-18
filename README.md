@@ -152,21 +152,39 @@ The preview hook reads:
 If the registry doesn't list the current story, the panel shows:
 > Not registered. Add this story to `.design-sync/registry.json`.
 
-## Audit registry coverage
+## CLI
 
-In-panel "Not registered" only fires when a designer happens to open the
-story. To surface drift across the whole repo — and to fail CI on it —
-run the bundled CLI:
+The package ships a `design-sync` binary with four subcommands:
+
+```
+design-sync audit                       Diff stories on disk against the registry
+design-sync register [--hints <path>]   Bulk-register from hints; stub the rest
+design-sync ls                          Print title → node binding tree
+design-sync export-graph --format json|dot
+                                        Emit the binding graph for docs / visualizations
+```
+
+All subcommands accept `--stories <glob>` (repeatable; defaults cover
+`src/**/*.stories.*` and `stories/**/*.stories.*`).
+
+### `audit` — surface drift, fail CI
+
+In-panel "Not registered" only fires when a designer happens to open
+the story. `audit` walks every story file, derives the canonical id,
+and diffs against `.design-sync/registry.json`:
 
 ```sh
 npx design-sync audit
 ```
 
-It walks `src/**/*.stories.*` (override with `--stories <glob>`), parses
-each story's `title` and named exports, derives the canonical story id,
-and diffs against `.design-sync/registry.json`. The report lists every
-story Missing from, or Extra in, the registry. Exits non-zero when
-either bucket is non-empty.
+Reports Missing (in code, unregistered), Extra (registered, no matching
+story), and Pending (registered but no Figma binding assigned). Exits
+non-zero when Missing or Extra is non-empty so it composes with CI:
+
+```yaml
+- name: design-sync audit
+  run: npx design-sync audit
+```
 
 **Story id formula** (matches `@storybook/csf` `toId`):
 
@@ -177,22 +195,55 @@ sanitize(title) + "--" + sanitize(storyNameFromExport(exportName))
 So `title: "Molecules/RowBoolean"` + `export const CheckedTrueStateDefault`
 → `molecules-rowboolean--checked-true-state-default`.
 
-> **Discovery is regex-based.** Files with computed titles or unusual CSF
-> shapes are surfaced as parse warnings rather than silently skipped. If
-> your stories don't follow `title: "..."` + named exports, the warning
-> tells you which files need attention.
+> **Discovery is regex-based.** Files with no detectable `title:` are
+> surfaced as parse warnings rather than silently skipped.
 
-### CI integration
+### `register` — bulk-register from a hints file
 
-GitHub Actions:
+Going from 0 → N registry entries by hand is tedious. Provide a hints
+file (`.design-sync/hints.json` by default) mapping story id → Figma
+node id; `register` reads it, adds real entries for matched stories,
+and writes `pending` stubs for everything else:
 
-```yaml
-- name: design-sync audit
-  run: npx design-sync audit
+```json
+{
+  "molecules-rowboolean--checked-true-state-default": "72:588",
+  "molecules-rowboolean--checked-true-state-hover":   "72:595"
+}
 ```
 
-Any PR that adds a story without registering its Figma binding (or
-removes a story without cleaning the registry) fails the check.
+```sh
+npx design-sync register --dry-run    # preview
+npx design-sync register              # write
+```
+
+Existing registry entries are never overwritten — `register` only adds.
+
+### Pending stubs
+
+Stories that don't yet have a Figma counterpart can be expressed
+honestly in the registry:
+
+```json
+"molecules-rowfoo--default": {
+  "nodeId": null,
+  "lastSyncedHash": null,
+  "status": "pending"
+}
+```
+
+The panel surfaces these as "Pending — Figma binding not assigned" instead
+of attempting a drift check. `audit` counts them separately from Missing
+so the registry can reflect "I know about this story, the binding is
+intentionally absent" without being treated as drift.
+
+### Component-set coverage warnings
+
+When the registered node is a `COMPONENT_SET` (rather than a specific
+variant), the drift report's variant-set row includes a warning naming
+the first variant Figma would otherwise use, so it's clear that
+value/binding diffs are running against the set root and not a pinned
+variant.
 
 ## Mode-aware tokens
 

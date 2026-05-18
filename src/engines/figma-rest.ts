@@ -861,9 +861,26 @@ class FigmaRestEngine implements Engine {
       figmaValue: [...figmaOptions],
       status,
     };
-    if (status === "drift") {
-      diff.note = `code variants not declared in Figma: [${unknownInFigma.join(", ")}]`;
+
+    // Coverage warning: when the story registers against the SET rather than
+    // a specific variant, value/binding diffs run against the set's root
+    // node (typically inheriting from the first child). Surface that fact
+    // so users know to pin to a variant for exact comparison.
+    const notes: string[] = [];
+    if (node.type === "COMPONENT_SET") {
+      const firstVariant = node.children?.find((c) => c.type === "COMPONENT");
+      if (firstVariant) {
+        notes.push(
+          `Registered node is the COMPONENT_SET. Value/binding diffs use the set root; ` +
+            `first variant "${firstVariant.name}" → ${firstVariant.id}. ` +
+            `Pin the registry to a specific variant node for exact comparison.`,
+        );
+      }
     }
+    if (status === "drift") {
+      notes.push(`code variants not declared in Figma: [${unknownInFigma.join(", ")}]`);
+    }
+    if (notes.length > 0) diff.note = notes.join(" ");
     return [diff];
   }
 

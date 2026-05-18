@@ -7,3 +7,4 @@ dist/
 # we don't want to forget. Not for upstream consumption.
 CLAUDE.md
 .claude/
+*.tgz

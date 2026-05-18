@@ -39,6 +39,19 @@ interface BulkState {
   startedAt: number;
   finishedAt?: number;
   rows: BulkRow[];
+  apply?: BulkApplyState;
+}
+
+/** Live state for an "Apply all fixable" run launched from the bulk summary. */
+interface BulkApplyState {
+  running: boolean;
+  total: number;
+  applied: number;
+  skipped: number;
+  errored: number;
+  /** storyId currently being processed (for inline progress UI). */
+  current?: string;
+  finishedAt?: number;
 }
 
 interface ApplyResult {
@@ -352,6 +365,96 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     emit(EVENTS.ListRegisteredRequest);
   }, [emit]);
 
+  /**
+   * Apply every fixable code-side drift across the bulk run. Iterates each
+   * row's report, builds a `code` edit per drift dimension via the same
+   * `buildEdit` path the per-row Apply buttons use, and posts through the
+   * pipeline so it goes through the addon's tested PostCSS write engine
+   * (token-name normalization, undo-stack, etc.).
+   *
+   * Code-side only by default — Figma is shared state; users opt into
+   * Figma writes per-row.
+   *
+   * Each story's `designSync.target` selector is read from
+   * `sbApi.getStoryData(storyId)?.parameters` — populated because bulk
+   * Check all navigated to every story before snapshotting.
+   */
+  const onApplyAll = useCallback(async () => {
+    setBulk((prev) => {
+      if (!prev) return prev;
+      const drifted = prev.rows.filter((r) => r.report && r.drift > 0);
+      const total = drifted.reduce(
+        (acc, r) => acc + (r.report?.dimensions.filter((d) => d.status === "drift").length ?? 0),
+        0,
+      );
+      return {
+        ...prev,
+        apply: { running: true, total, applied: 0, skipped: 0, errored: 0 },
+      };
+    });
+
+    // Snapshot the rows we want to act on so subsequent setBulk calls
+    // (which run in event-loop order) don't race the apply loop.
+    const rows = (bulk?.rows ?? []).filter((r) => r.report && r.drift > 0);
+
+    for (const row of rows) {
+      const report = row.report!;
+      const storyData = sbApi?.getStoryData?.(row.storyId);
+      const storyParams =
+        (storyData?.parameters as { designSync?: { target?: string; pipelineUrl?: string } } | undefined)
+          ?.designSync ?? {};
+      const selector = storyParams.target;
+      const pipelineUrl = storyParams.pipelineUrl ?? PIPELINE_DEFAULT_URL;
+
+      for (const d of report.dimensions) {
+        if (d.status !== "drift") continue;
+        setBulk((prev) => (prev?.apply ? { ...prev, apply: { ...prev.apply, current: row.storyId } } : prev));
+
+        const edit = buildEdit(d, row.storyId, selector, "code", report.nodeId);
+        if (!edit) {
+          setBulk((prev) =>
+            prev?.apply ? { ...prev, apply: { ...prev.apply, skipped: prev.apply.skipped + 1 } } : prev,
+          );
+          continue;
+        }
+        try {
+          const result = await postEdit(pipelineUrl, edit);
+          if (result.status === "applied") {
+            setBulk((prev) =>
+              prev?.apply ? { ...prev, apply: { ...prev.apply, applied: prev.apply.applied + 1 } } : prev,
+            );
+          } else {
+            setBulk((prev) =>
+              prev?.apply
+                ? {
+                    ...prev,
+                    apply: {
+                      ...prev.apply,
+                      [result.status === "no_op" ? "skipped" : "errored"]:
+                        result.status === "no_op"
+                          ? prev.apply.skipped + 1
+                          : prev.apply.errored + 1,
+                    },
+                  }
+                : prev,
+            );
+          }
+        } catch {
+          setBulk((prev) =>
+            prev?.apply ? { ...prev, apply: { ...prev.apply, errored: prev.apply.errored + 1 } } : prev,
+          );
+        }
+      }
+    }
+
+    setBulk((prev) => {
+      if (!prev?.apply) return prev;
+      const { current: _drop, ...rest } = prev.apply;
+      void _drop;
+      return { ...prev, apply: { ...rest, running: false, finishedAt: Date.now() } };
+    });
+  }, [bulk, sbApi]);
+
   if (!active) return null;
 
   return (
@@ -379,7 +482,13 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         {storyId && <span style={styles.storyId}>{storyId}</span>}
       </div>
 
-      {bulk && <BulkSummary bulk={bulk} onSelect={(id) => sbApi?.selectStory(id)} />}
+      {bulk && (
+        <BulkSummary
+          bulk={bulk}
+          onSelect={(id) => sbApi?.selectStory(id)}
+          onApplyAll={onApplyAll}
+        />
+      )}
 
       {state.error && <div style={styles.error}>{state.error}</div>}
 
@@ -1034,9 +1143,10 @@ const StagedEdits: React.FC<StagedEditsProps> = ({ edits, applyResults, pipeline
 interface BulkSummaryProps {
   bulk: BulkState;
   onSelect: (storyId: string) => void;
+  onApplyAll: () => void;
 }
 
-const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
+const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect, onApplyAll }) => {
   const total = bulk.rows.reduce(
     (acc, r) => ({
       match: acc.match + r.match,
@@ -1106,8 +1216,33 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
           >
             {copied === "json" ? "Copied!" : "Export JSON"}
           </button>
+          <button
+            style={styles.button}
+            disabled={
+              bulk.running ||
+              bulk.apply?.running ||
+              !bulk.rows.some((r) => r.drift > 0)
+            }
+            onClick={onApplyAll}
+            title="Apply every fixable code-side drift through the addon's write engine"
+          >
+            {bulk.apply?.running
+              ? `Applying… (${bulk.apply.applied + bulk.apply.skipped + bulk.apply.errored}/${bulk.apply.total})`
+              : "Apply all (code)"}
+          </button>
         </span>
       </h3>
+      {bulk.apply && !bulk.apply.running && bulk.apply.finishedAt && (
+        <div style={{ ...styles.muted, marginBottom: 8 }}>
+          Apply all finished —{" "}
+          <span style={{ color: "#0a7d3e" }}>{bulk.apply.applied} applied</span>{" "}
+          · {bulk.apply.skipped} skipped (not auto-fixable){" "}
+          · <span style={{ color: bulk.apply.errored > 0 ? "#b91c1c" : "#7a7a7a" }}>
+            {bulk.apply.errored} errored
+          </span>
+          {bulk.apply.applied > 0 && " · Re-run Check all to refresh the summary."}
+        </div>
+      )}
       <table style={styles.table}>
         <thead>
           <tr>

@@ -456,7 +456,12 @@ class FigmaRestEngine implements Engine {
     const figmaHasVisibleStroke =
       Array.isArray(node.strokes) && (node.strokes as FigmaPaint[]).length > 0;
 
-    const codeBorderPx = parsePx(snapshot.styles["border-top-width"]) ?? 0;
+    // The element may draw its border on any single edge (commonly
+    // border-bottom for separator rows) rather than uniformly. Pick
+    // whichever edge actually has a non-zero width so the comparison
+    // matches reality. Falls back to the top edge when none drawn.
+    const codeBorderEdge = pickBorderEdge(snapshot.styles);
+    const codeBorderPx = parsePx(snapshot.styles[`border-${codeBorderEdge}-width`]) ?? 0;
     if (figmaHasVisibleStroke || codeBorderPx > 0) {
       const weightAlias = node.boundVariables?.strokeWeight;
       const aliasObj = Array.isArray(weightAlias) ? weightAlias[0] : weightAlias;
@@ -474,7 +479,7 @@ class FigmaRestEngine implements Engine {
       if (!figmaWeight && figmaHasVisibleStroke && typeof node.strokeWeight === "number") {
         figmaWeight = { value: node.strokeWeight as number };
       }
-      const codeValue = snapshot.styles["border-top-width"];
+      const codeValue = snapshot.styles[`border-${codeBorderEdge}-width`];
       const codePx = parsePx(codeValue);
       if (figmaWeight || (codePx !== null && codePx > 0)) {
         const status: DimensionDiff["status"] =
@@ -510,7 +515,7 @@ class FigmaRestEngine implements Engine {
           figmaStroke = { value: rgbaToCss(stroke.color) };
         }
       }
-      const codeValue = snapshot.styles["border-top-color"];
+      const codeValue = snapshot.styles[`border-${codeBorderEdge}-color`];
       if (figmaStroke || (codeValue && codeValue !== "rgba(0, 0, 0, 0)")) {
         const status: DimensionDiff["status"] =
           codeValue && figmaStroke && normalizeColor(codeValue) === normalizeColor(figmaStroke.value)
@@ -1147,6 +1152,20 @@ function normalizeTokenName(name: string | undefined): string {
     .toLowerCase();
 }
 
+/**
+ * Pick the border edge to compare against the Figma stroke. Rows that
+ * draw only a `border-bottom` would otherwise read zero from
+ * `border-top-width` and falsely report drift. Falls back to "top" when
+ * no edge has a non-zero width — keeps prior behavior for components
+ * that genuinely have no border.
+ */
+function pickBorderEdge(styles: Record<string, string>): "top" | "right" | "bottom" | "left" {
+  for (const edge of ["bottom", "top", "left", "right"] as const) {
+    if ((parsePx(styles[`border-${edge}-width`]) ?? 0) > 0) return edge;
+  }
+  return "top";
+}
+
 function parsePx(value: string | undefined): number | null {
   if (!value) return null;
   const m = /^(-?\d+(?:\.\d+)?)\s*px$/.exec(value);
@@ -1380,18 +1399,50 @@ function collectFigmaBindings(
 }
 
 /**
- * Walk a Figma node tree depth-first and return the first TEXT node. Used
- * by the typography diffs to source font-size / line-height / family /
- * color from a node that actually has them — most component variants are
- * FRAMEs with a TEXT child rather than text nodes themselves.
+ * Pick the "primary" TEXT descendant for typography comparison.
+ *
+ * Naïve depth-first picks whichever TEXT node happens to come first in the
+ * tree, which is often a single-character glyph like "▾" / "▼" / "✓" — that
+ * glyph runs in a different style (`chrome/glyph/*`) from the row's actual
+ * label, so the diff reads the wrong typography. We instead score every
+ * TEXT descendant and prefer ones that look like real labels:
+ *
+ *   - more characters wins
+ *   - alphanumeric content wins over pure-symbol content
+ *   - if a node IS itself a TEXT node, return it (preserves trivial case)
+ *
+ * Falls back to the first descendant when no candidate stands out (e.g.
+ * single-glyph atoms like the Caret).
  */
 function findFirstTextNode(node: FigmaNode): FigmaNode | undefined {
   if (node.type === "TEXT") return node;
-  for (const child of node.children ?? []) {
-    const found = findFirstTextNode(child);
-    if (found) return found;
+  const all: FigmaNode[] = [];
+  const walk = (n: FigmaNode): void => {
+    if (n.type === "TEXT") all.push(n);
+    for (const child of n.children ?? []) walk(child);
+  };
+  walk(node);
+  if (all.length === 0) return undefined;
+  if (all.length === 1) return all[0];
+
+  // Score each candidate; higher is better.
+  const score = (n: FigmaNode): number => {
+    const chars = (n as unknown as { characters?: string }).characters ?? "";
+    let s = chars.length;
+    if (/[a-zA-Z0-9]/.test(chars)) s += 100;
+    return s;
+  };
+  let best = all[0]!;
+  let bestScore = score(best);
+  for (let i = 1; i < all.length; i++) {
+    const cand = all[i]!;
+    const cs = score(cand);
+    if (cs > bestScore) {
+      best = cand;
+      bestScore = cs;
+    }
   }
-  return undefined;
+  return best;
 }
 
 function pickAlias(value: FigmaVariableAlias | FigmaVariableAlias[] | undefined): FigmaVariableAlias | undefined {

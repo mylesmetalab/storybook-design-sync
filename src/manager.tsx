@@ -326,7 +326,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
 
       const t0 = Date.now();
       try {
-        const report = await checkOneStory(entry.storyId, sbApi, emit, pendingResolversRef);
+        const report = await checkOneStory(entry.storyId, sbApi, emit, pendingResolversRef, { dualMode });
         const counts = countRows(report);
         const durationMs = Date.now() - t0;
         setBulk((prev) =>
@@ -358,7 +358,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     }
 
     setBulk((prev) => (prev ? { ...prev, running: false, finishedAt: Date.now() } : prev));
-  }, [emit, sbApi]);
+  }, [emit, sbApi, dualMode]);
 
   const onCheckAll = useCallback(() => {
     setBulk(null);
@@ -982,16 +982,20 @@ function checkOneStory(
     reject: (err: string) => void;
     storyId: string;
   } | null>,
+  opts: { dualMode?: boolean } = {},
 ): Promise<DriftReport> {
   return new Promise<DriftReport>((resolve, reject) => {
     if (!sbApi) {
       reject("Storybook API unavailable");
       return;
     }
+    // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
+    // Bump the per-story timeout so bulk dual-mode runs don't false-time-out.
+    const timeoutMs = opts.dualMode ? 16000 : 8000;
     const timeout = setTimeout(() => {
       pendingRef.current = null;
-      reject(`Timed out (>8s) on ${storyId}`);
-    }, 8000);
+      reject(`Timed out (>${Math.round(timeoutMs / 1000)}s) on ${storyId}`);
+    }, timeoutMs);
 
     pendingRef.current = {
       storyId,
@@ -1015,6 +1019,7 @@ function checkOneStory(
       // story. parameters.designSync.target/tokens are read by the preview
       // from the active story's parameters, so we don't need to pass them.
       const payload: CheckDriftRequestPayload = { storyId };
+      if (opts.dualMode) payload.dualMode = true;
       emit(EVENTS.CheckDriftRequest, payload);
     };
     channel.on(STORY_RENDERED_EVENT, onRendered);

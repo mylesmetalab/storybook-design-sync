@@ -12,12 +12,24 @@ export interface DesignSyncConfig {
    * Set this if your CSS lives elsewhere (e.g. `styles/**\/*.css`).
    */
   cssEntries: string[];
+  /**
+   * Glob patterns (relative to the consumer's cwd) where stories live.
+   * Used by the CLI for discovery. Set this in monorepos where stories
+   * are siblings of the Storybook host (e.g.
+   * `["../../packages/*\/src/**\/*.stories.@(ts|tsx)"]`). The CLI's
+   * `--stories` flag still overrides this when set.
+   */
+  storyGlobs: string[];
 }
 
 const DEFAULTS = {
   engine: "figma-rest",
   registryPath: ".design-sync/registry.json",
   cssEntries: ["src/**/*.css"],
+  storyGlobs: [
+    "src/**/*.stories.@(ts|tsx|js|jsx|mjs|mts)",
+    "stories/**/*.stories.@(ts|tsx|js|jsx|mjs|mts)",
+  ],
 } as const;
 
 const CANDIDATES = [
@@ -56,6 +68,7 @@ function normalize(raw: unknown): DesignSyncConfig {
     registryPath: r.registryPath ?? DEFAULTS.registryPath,
     fileKey: r.fileKey,
     cssEntries: r.cssEntries ?? [...DEFAULTS.cssEntries],
+    storyGlobs: r.storyGlobs ?? [...DEFAULTS.storyGlobs],
   };
 }
 

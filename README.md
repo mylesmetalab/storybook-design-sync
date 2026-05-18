@@ -152,6 +152,112 @@ The preview hook reads:
 If the registry doesn't list the current story, the panel shows:
 > Not registered. Add this story to `.design-sync/registry.json`.
 
+## CLI
+
+The package ships a `design-sync` binary with four subcommands:
+
+```
+design-sync audit                       Diff stories on disk against the registry
+design-sync register [--hints <path>]   Bulk-register from hints; stub the rest
+design-sync ls                          Print title → node binding tree
+design-sync export-graph --format json|dot
+                                        Emit the binding graph for docs / visualizations
+```
+
+All subcommands accept `--stories <glob>` (repeatable). When `--stories`
+isn't passed, the CLI uses `storyGlobs` from `design-sync.config.json`,
+falling back to `src/**/*.stories.*` and `stories/**/*.stories.*`. In
+monorepos where stories live in sibling packages, set the config field
+so the bare commands work without flags:
+
+```json
+{
+  "fileKey": "...",
+  "storyGlobs": [
+    "../../packages/*/src/**/*.stories.@(ts|tsx)",
+    "src/stories/**/*.stories.@(ts|tsx)"
+  ]
+}
+```
+
+### `audit` — surface drift, fail CI
+
+In-panel "Not registered" only fires when a designer happens to open
+the story. `audit` walks every story file, derives the canonical id,
+and diffs against `.design-sync/registry.json`:
+
+```sh
+npx design-sync audit
+```
+
+Reports Missing (in code, unregistered), Extra (registered, no matching
+story), and Pending (registered but no Figma binding assigned). Exits
+non-zero when Missing or Extra is non-empty so it composes with CI:
+
+```yaml
+- name: design-sync audit
+  run: npx design-sync audit
+```
+
+**Story id formula** (matches `@storybook/csf` `toId`):
+
+```
+sanitize(title) + "--" + sanitize(storyNameFromExport(exportName))
+```
+
+So `title: "Molecules/RowBoolean"` + `export const CheckedTrueStateDefault`
+→ `molecules-rowboolean--checked-true-state-default`.
+
+> **Discovery is regex-based.** Files with no detectable `title:` are
+> surfaced as parse warnings rather than silently skipped.
+
+### `register` — bulk-register from a hints file
+
+Going from 0 → N registry entries by hand is tedious. Provide a hints
+file (`.design-sync/hints.json` by default) mapping story id → Figma
+node id; `register` reads it, adds real entries for matched stories,
+and writes `pending` stubs for everything else:
+
+```json
+{
+  "molecules-rowboolean--checked-true-state-default": "72:588",
+  "molecules-rowboolean--checked-true-state-hover":   "72:595"
+}
+```
+
+```sh
+npx design-sync register --dry-run    # preview
+npx design-sync register              # write
+```
+
+Existing registry entries are never overwritten — `register` only adds.
+
+### Pending stubs
+
+Stories that don't yet have a Figma counterpart can be expressed
+honestly in the registry:
+
+```json
+"molecules-rowfoo--default": {
+  "nodeId": null,
+  "lastSyncedHash": null,
+  "status": "pending"
+}
+```
+
+The panel surfaces these as "Pending — Figma binding not assigned" instead
+of attempting a drift check. `audit` counts them separately from Missing
+so the registry can reflect "I know about this story, the binding is
+intentionally absent" without being treated as drift.
+
+### Component-set coverage warnings
+
+When the registered node is a `COMPONENT_SET` (rather than a specific
+variant), the drift report's variant-set row includes a warning naming
+the first variant Figma would otherwise use, so it's clear that
+value/binding diffs are running against the set root and not a pinned
+variant.
+
 ## Mode-aware tokens
 
 Color variables are resolved with both Light and Dark modes preserved

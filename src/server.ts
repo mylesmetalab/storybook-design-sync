@@ -1,5 +1,5 @@
 import { loadConfig } from "./config.js";
-import { loadRegistry, lookup } from "./registry.js";
+import { loadRegistry, lookup, isPending } from "./registry.js";
 import { resolveEngine } from "./engines/index.js";
 import { EVENTS, type CodeSnapshotPayload } from "./channels.js";
 import type { DimensionDiff, DriftReport } from "./dimensions/types.js";
@@ -22,10 +22,12 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
     try {
       const config = await loadConfig();
       const registry = await loadRegistry(config.registryPath);
-      const stories = Object.entries(registry.stories).map(([storyId, entry]) => ({
-        storyId,
-        nodeId: entry.nodeId,
-      }));
+      const stories = Object.entries(registry.stories)
+        .filter(([, entry]) => !isPending(entry))
+        .map(([storyId, entry]) => ({
+          storyId,
+          nodeId: entry.nodeId!,
+        }));
       channel.emit(EVENTS.RegisteredStories, {
         stories,
         fileKey: registry.fileKey || config.fileKey,
@@ -53,7 +55,20 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       if (!entry) {
         channel.emit(EVENTS.DriftError, {
           storyId,
-          message: `Not registered. Add "${storyId}" to ${config.registryPath}.`,
+          message:
+            `Not registered. Add "${storyId}" to ${config.registryPath}. ` +
+            `Run \`design-sync audit\` to list every story missing from the registry. ` +
+            `(id format: sanitize(title) + "--" + sanitize(storyNameFromExport(exportName)))`,
+        });
+        return;
+      }
+
+      if (isPending(entry)) {
+        channel.emit(EVENTS.DriftError, {
+          storyId,
+          message:
+            `Pending — Figma binding not assigned. ` +
+            `Set "nodeId" for "${storyId}" in ${config.registryPath} once the variant exists.`,
         });
         return;
       }
@@ -67,7 +82,7 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
 
       const baseInput: import("./engines/types.js").CheckDriftInput = {
         storyId,
-        nodeRef: { fileKey: registry.fileKey || config.fileKey, nodeId: entry.nodeId },
+        nodeRef: { fileKey: registry.fileKey || config.fileKey, nodeId: entry.nodeId! },
       };
       if (snapshot) baseInput.snapshot = snapshot;
       if (mode) baseInput.mode = mode;

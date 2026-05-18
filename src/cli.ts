@@ -12,7 +12,9 @@ import {
 
 interface CommonOptions {
   cwd: string;
-  storyGlobs: string[];
+  /** Override globs from --stories. When undefined, the loaded config's
+   *  `storyGlobs` is used. */
+  storyGlobsOverride: string[] | undefined;
 }
 
 interface RegisterOptions extends CommonOptions {
@@ -23,11 +25,6 @@ interface RegisterOptions extends CommonOptions {
 interface ExportGraphOptions extends CommonOptions {
   format: "json" | "dot";
 }
-
-const DEFAULT_STORY_GLOBS = [
-  "src/**/*.stories.@(ts|tsx|js|jsx|mjs|mts)",
-  "stories/**/*.stories.@(ts|tsx|js|jsx|mjs|mts)",
-];
 
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
@@ -69,50 +66,16 @@ function printHelp(): void {
 }
 
 function parseCommon(rest: string[]): CommonOptions {
-  const cwd = process.cwd();
-  const storyGlobs: string[] = [];
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i];
-    if (arg === "--stories") {
-      const value = rest[++i];
-      if (!value) throw new Error("--stories requires a glob argument");
-      storyGlobs.push(value);
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-  return {
-    cwd,
-    storyGlobs: storyGlobs.length > 0 ? storyGlobs : [...DEFAULT_STORY_GLOBS],
-  };
+  return parseCommonAllowing(rest, []);
 }
 
 function parseRegisterArgs(rest: string[]): RegisterOptions {
-  const cwd = process.cwd();
-  const storyGlobs: string[] = [];
-  let hintsPath = ".design-sync/hints.json";
-  let dryRun = false;
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i];
-    if (arg === "--stories") {
-      const value = rest[++i];
-      if (!value) throw new Error("--stories requires a glob argument");
-      storyGlobs.push(value);
-    } else if (arg === "--hints") {
-      const value = rest[++i];
-      if (!value) throw new Error("--hints requires a path argument");
-      hintsPath = value;
-    } else if (arg === "--dry-run") {
-      dryRun = true;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
+  const common = parseCommonAllowing(rest, ["--hints", "--dry-run"]);
   return {
-    cwd,
-    storyGlobs: storyGlobs.length > 0 ? storyGlobs : [...DEFAULT_STORY_GLOBS],
-    hintsPath,
-    dryRun,
+    cwd: common.cwd,
+    storyGlobsOverride: common.storyGlobsOverride,
+    hintsPath: common.extras.get("--hints") ?? ".design-sync/hints.json",
+    dryRun: common.flags.has("--dry-run"),
   };
 }
 
@@ -122,34 +85,47 @@ function parseExportGraphArgs(rest: string[]): ExportGraphOptions {
   if (format !== "json" && format !== "dot") {
     throw new Error("--format must be 'json' or 'dot'");
   }
-  return { cwd: common.cwd, storyGlobs: common.storyGlobs, format };
+  return { cwd: common.cwd, storyGlobsOverride: common.storyGlobsOverride, format };
 }
+
+const BOOLEAN_FLAGS = new Set(["--dry-run"]);
 
 function parseCommonAllowing(
   rest: string[],
-  flagsWithValues: string[],
-): { cwd: string; storyGlobs: string[]; extras: Map<string, string> } {
+  allowedExtras: string[],
+): {
+  cwd: string;
+  storyGlobsOverride: string[] | undefined;
+  extras: Map<string, string>;
+  flags: Set<string>;
+} {
   const cwd = process.cwd();
   const storyGlobs: string[] = [];
   const extras = new Map<string, string>();
+  const flags = new Set<string>();
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i]!;
     if (arg === "--stories") {
       const value = rest[++i];
       if (!value) throw new Error("--stories requires a glob argument");
       storyGlobs.push(value);
-    } else if (flagsWithValues.includes(arg)) {
-      const value = rest[++i];
-      if (!value) throw new Error(`${arg} requires a value`);
-      extras.set(arg, value);
+    } else if (allowedExtras.includes(arg)) {
+      if (BOOLEAN_FLAGS.has(arg)) {
+        flags.add(arg);
+      } else {
+        const value = rest[++i];
+        if (!value) throw new Error(`${arg} requires a value`);
+        extras.set(arg, value);
+      }
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
   return {
     cwd,
-    storyGlobs: storyGlobs.length > 0 ? storyGlobs : [...DEFAULT_STORY_GLOBS],
+    storyGlobsOverride: storyGlobs.length > 0 ? storyGlobs : undefined,
     extras,
+    flags,
   };
 }
 
@@ -167,8 +143,12 @@ interface DiscoveryResult {
   warnings: string[];
 }
 
-async function discover(opts: CommonOptions): Promise<DiscoveryResult> {
-  const files = await glob(opts.storyGlobs, { cwd: opts.cwd, absolute: true });
+async function discover(
+  opts: CommonOptions,
+  configGlobs: string[],
+): Promise<DiscoveryResult> {
+  const effective = opts.storyGlobsOverride ?? configGlobs;
+  const files = await glob(effective, { cwd: opts.cwd, absolute: true });
   const stories: DiscoveredStory[] = [];
   const warnings: string[] = [];
   const seen = new Set<string>();
@@ -245,7 +225,7 @@ function sanitize(s: string): string {
 async function audit(opts: CommonOptions): Promise<number> {
   const config = await loadConfig(opts.cwd);
   const registry = await loadRegistry(config.registryPath, opts.cwd);
-  const { stories, warnings } = await discover(opts);
+  const { stories, warnings } = await discover(opts, config.storyGlobs);
 
   const codeIds = new Set(stories.map((s) => s.id));
   const registryIds = new Set(Object.keys(registry.stories));
@@ -292,7 +272,7 @@ async function audit(opts: CommonOptions): Promise<number> {
 async function ls(opts: CommonOptions): Promise<number> {
   const config = await loadConfig(opts.cwd);
   const registry = await loadRegistry(config.registryPath, opts.cwd);
-  const { stories } = await discover(opts);
+  const { stories } = await discover(opts, config.storyGlobs);
   if (stories.length === 0) {
     console.log("No stories discovered.");
     return 0;
@@ -332,7 +312,7 @@ async function ls(opts: CommonOptions): Promise<number> {
 async function register(opts: RegisterOptions): Promise<number> {
   const config = await loadConfig(opts.cwd);
   const registry = await loadRegistry(config.registryPath, opts.cwd);
-  const { stories, warnings } = await discover(opts);
+  const { stories, warnings } = await discover(opts, config.storyGlobs);
   const hints = await loadHints(opts.cwd, opts.hintsPath);
 
   let added = 0;
@@ -400,7 +380,7 @@ async function loadHints(cwd: string, path: string): Promise<Record<string, stri
 async function exportGraph(opts: ExportGraphOptions): Promise<number> {
   const config = await loadConfig(opts.cwd);
   const registry = await loadRegistry(config.registryPath, opts.cwd);
-  const { stories } = await discover(opts);
+  const { stories } = await discover(opts, config.storyGlobs);
 
   const nodes = stories.map((s) => {
     const entry = registry.stories[s.id];

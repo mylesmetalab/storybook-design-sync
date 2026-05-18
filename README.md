@@ -164,8 +164,21 @@ design-sync export-graph --format json|dot
                                         Emit the binding graph for docs / visualizations
 ```
 
-All subcommands accept `--stories <glob>` (repeatable; defaults cover
-`src/**/*.stories.*` and `stories/**/*.stories.*`).
+All subcommands accept `--stories <glob>` (repeatable). When `--stories`
+isn't passed, the CLI uses `storyGlobs` from `design-sync.config.json`,
+falling back to `src/**/*.stories.*` and `stories/**/*.stories.*`. In
+monorepos where stories live in sibling packages, set the config field
+so the bare commands work without flags:
+
+```json
+{
+  "fileKey": "...",
+  "storyGlobs": [
+    "../../packages/*/src/**/*.stories.@(ts|tsx)",
+    "src/stories/**/*.stories.@(ts|tsx)"
+  ]
+}
+```
 
 ### `audit` — surface drift, fail CI
 

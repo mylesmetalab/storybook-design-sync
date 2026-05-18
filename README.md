@@ -152,6 +152,48 @@ The preview hook reads:
 If the registry doesn't list the current story, the panel shows:
 > Not registered. Add this story to `.design-sync/registry.json`.
 
+## Audit registry coverage
+
+In-panel "Not registered" only fires when a designer happens to open the
+story. To surface drift across the whole repo — and to fail CI on it —
+run the bundled CLI:
+
+```sh
+npx design-sync audit
+```
+
+It walks `src/**/*.stories.*` (override with `--stories <glob>`), parses
+each story's `title` and named exports, derives the canonical story id,
+and diffs against `.design-sync/registry.json`. The report lists every
+story Missing from, or Extra in, the registry. Exits non-zero when
+either bucket is non-empty.
+
+**Story id formula** (matches `@storybook/csf` `toId`):
+
+```
+sanitize(title) + "--" + sanitize(storyNameFromExport(exportName))
+```
+
+So `title: "Molecules/RowBoolean"` + `export const CheckedTrueStateDefault`
+→ `molecules-rowboolean--checked-true-state-default`.
+
+> **Discovery is regex-based.** Files with computed titles or unusual CSF
+> shapes are surfaced as parse warnings rather than silently skipped. If
+> your stories don't follow `title: "..."` + named exports, the warning
+> tells you which files need attention.
+
+### CI integration
+
+GitHub Actions:
+
+```yaml
+- name: design-sync audit
+  run: npx design-sync audit
+```
+
+Any PR that adds a story without registering its Figma binding (or
+removes a story without cleaning the registry) fails the check.
+
 ## Mode-aware tokens
 
 Color variables are resolved with both Light and Dark modes preserved

@@ -53,7 +53,10 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       if (!entry) {
         channel.emit(EVENTS.DriftError, {
           storyId,
-          message: `Not registered. Add "${storyId}" to ${config.registryPath}.`,
+          message:
+            `Not registered. Add "${storyId}" to ${config.registryPath}. ` +
+            `Run \`design-sync audit\` to list every story missing from the registry. ` +
+            `(id format: sanitize(title) + "--" + sanitize(storyNameFromExport(exportName)))`,
         });
         return;
       }

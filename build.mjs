@@ -75,6 +75,15 @@ await Promise.all([
     platform: "node",
     banner: { js: NODE_REQUIRE_BANNER },
   }),
+  // CLI — shebang banner so `bin` invocation works; require shim so
+  // bundled CJS deps (tinyglobby's chain, etc.) keep functioning.
+  build({
+    ...shared,
+    entryPoints: ["src/cli.ts"],
+    outfile: "dist/cli.js",
+    platform: "node",
+    banner: { js: `#!/usr/bin/env node\n${NODE_REQUIRE_BANNER}` },
+  }),
   // Public types entry
   build({
     ...shared,
@@ -92,3 +101,7 @@ const r = spawnSync("npx", ["tsc", "-p", "tsconfig.json", "--emitDeclarationOnly
   shell: true,
 });
 if (r.status !== 0) process.exit(r.status ?? 1);
+
+// chmod +x the CLI so `bin` invocation works without npm install rewriting it.
+const { chmodSync } = await import("node:fs");
+chmodSync("dist/cli.js", 0o755);

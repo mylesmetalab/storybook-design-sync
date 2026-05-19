@@ -91,3 +91,31 @@ producers.
 - The act of *acting on* `proposedEdit` events
 
 Designed in. Not built.
+
+## Codebase assumptions (and how to opt out)
+
+The engine reads from rendered DOM + computed CSS, so it works against
+any framework. A few v0 simplifications still tilt detection toward
+specific conventions; consumers outside those conventions get less
+out of the panel until the relevant roadmap items ship:
+
+- **Variant detection** looks for BEM-style modifier classes containing
+  `--` on the snapshotted element. Codebases that express variants
+  through props or data-attributes (Tailwind, CSS-in-JS, inline styles)
+  see `variant-set: drift` on every story. Opt-in workaround: pass the
+  active variant value through `parameters.designSync` (P2.2 finishes
+  this path).
+- **Binding detection** runs a PostCSS scan over `cssEntries` (default
+  `src/**/*.css`). Components styled inline (`style={{…}}`) or via
+  styled-components / Tailwind don't emit declarations the scanner can
+  read, so every `token-binding` row reads `flag-only`. Workarounds
+  until P1.6/P5.2: emit `data-token-*` attributes on the snapshotted
+  element, or pass `parameters.designSync.tokens`.
+- **Mode detection** reads an attribute on `<html>` named `data-theme`
+  by default. Consumers using a different attribute pass
+  `parameters.designSync.modeAttribute`. When the attribute is missing
+  entirely the engine treats mode as unknown (Figma resolves with the
+  file's default mode) rather than guessing "light".
+
+These are all "Phase 5 — Portability" prerequisites. Detection works
+either way; only the *richness* of the report degrades.

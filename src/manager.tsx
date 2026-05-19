@@ -29,6 +29,9 @@ interface BulkRow {
   flagOnly: number;
   durationMs: number;
   error?: string;
+  /** Full drift report from the engine — kept so the bulk Export action
+   *  can build a per-property markdown / JSON dump without re-running. */
+  report?: DriftReport;
 }
 
 interface BulkState {
@@ -36,6 +39,27 @@ interface BulkState {
   startedAt: number;
   finishedAt?: number;
   rows: BulkRow[];
+  apply?: BulkApplyState;
+}
+
+/** Live state for an "Apply all fixable" run launched from the bulk summary. */
+interface BulkApplyState {
+  running: boolean;
+  /** True when the run is in preview mode (pipeline returns diffs, doesn't
+   *  write). First-touch is always dry-run; "Apply for real" sets this false. */
+  dryRun: boolean;
+  total: number;
+  applied: number;
+  /** Pipeline returned no_op (already-applied or refused-as-safe). */
+  skipped: number;
+  /** The drift row exists but the addon can't build an Edit for it (variant-set,
+   *  copy, props, etc. — kinds outside `token-binding`/`token-value`). Counted
+   *  separately so users see how much of the "fix" actually fixes. */
+  notFixable: number;
+  errored: number;
+  /** storyId currently being processed (for inline progress UI). */
+  current?: string;
+  finishedAt?: number;
 }
 
 interface ApplyResult {
@@ -145,7 +169,14 @@ function buildEdit(
   if (d.kind !== "token-binding" && d.kind !== "token-value") return null;
   const codeFlat = flattenDualModeValue(d.codeValue);
   const figmaFlat = flattenDualModeValue(d.figmaValue);
-  if (scope === "code" && !selector) return null;
+  // `selector` is required by the pipeline's `code-css-postcss` engine
+  // (it scopes the rewrite to a CSS rule). The `code-tsx-inline` engine
+  // doesn't need it — it walks `codeTargets` and matches JSX attribute
+  // name + property. We let the edit through either way and let the
+  // pipeline's engines decide; engines that need a selector and don't
+  // get one will reject with a clear message, which is more useful than
+  // the addon silently classifying every inline-styled story as
+  // "not auto-fixable."
   if (scope === "figma" && !nodeId) return null;
 
   const id =
@@ -310,7 +341,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
 
       const t0 = Date.now();
       try {
-        const report = await checkOneStory(entry.storyId, sbApi, emit, pendingResolversRef);
+        const report = await checkOneStory(entry.storyId, sbApi, emit, pendingResolversRef, { dualMode });
         const counts = countRows(report);
         const durationMs = Date.now() - t0;
         setBulk((prev) =>
@@ -319,7 +350,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
                 ...prev,
                 rows: prev.rows.map((r, j) =>
                   j === i
-                    ? { ...r, status: "done", durationMs, match: counts.match, drift: counts.drift, flagOnly: counts.flagOnly }
+                    ? { ...r, status: "done", durationMs, match: counts.match, drift: counts.drift, flagOnly: counts.flagOnly, report }
                     : r,
                 ),
               }
@@ -342,12 +373,108 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     }
 
     setBulk((prev) => (prev ? { ...prev, running: false, finishedAt: Date.now() } : prev));
-  }, [emit, sbApi]);
+  }, [emit, sbApi, dualMode]);
 
   const onCheckAll = useCallback(() => {
     setBulk(null);
     emit(EVENTS.ListRegisteredRequest);
   }, [emit]);
+
+  /**
+   * Apply every fixable code-side drift across the bulk run. Iterates each
+   * row's report, builds a `code` edit per drift dimension via the same
+   * `buildEdit` path the per-row Apply buttons use, and posts through the
+   * pipeline so it goes through the addon's tested PostCSS write engine
+   * (token-name normalization, undo-stack, etc.).
+   *
+   * Code-side only by default — Figma is shared state; users opt into
+   * Figma writes per-row.
+   *
+   * Each story's `designSync.target` selector is read from
+   * `sbApi.getStoryData(storyId)?.parameters` — populated because bulk
+   * Check all navigated to every story before snapshotting.
+   */
+  const onApplyAll = useCallback(async (opts: { dryRun: boolean }) => {
+    setBulk((prev) => {
+      if (!prev) return prev;
+      const drifted = prev.rows.filter((r) => r.report && r.drift > 0);
+      const total = drifted.reduce(
+        (acc, r) => acc + (r.report?.dimensions.filter((d) => d.status === "drift").length ?? 0),
+        0,
+      );
+      return {
+        ...prev,
+        apply: {
+          running: true,
+          dryRun: opts.dryRun,
+          total,
+          applied: 0,
+          skipped: 0,
+          notFixable: 0,
+          errored: 0,
+        },
+      };
+    });
+
+    // Snapshot the rows we want to act on so subsequent setBulk calls
+    // (which run in event-loop order) don't race the apply loop.
+    const rows = (bulk?.rows ?? []).filter((r) => r.report && r.drift > 0);
+
+    for (const row of rows) {
+      const report = row.report!;
+      const storyData = sbApi?.getStoryData?.(row.storyId);
+      const storyParams =
+        (storyData?.parameters as { designSync?: { target?: string; pipelineUrl?: string } } | undefined)
+          ?.designSync ?? {};
+      const selector = storyParams.target;
+      const pipelineUrl = storyParams.pipelineUrl ?? PIPELINE_DEFAULT_URL;
+
+      for (const d of report.dimensions) {
+        if (d.status !== "drift") continue;
+        setBulk((prev) => (prev?.apply ? { ...prev, apply: { ...prev.apply, current: row.storyId } } : prev));
+
+        const edit = buildEdit(d, row.storyId, selector, "code", report.nodeId);
+        if (!edit) {
+          // Row exists but addon has no Edit-shape for this dimension kind
+          // (variant-set, copy, props, etc.). Surface separately so the
+          // summary tells the user how much of the drift was actually
+          // addressable, not just lump it into "skipped".
+          setBulk((prev) =>
+            prev?.apply ? { ...prev, apply: { ...prev.apply, notFixable: prev.apply.notFixable + 1 } } : prev,
+          );
+          continue;
+        }
+        if (opts.dryRun) edit.dryRun = true;
+        try {
+          const result = await postEdit(pipelineUrl, edit);
+          if (result.status === "applied") {
+            setBulk((prev) =>
+              prev?.apply ? { ...prev, apply: { ...prev.apply, applied: prev.apply.applied + 1 } } : prev,
+            );
+          } else if (result.status === "no_op") {
+            setBulk((prev) =>
+              prev?.apply ? { ...prev, apply: { ...prev.apply, skipped: prev.apply.skipped + 1 } } : prev,
+            );
+          } else {
+            setBulk((prev) =>
+              prev?.apply ? { ...prev, apply: { ...prev.apply, errored: prev.apply.errored + 1 } } : prev,
+            );
+          }
+        } catch {
+          setBulk((prev) =>
+            prev?.apply ? { ...prev, apply: { ...prev.apply, errored: prev.apply.errored + 1 } } : prev,
+          );
+        }
+      }
+    }
+
+    setBulk((prev) => {
+      if (!prev?.apply) return prev;
+      const { current: _drop, ...rest } = prev.apply;
+      void _drop;
+      return { ...prev, apply: { ...rest, running: false, finishedAt: Date.now() } };
+    });
+  }, [bulk, sbApi]);
 
   if (!active) return null;
 
@@ -376,7 +503,14 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         {storyId && <span style={styles.storyId}>{storyId}</span>}
       </div>
 
-      {bulk && <BulkSummary bulk={bulk} onSelect={(id) => sbApi?.selectStory(id)} />}
+      {bulk && (
+        <BulkSummary
+          bulk={bulk}
+          onSelect={(id) => sbApi?.selectStory(id)}
+          onPreviewAll={() => onApplyAll({ dryRun: true })}
+          onApplyAllForReal={() => onApplyAll({ dryRun: false })}
+        />
+      )}
 
       {state.error && <div style={styles.error}>{state.error}</div>}
 
@@ -870,16 +1004,20 @@ function checkOneStory(
     reject: (err: string) => void;
     storyId: string;
   } | null>,
+  opts: { dualMode?: boolean } = {},
 ): Promise<DriftReport> {
   return new Promise<DriftReport>((resolve, reject) => {
     if (!sbApi) {
       reject("Storybook API unavailable");
       return;
     }
+    // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
+    // Bump the per-story timeout so bulk dual-mode runs don't false-time-out.
+    const timeoutMs = opts.dualMode ? 16000 : 8000;
     const timeout = setTimeout(() => {
       pendingRef.current = null;
-      reject(`Timed out (>8s) on ${storyId}`);
-    }, 8000);
+      reject(`Timed out (>${Math.round(timeoutMs / 1000)}s) on ${storyId}`);
+    }, timeoutMs);
 
     pendingRef.current = {
       storyId,
@@ -903,6 +1041,7 @@ function checkOneStory(
       // story. parameters.designSync.target/tokens are read by the preview
       // from the active story's parameters, so we don't need to pass them.
       const payload: CheckDriftRequestPayload = { storyId };
+      if (opts.dualMode) payload.dualMode = true;
       emit(EVENTS.CheckDriftRequest, payload);
     };
     channel.on(STORY_RENDERED_EVENT, onRendered);
@@ -1031,9 +1170,18 @@ const StagedEdits: React.FC<StagedEditsProps> = ({ edits, applyResults, pipeline
 interface BulkSummaryProps {
   bulk: BulkState;
   onSelect: (storyId: string) => void;
+  /** First-touch: dry-run only. Pipeline returns diffs without writing. */
+  onPreviewAll: () => void;
+  /** Real writes. Should only be offered after a successful preview run. */
+  onApplyAllForReal: () => void;
 }
 
-const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
+const BulkSummary: React.FC<BulkSummaryProps> = ({
+  bulk,
+  onSelect,
+  onPreviewAll,
+  onApplyAllForReal,
+}) => {
   const total = bulk.rows.reduce(
     (acc, r) => ({
       match: acc.match + r.match,
@@ -1047,6 +1195,33 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
   const avgMs = completed > 0 ? Math.round(total.totalEngineMs / completed) : 0;
   const done = bulk.rows.filter((r) => r.status === "done" || r.status === "error").length;
   const elapsed = (bulk.finishedAt ?? Date.now()) - bulk.startedAt;
+  const exportable = bulk.rows.some((r) => r.report);
+  const exportDisabled = bulk.running || !exportable;
+  const [copied, setCopied] = React.useState<"markdown" | "json" | null>(null);
+
+  const onExport = async (format: "markdown" | "json"): Promise<void> => {
+    const payload =
+      format === "markdown" ? buildMarkdownReport(bulk) : buildJsonReport(bulk);
+    try {
+      await navigator.clipboard.writeText(payload);
+      setCopied(format);
+      setTimeout(() => setCopied(null), 2000);
+    } catch {
+      // Clipboard write can fail in restricted contexts; fall back to a
+      // download so the user still gets the artifact.
+      const blob = new Blob([payload], {
+        type: format === "markdown" ? "text/markdown" : "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `drift-report-${new Date().toISOString().replace(/[:.]/g, "-")}.${
+        format === "markdown" ? "md" : "json"
+      }`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  };
 
   return (
     <div style={styles.section}>
@@ -1059,7 +1234,74 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
           · <span style={{ color: "#b91c1c" }}>{total.drift} drift</span>{" "}
           · {total.flagOnly} flag-only
         </span>
+        <span style={{ marginLeft: 12, display: "inline-flex", gap: 6 }}>
+          <button
+            style={styles.button}
+            disabled={exportDisabled}
+            onClick={() => onExport("markdown")}
+            title="Copy a Markdown drift summary for sharing or review"
+          >
+            {copied === "markdown" ? "Copied!" : "Export markdown"}
+          </button>
+          <button
+            style={styles.button}
+            disabled={exportDisabled}
+            onClick={() => onExport("json")}
+            title="Copy the full DriftReport JSON for tooling / automation"
+          >
+            {copied === "json" ? "Copied!" : "Export JSON"}
+          </button>
+          <button
+            style={styles.button}
+            disabled={
+              bulk.running ||
+              bulk.apply?.running ||
+              !bulk.rows.some((r) => r.drift > 0)
+            }
+            onClick={onPreviewAll}
+            title="Run every fixable code-side drift through the pipeline in dry-run — no files are written"
+          >
+            {bulk.apply?.running && bulk.apply.dryRun
+              ? `Previewing… (${bulk.apply.applied + bulk.apply.skipped + bulk.apply.notFixable + bulk.apply.errored}/${bulk.apply.total})`
+              : "Preview all (dry-run)"}
+          </button>
+          {/* Apply for real only appears after a successful preview, mirroring
+              the project's read-only-by-default principle (pipeline and
+              figma-plugin both default to dry-run). Disabled while another
+              run is in flight. */}
+          {bulk.apply && !bulk.apply.running && bulk.apply.dryRun && bulk.apply.applied > 0 && (
+            <button
+              style={{ ...styles.button, borderColor: "#b91c1c", color: "#b91c1c" }}
+              onClick={onApplyAllForReal}
+              title="Run for real — files will be written through the pipeline"
+            >
+              Apply for real ({bulk.apply.applied})
+            </button>
+          )}
+          {bulk.apply?.running && !bulk.apply.dryRun && (
+            <button style={styles.button} disabled>
+              Applying… ({bulk.apply.applied + bulk.apply.skipped + bulk.apply.notFixable + bulk.apply.errored}/{bulk.apply.total})
+            </button>
+          )}
+        </span>
       </h3>
+      {bulk.apply && !bulk.apply.running && bulk.apply.finishedAt && (
+        <div style={{ ...styles.muted, marginBottom: 8 }}>
+          {bulk.apply.dryRun ? "Dry-run finished" : "Apply finished"} —{" "}
+          <span style={{ color: "#0a7d3e" }}>
+            {bulk.apply.applied} {bulk.apply.dryRun ? "would change" : "applied"}
+          </span>
+          {" · "}
+          <span style={{ color: "#7a7a7a" }}>{bulk.apply.skipped} no-op</span>
+          {" · "}
+          <span style={{ color: "#7a7a7a" }}>{bulk.apply.notFixable} not auto-fixable</span>
+          {" · "}
+          <span style={{ color: bulk.apply.errored > 0 ? "#b91c1c" : "#7a7a7a" }}>
+            {bulk.apply.errored} errored
+          </span>
+          {!bulk.apply.dryRun && bulk.apply.applied > 0 && " · Re-run Check all to refresh the summary."}
+        </div>
+      )}
       <table style={styles.table}>
         <thead>
           <tr>
@@ -1109,6 +1351,118 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({ bulk, onSelect }) => {
     </div>
   );
 };
+
+/**
+ * Build a Markdown drift report for a bulk-check run. Skips `match` rows
+ * (they're noise), groups by story, and highlights drift before flag-only.
+ *
+ * Format chosen so the artifact reads cleanly in a PR description, can be
+ * pasted into a chat, and remains greppable.
+ */
+function buildMarkdownReport(bulk: BulkState): string {
+  const lines: string[] = [];
+  const generated = new Date(bulk.startedAt).toISOString();
+  const totals = bulk.rows.reduce(
+    (acc, r) => ({
+      match: acc.match + r.match,
+      drift: acc.drift + r.drift,
+      flagOnly: acc.flagOnly + r.flagOnly,
+    }),
+    { match: 0, drift: 0, flagOnly: 0 },
+  );
+  lines.push(`# Design-sync drift report`);
+  lines.push("");
+  lines.push(`Generated: ${generated}`);
+  lines.push(
+    `Stories: ${bulk.rows.length} · Drift: ${totals.drift} · Flag-only: ${totals.flagOnly} · Match: ${totals.match}`,
+  );
+  lines.push("");
+
+  const driftedStories = bulk.rows.filter((r) => r.drift > 0);
+  const flaggedStories = bulk.rows.filter((r) => r.drift === 0 && r.flagOnly > 0);
+  const errorStories = bulk.rows.filter((r) => r.status === "error");
+
+  if (driftedStories.length === 0 && flaggedStories.length === 0 && errorStories.length === 0) {
+    lines.push(`No drift detected.`);
+    return lines.join("\n");
+  }
+
+  if (driftedStories.length > 0) {
+    lines.push(`## Drift`);
+    lines.push("");
+    for (const row of driftedStories) {
+      renderStorySection(lines, row, ["drift"]);
+    }
+  }
+  if (flaggedStories.length > 0) {
+    lines.push(`## Flag-only (review)`);
+    lines.push("");
+    for (const row of flaggedStories) {
+      renderStorySection(lines, row, ["flag-only"]);
+    }
+  }
+  if (errorStories.length > 0) {
+    lines.push(`## Errors`);
+    lines.push("");
+    for (const row of errorStories) {
+      lines.push(`- \`${row.storyId}\` — ${row.error ?? "unknown"}`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+function renderStorySection(
+  lines: string[],
+  row: BulkRow,
+  include: DimensionDiff["status"][],
+): void {
+  const report = row.report;
+  if (!report) return;
+  const rows = report.dimensions.filter((d) => include.includes(d.status));
+  if (rows.length === 0) return;
+  lines.push(`### \`${row.storyId}\` — node ${report.nodeId}`);
+  lines.push("");
+  lines.push(`| Kind | Property | Code | Figma | Note |`);
+  lines.push(`| --- | --- | --- | --- | --- |`);
+  for (const d of rows) {
+    lines.push(
+      `| ${d.kind} | ${d.property} | ${cellValue(d.codeValue)} | ${cellValue(d.figmaValue)} | ${escapeCell(d.note ?? "")} |`,
+    );
+  }
+  lines.push("");
+}
+
+function cellValue(v: unknown): string {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "string") return escapeCell(v);
+  return escapeCell(JSON.stringify(v));
+}
+
+function escapeCell(s: string): string {
+  return s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+function buildJsonReport(bulk: BulkState): string {
+  return JSON.stringify(
+    {
+      generatedAt: new Date(bulk.startedAt).toISOString(),
+      finishedAt: bulk.finishedAt ? new Date(bulk.finishedAt).toISOString() : null,
+      stories: bulk.rows.map((r) => ({
+        storyId: r.storyId,
+        status: r.status,
+        match: r.match,
+        drift: r.drift,
+        flagOnly: r.flagOnly,
+        durationMs: r.durationMs,
+        error: r.error ?? null,
+        report: r.report ?? null,
+      })),
+    },
+    null,
+    2,
+  );
+}
 
 function statusStyle(status: DimensionDiff["status"]): React.CSSProperties {
   switch (status) {

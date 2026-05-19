@@ -323,7 +323,7 @@ class FigmaRestEngine implements Engine {
     // Background color: code "background-color" vs Figma fills[0] (resolved).
     const codeBg = snapshot.styles["background-color"];
     const figmaBg = resolveFillColor(node, variables, activeMode);
-    if ((codeBg && codeBg !== "rgba(0, 0, 0, 0)") || figmaBg !== undefined) {
+    if (!isTransparentColor(codeBg) || figmaBg !== undefined) {
       const modes = figmaBg?.modes;
       const figmaValue = figmaBg?.value;
       const status: DimensionDiff["status"] =
@@ -430,9 +430,15 @@ class FigmaRestEngine implements Engine {
       }
       const codeValue = snapshot.styles["gap"];
       const codePx = parsePx(codeValue);
+      // `getComputedStyle().gap` returns the keyword `"normal"` when no
+      // gap is set on a non-flex/non-grid element — code has no opinion
+      // there. Treat as flag-only when Figma has a value, otherwise skip.
+      const codeHasNoOpinion = codeValue === "normal" || codeValue === undefined || codeValue === "";
       if (figmaGap || codePx !== null) {
-        const status: DimensionDiff["status"] =
-          figmaGap && codePx !== null && Math.abs(codePx - figmaGap.value) < 0.5 ? "match" : "drift";
+        let status: DimensionDiff["status"];
+        if (codeHasNoOpinion && figmaGap) status = "flag-only";
+        else if (figmaGap && codePx !== null && Math.abs(codePx - figmaGap.value) < 0.5) status = "match";
+        else status = "drift";
         out.push({
           kind: "token-value",
           property: "gap",
@@ -444,6 +450,9 @@ class FigmaRestEngine implements Engine {
             : null,
           status,
           ...(figmaGap?.tokenName ? { tokenName: figmaGap.tokenName } : {}),
+          ...(codeHasNoOpinion && figmaGap
+            ? { note: "Code has no `gap` declared (default `normal`); Figma specifies a value." }
+            : {}),
         });
       }
     }
@@ -456,7 +465,12 @@ class FigmaRestEngine implements Engine {
     const figmaHasVisibleStroke =
       Array.isArray(node.strokes) && (node.strokes as FigmaPaint[]).length > 0;
 
-    const codeBorderPx = parsePx(snapshot.styles["border-top-width"]) ?? 0;
+    // The element may draw its border on any single edge (commonly
+    // border-bottom for separator rows) rather than uniformly. Pick
+    // whichever edge actually has a non-zero width so the comparison
+    // matches reality. Falls back to the top edge when none drawn.
+    const codeBorderEdge = pickBorderEdge(snapshot.styles);
+    const codeBorderPx = parsePx(snapshot.styles[`border-${codeBorderEdge}-width`]) ?? 0;
     if (figmaHasVisibleStroke || codeBorderPx > 0) {
       const weightAlias = node.boundVariables?.strokeWeight;
       const aliasObj = Array.isArray(weightAlias) ? weightAlias[0] : weightAlias;
@@ -474,7 +488,7 @@ class FigmaRestEngine implements Engine {
       if (!figmaWeight && figmaHasVisibleStroke && typeof node.strokeWeight === "number") {
         figmaWeight = { value: node.strokeWeight as number };
       }
-      const codeValue = snapshot.styles["border-top-width"];
+      const codeValue = snapshot.styles[`border-${codeBorderEdge}-width`];
       const codePx = parsePx(codeValue);
       if (figmaWeight || (codePx !== null && codePx > 0)) {
         const status: DimensionDiff["status"] =
@@ -510,8 +524,8 @@ class FigmaRestEngine implements Engine {
           figmaStroke = { value: rgbaToCss(stroke.color) };
         }
       }
-      const codeValue = snapshot.styles["border-top-color"];
-      if (figmaStroke || (codeValue && codeValue !== "rgba(0, 0, 0, 0)")) {
+      const codeValue = snapshot.styles[`border-${codeBorderEdge}-color`];
+      if (figmaStroke || !isTransparentColor(codeValue)) {
         const status: DimensionDiff["status"] =
           codeValue && figmaStroke && normalizeColor(codeValue) === normalizeColor(figmaStroke.value)
             ? "match"
@@ -636,27 +650,39 @@ class FigmaRestEngine implements Engine {
         // weights aren't pixel values; compare as plain numbers
         unitless: true,
       });
-      // line-height — Figma may store as px directly or as a percentage of
-      // font size. We normalize to px before comparing.
+      // line-height — Figma may store as px directly, percent of font size,
+      // or `AUTO` / `INTRINSIC_%` (let the font metrics decide). The browser's
+      // `line-height: normal` also resolves to a font-metric-derived px, so
+      // when Figma is on auto we can't meaningfully compare against the
+      // computed code value — both sides are "no opinion". Skip the row in
+      // that case rather than reporting a guaranteed-drift number.
+      const lineHeightUnit = (ts as { lineHeightUnit?: string } | undefined)?.lineHeightUnit;
+      const figmaLineHeightIsAuto = lineHeightUnit === "AUTO" || lineHeightUnit === "INTRINSIC_%";
       let lineHeightPx: number | undefined;
-      if (typeof ts?.lineHeightPx === "number" && ts.lineHeightPx > 0) {
-        lineHeightPx = ts.lineHeightPx;
-      } else if (
-        typeof ts?.lineHeightPercent === "number" &&
-        ts.lineHeightPercent > 0 &&
-        typeof ts.fontSize === "number"
-      ) {
-        lineHeightPx = (ts.lineHeightPercent / 100) * ts.fontSize;
+      if (!figmaLineHeightIsAuto) {
+        if (typeof ts?.lineHeightPx === "number" && ts.lineHeightPx > 0) {
+          lineHeightPx = ts.lineHeightPx;
+        } else if (
+          typeof ts?.lineHeightPercent === "number" &&
+          ts.lineHeightPercent > 0 &&
+          typeof ts.fontSize === "number"
+        ) {
+          lineHeightPx = (ts.lineHeightPercent / 100) * ts.fontSize;
+        }
       }
-      pushTypographyNumeric({
-        out,
-        snapshot,
-        variables,
-        activeMode,
-        cssProp: "line-height",
-        rawValue: lineHeightPx,
-        alias: pickAlias(bound["lineHeight"]),
-      });
+      // Only emit a row when Figma has an explicit opinion. When AUTO, both
+      // sides are font-metric-driven — comparing px to px would always drift.
+      if (!figmaLineHeightIsAuto) {
+        pushTypographyNumeric({
+          out,
+          snapshot,
+          variables,
+          activeMode,
+          cssProp: "line-height",
+          rawValue: lineHeightPx,
+          alias: pickAlias(bound["lineHeight"]),
+        });
+      }
       // font-family — string compare. Figma gives the display name; CSS
       // computed font-family returns a quoted, possibly multi-fallback string
       // (e.g. `"Nunito Sans", system-ui`). Match if Figma's value appears as
@@ -1147,6 +1173,20 @@ function normalizeTokenName(name: string | undefined): string {
     .toLowerCase();
 }
 
+/**
+ * Pick the border edge to compare against the Figma stroke. Rows that
+ * draw only a `border-bottom` would otherwise read zero from
+ * `border-top-width` and falsely report drift. Falls back to "top" when
+ * no edge has a non-zero width — keeps prior behavior for components
+ * that genuinely have no border.
+ */
+function pickBorderEdge(styles: Record<string, string>): "top" | "right" | "bottom" | "left" {
+  for (const edge of ["bottom", "top", "left", "right"] as const) {
+    if ((parsePx(styles[`border-${edge}-width`]) ?? 0) > 0) return edge;
+  }
+  return "top";
+}
+
 function parsePx(value: string | undefined): number | null {
   if (!value) return null;
   const m = /^(-?\d+(?:\.\d+)?)\s*px$/.exec(value);
@@ -1161,8 +1201,27 @@ function rgbaToCss(c: { r: number; g: number; b: number; a?: number }): string {
   return a === 1 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${a})`;
 }
 
+/** Treat browser's "no opinion" color sentinels as equivalent. */
+function isTransparentColor(value: string | undefined): boolean {
+  if (!value) return true;
+  const v = value.replace(/\s+/g, "").toLowerCase();
+  return v === "rgba(0,0,0,0)" || v === "transparent" || v === "rgba(0,0,0,0.0)";
+}
+
+/**
+ * Fold colors into a canonical form so semantically-equivalent expressions
+ * compare equal. `rgba(R,G,B,1)` ≡ `rgb(R,G,B)`; whitespace and case are
+ * ignored. Returns "transparent" for any zero-alpha or fully-transparent
+ * value so the engine can treat them as "no opinion."
+ */
 function normalizeColor(value: string): string {
-  return value.replace(/\s+/g, "").toLowerCase();
+  if (isTransparentColor(value)) return "transparent";
+  const stripped = value.replace(/\s+/g, "").toLowerCase();
+  // rgba(R, G, B, 1) → rgb(R, G, B). The same channel triple should match
+  // regardless of whether the producer wrote it with an alpha=1 suffix.
+  const m = /^rgba\((\d+),(\d+),(\d+),1(?:\.0+)?\)$/.exec(stripped);
+  if (m) return `rgb(${m[1]},${m[2]},${m[3]})`;
+  return stripped;
 }
 
 interface ResolvedFill {
@@ -1380,18 +1439,50 @@ function collectFigmaBindings(
 }
 
 /**
- * Walk a Figma node tree depth-first and return the first TEXT node. Used
- * by the typography diffs to source font-size / line-height / family /
- * color from a node that actually has them — most component variants are
- * FRAMEs with a TEXT child rather than text nodes themselves.
+ * Pick the "primary" TEXT descendant for typography comparison.
+ *
+ * Naïve depth-first picks whichever TEXT node happens to come first in the
+ * tree, which is often a single-character glyph like "▾" / "▼" / "✓" — that
+ * glyph runs in a different style (`chrome/glyph/*`) from the row's actual
+ * label, so the diff reads the wrong typography. We instead score every
+ * TEXT descendant and prefer ones that look like real labels:
+ *
+ *   - more characters wins
+ *   - alphanumeric content wins over pure-symbol content
+ *   - if a node IS itself a TEXT node, return it (preserves trivial case)
+ *
+ * Falls back to the first descendant when no candidate stands out (e.g.
+ * single-glyph atoms like the Caret).
  */
 function findFirstTextNode(node: FigmaNode): FigmaNode | undefined {
   if (node.type === "TEXT") return node;
-  for (const child of node.children ?? []) {
-    const found = findFirstTextNode(child);
-    if (found) return found;
+  const all: FigmaNode[] = [];
+  const walk = (n: FigmaNode): void => {
+    if (n.type === "TEXT") all.push(n);
+    for (const child of n.children ?? []) walk(child);
+  };
+  walk(node);
+  if (all.length === 0) return undefined;
+  if (all.length === 1) return all[0];
+
+  // Score each candidate; higher is better.
+  const score = (n: FigmaNode): number => {
+    const chars = (n as unknown as { characters?: string }).characters ?? "";
+    let s = chars.length;
+    if (/[a-zA-Z0-9]/.test(chars)) s += 100;
+    return s;
+  };
+  let best = all[0]!;
+  let bestScore = score(best);
+  for (let i = 1; i < all.length; i++) {
+    const cand = all[i]!;
+    const cs = score(cand);
+    if (cs > bestScore) {
+      best = cand;
+      bestScore = cs;
+    }
   }
-  return undefined;
+  return best;
 }
 
 function pickAlias(value: FigmaVariableAlias | FigmaVariableAlias[] | undefined): FigmaVariableAlias | undefined {

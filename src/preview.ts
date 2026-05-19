@@ -134,6 +134,56 @@ function findByComponentSegment(root: HTMLElement, storyId: string): HTMLElement
   return best;
 }
 
+/**
+ * Pull a token name out of an inline-style value. Accepts:
+ *   - bare `var(--token)` references (the common case)
+ *   - compound values where exactly one `var()` reference is the
+ *     binding (e.g. `1px solid var(--row-border-bottom)` — common when
+ *     consumers use CSS shorthand like `borderBottom: "1px solid var(...)"`)
+ *
+ * Ambiguous compound values (multiple `var()` references) return null so
+ * we don't guess which one is "the" binding.
+ *
+ * `var(--font-size-11)` → "font-size-11"
+ * `var(--label-text, #fff)` → "label-text"
+ * `1px solid var(--row-border-bottom)` → "row-border-bottom"
+ * `var(--a), var(--b)` → null (ambiguous)
+ * `11px` → null (literal, no binding)
+ */
+const INLINE_VAR_ANY = /var\(\s*--([a-zA-Z0-9_-]+)\s*(?:,[^)]*)?\)/g;
+function extractInlineVarToken(value: string): string | null {
+  const matches = [...value.matchAll(INLINE_VAR_ANY)];
+  if (matches.length !== 1) return null;
+  return matches[0]![1] ?? null;
+}
+
+/**
+ * Map per-edge / shorthand CSS properties to the names the Figma engine
+ * compares against. The engine reports `border-color` (not
+ * `border-bottom-color`) and `background-color` (not `background`), so
+ * the inline-style scanner has to project longhand bindings onto the
+ * same keys or Wiring rows show "needs setup" even when the binding
+ * exists.
+ *
+ * Mirrors `SHORTHAND_EXPANSIONS` on the PostCSS-scanner side so both
+ * front-doors land bindings under the same keys.
+ */
+const INLINE_BINDING_KEY: Record<string, string> = {
+  "background": "background-color",
+  "border-top-color": "border-color",
+  "border-right-color": "border-color",
+  "border-bottom-color": "border-color",
+  "border-left-color": "border-color",
+  "border-top-width": "border-width",
+  "border-right-width": "border-width",
+  "border-bottom-width": "border-width",
+  "border-left-width": "border-width",
+};
+
+function normalizeInlineBindingKey(prop: string): string {
+  return INLINE_BINDING_KEY[prop] ?? prop;
+}
+
 function snapshotElement(el: HTMLElement): CodeSnapshot {
   const cs = window.getComputedStyle(el);
   const styles: Record<string, string> = {};
@@ -147,6 +197,30 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
     if (attr.name.startsWith("data-token-")) {
       bindings[attr.name.slice("data-token-".length)] = attr.value;
     }
+  }
+
+  // Inline-style binding scan. Inline-styled components (React style={{…}},
+  // styled-components rendered as DOM style attrs, anything that ends up
+  // as `style="foo: var(--bar)"` in the rendered markup) carry their
+  // bindings on `el.style` rather than in a `.css` file the PostCSS
+  // scanner can read. We extract `var(--name)` references directly from
+  // the inline style declarations. Properties with non-var values
+  // (literals, computed, etc.) are ignored — only explicit token
+  // references count as bindings. data-token-* attributes still win when
+  // both are present (they're an explicit override).
+  //
+  // This makes the engine work on codebases that style inline without
+  // requiring consumers to maintain a parallel attribute set or run a
+  // build-time codemod.
+  const inlineStyle = el.style;
+  for (let i = 0; i < inlineStyle.length; i++) {
+    const prop = inlineStyle.item(i);
+    if (!prop) continue;
+    const value = inlineStyle.getPropertyValue(prop).trim();
+    const token = extractInlineVarToken(value);
+    if (!token) continue;
+    const key = normalizeInlineBindingKey(prop);
+    if (!bindings[key]) bindings[key] = token;
   }
 
   // Visible text content: split innerText on whitespace-y separators and
@@ -194,10 +268,20 @@ const channel = addons.getChannel();
  * a wrapping element can override via `parameters.designSync.modeAttribute`
  * pointing to a different attribute.
  */
-function readActiveMode(modeAttribute = "data-theme"): string {
+/**
+ * Read the active mode from the host document. Returns the attribute's
+ * value when set (e.g. "light" / "dark"), `undefined` when the attribute
+ * is missing so the engine can resolve mode-aware values from Figma's
+ * default mode rather than silently guessing "light".
+ *
+ * Pre-fix this returned "light" on missing — every Storybook iframe
+ * without a theme attribute looked like an explicit light-mode opinion,
+ * which produced cross-mode false drift against dark-default Figma files.
+ */
+function readActiveMode(modeAttribute = "data-theme"): string | undefined {
   const root = document.documentElement;
   const value = root.getAttribute(modeAttribute);
-  return (value || "light").toLowerCase();
+  return value ? value.toLowerCase() : undefined;
 }
 
 /**
@@ -283,7 +367,8 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     snapshot.bindings = { ...(snapshot.bindings ?? {}), ...payload.tokens };
   }
   const mode = readActiveMode(modeAttribute);
-  const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot, mode };
+  const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot };
+  if (mode) out.mode = mode;
   if (payload.args) out.args = payload.args;
   if (payload.target) out.target = payload.target;
   channel.emit(EVENTS.CodeSnapshot, out);

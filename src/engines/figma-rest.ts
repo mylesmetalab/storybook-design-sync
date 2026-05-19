@@ -1215,11 +1215,26 @@ function findMatchingArg(
 
 /**
  * Walk the Figma node tree and collect all TEXT-node `characters` values.
+ *
+ * Two stop conditions prevent a layout container (Panel rendering nested
+ * Folder/Row instances) from flooding the report with every label inside
+ * every nested instance — those nested components have their own stories
+ * with their own copy diff, and double-counting their text turns the
+ * parent's `copy` rows into noise drowning out real drift.
+ *
+ * Stops:
+ *   1. INSTANCE boundary — don't recurse into nested component references.
+ *      Their text is owned by their own story.
+ *   2. Hard depth cap (8 levels) — backstop for deeply nested layouts that
+ *      use raw frames instead of instances.
+ *
  * Deduplicates and returns trimmed non-empty strings.
  */
+const COPY_SCAN_MAX_DEPTH = 8;
+
 function collectFigmaText(node: FigmaNode): string[] {
   const out = new Set<string>();
-  function walk(n: FigmaNode): void {
+  function walk(n: FigmaNode, depth: number): void {
     if (n.type === "TEXT") {
       const chars = (n as unknown as { characters?: string }).characters;
       if (typeof chars === "string") {
@@ -1227,9 +1242,16 @@ function collectFigmaText(node: FigmaNode): string[] {
         if (trimmed) out.add(trimmed);
       }
     }
-    for (const child of n.children ?? []) walk(child);
+    if (depth >= COPY_SCAN_MAX_DEPTH) return;
+    for (const child of n.children ?? []) {
+      // Stop at nested instances — their text belongs to another story.
+      // The root node itself can be an INSTANCE; only skip *descendant*
+      // instances (i.e. depth > 0).
+      if (child.type === "INSTANCE" && depth > 0) continue;
+      walk(child, depth + 1);
+    }
   }
-  walk(node);
+  walk(node, 0);
   return [...out];
 }
 

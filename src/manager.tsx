@@ -169,7 +169,14 @@ function buildEdit(
   if (d.kind !== "token-binding" && d.kind !== "token-value") return null;
   const codeFlat = flattenDualModeValue(d.codeValue);
   const figmaFlat = flattenDualModeValue(d.figmaValue);
-  if (scope === "code" && !selector) return null;
+  // `selector` is required by the pipeline's `code-css-postcss` engine
+  // (it scopes the rewrite to a CSS rule). The `code-tsx-inline` engine
+  // doesn't need it — it walks `codeTargets` and matches JSX attribute
+  // name + property. We let the edit through either way and let the
+  // pipeline's engines decide; engines that need a selector and don't
+  // get one will reject with a clear message, which is more useful than
+  // the addon silently classifying every inline-styled story as
+  // "not auto-fixable."
   if (scope === "figma" && !nodeId) return null;
 
   const id =

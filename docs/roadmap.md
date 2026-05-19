@@ -73,6 +73,8 @@ system. Highlights of the work already done:
 | H3   | Read-only-by-default actually enforced end-to-end (pipeline writeEnabled flipped, figma-rest-write honors dryRun, plugin checkbox is a ceiling not an override) | pipeline #10 + figma-plugin #4 |
 | H4   | Inline-style binding scan — preview reads `var(--token)` refs directly from `el.style`, no PostCSS file needed | addon #27 |
 | H5   | Cross-repo audit docs caught up to reality (plugin README's real property surface, pipeline ARCHITECTURE.md's correct engine roster) | figma-plugin #3 + pipeline #9 |
+| H6   | Inline-scanner compound values + shorthand normalization (`borderBottom: "1px solid var(--x)"`, `border-bottom-color` → `border-color`) | addon #27 |
+| H7   | `code-tsx-inline` write engine — closes the Apply-all loop on inline-styled codebases. Mirrors `code-css-postcss` semantics on JSX `style={{ … }}` expressions via ts-morph AST. | pipeline #11 |
 
 ## Active roadmap
 

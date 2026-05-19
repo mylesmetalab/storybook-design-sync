@@ -135,21 +135,53 @@ function findByComponentSegment(root: HTMLElement, storyId: string): HTMLElement
 }
 
 /**
- * Pull a token name out of an inline-style value, when the value is a
- * bare `var(--token)` reference. Anything more complex (gradients,
- * calc(), shadow lists, etc.) is treated as not a token binding and
- * returns null. Matches the PostCSS scanner's heuristic so both
- * front-doors recognize the same shape of binding.
+ * Pull a token name out of an inline-style value. Accepts:
+ *   - bare `var(--token)` references (the common case)
+ *   - compound values where exactly one `var()` reference is the
+ *     binding (e.g. `1px solid var(--row-border-bottom)` — common when
+ *     consumers use CSS shorthand like `borderBottom: "1px solid var(...)"`)
+ *
+ * Ambiguous compound values (multiple `var()` references) return null so
+ * we don't guess which one is "the" binding.
  *
  * `var(--font-size-11)` → "font-size-11"
- * `var(--label-text, #fff)` → "label-text" (fallback discarded)
- * `var(--c) 50% / cover` → null (compound value)
- * `11px` → null (literal)
+ * `var(--label-text, #fff)` → "label-text"
+ * `1px solid var(--row-border-bottom)` → "row-border-bottom"
+ * `var(--a), var(--b)` → null (ambiguous)
+ * `11px` → null (literal, no binding)
  */
-const INLINE_VAR_RE = /^var\(\s*--([a-zA-Z0-9_-]+)\s*(?:,[^)]*)?\)\s*$/;
+const INLINE_VAR_ANY = /var\(\s*--([a-zA-Z0-9_-]+)\s*(?:,[^)]*)?\)/g;
 function extractInlineVarToken(value: string): string | null {
-  const m = INLINE_VAR_RE.exec(value);
-  return m ? (m[1] ?? null) : null;
+  const matches = [...value.matchAll(INLINE_VAR_ANY)];
+  if (matches.length !== 1) return null;
+  return matches[0]![1] ?? null;
+}
+
+/**
+ * Map per-edge / shorthand CSS properties to the names the Figma engine
+ * compares against. The engine reports `border-color` (not
+ * `border-bottom-color`) and `background-color` (not `background`), so
+ * the inline-style scanner has to project longhand bindings onto the
+ * same keys or Wiring rows show "needs setup" even when the binding
+ * exists.
+ *
+ * Mirrors `SHORTHAND_EXPANSIONS` on the PostCSS-scanner side so both
+ * front-doors land bindings under the same keys.
+ */
+const INLINE_BINDING_KEY: Record<string, string> = {
+  "background": "background-color",
+  "border-top-color": "border-color",
+  "border-right-color": "border-color",
+  "border-bottom-color": "border-color",
+  "border-left-color": "border-color",
+  "border-top-width": "border-width",
+  "border-right-width": "border-width",
+  "border-bottom-width": "border-width",
+  "border-left-width": "border-width",
+};
+
+function normalizeInlineBindingKey(prop: string): string {
+  return INLINE_BINDING_KEY[prop] ?? prop;
 }
 
 function snapshotElement(el: HTMLElement): CodeSnapshot {
@@ -186,7 +218,9 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
     if (!prop) continue;
     const value = inlineStyle.getPropertyValue(prop).trim();
     const token = extractInlineVarToken(value);
-    if (token && !bindings[prop]) bindings[prop] = token;
+    if (!token) continue;
+    const key = normalizeInlineBindingKey(prop);
+    if (!bindings[key]) bindings[key] = token;
   }
 
   // Visible text content: split innerText on whitespace-y separators and

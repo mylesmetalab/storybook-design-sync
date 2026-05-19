@@ -256,7 +256,7 @@ class FigmaRestEngine implements Engine {
 
     dimensions.push(...this.diffTokenValues(node, snapshot, variables, activeMode));
     dimensions.push(...this.diffTokenBindings(node, snapshot, variables, activeMode));
-    dimensions.push(...this.diffVariantSet(node, snapshot));
+    dimensions.push(...this.diffVariantSet(node, snapshot, input.storyId));
     dimensions.push(...this.diffCopy(node, snapshot));
     dimensions.push(...this.diffProps(node, input.args));
 
@@ -912,13 +912,34 @@ class FigmaRestEngine implements Engine {
     return out;
   }
 
-  private diffVariantSet(node: FigmaNode, snapshot: CodeSnapshot | undefined): DimensionDiff[] {
+  private diffVariantSet(
+    node: FigmaNode,
+    snapshot: CodeSnapshot | undefined,
+    storyId: string,
+  ): DimensionDiff[] {
     // The preview already expands BEM-modifier classes and adjacent classes
     // (.file-item.active style) into a candidate set. Lowercase everything
     // here for case-insensitive matching.
     const codeVariants = new Set(
       (snapshot?.variantClasses ?? []).map((v) => v.toLowerCase()),
     );
+
+    // Storybook stories don't emit class-based variant modifiers like
+    // `.row--state-hover`, so without help we'd flag drift on every
+    // variant story. Infer the variant from the story id suffix
+    // (`molecules-rowboolean--checked-true-state-hover` →
+    // `{Checked: "true", State: "Hover"}`) using Figma's prop names as
+    // the parsing dictionary — that way `--state-picker-open` correctly
+    // resolves to `{State: "PickerOpen"}` and not `{State: "picker",
+    // open: ""}`.
+    const figmaPropKeys =
+      node.type === "COMPONENT" && node.name.includes("=")
+        ? Object.keys(parseVariantName(node.name))
+        : [];
+    const inferredVariant = parseStoryVariantSuffix(storyId, figmaPropKeys);
+    for (const v of Object.values(inferredVariant)) {
+      codeVariants.add(v.toLowerCase());
+    }
 
     // If this node is a single COMPONENT (a variant in a set), Figma encodes
     // the active variant as the node name "Property=Value, Other=Value".
@@ -1210,6 +1231,64 @@ function collectFigmaText(node: FigmaNode): string[] {
   }
   walk(node);
   return [...out];
+}
+
+/**
+ * Parse a Storybook story id's variant suffix into a structured
+ * `{ Property: "Value" }` map, using Figma's known property names as
+ * the parsing dictionary.
+ *
+ * Examples (figmaKeys = ["State", "Checked"]):
+ *   "molecules-rowboolean--checked-true-state-hover" → { Checked: "true", State: "Hover" }
+ *   "molecules-rowassetpicker--state-picker-open"    → { State: "PickerOpen" }
+ *   "molecules-rowbutton--default"                   → { }   (no recognized keys)
+ *
+ * Algorithm:
+ *   1. Take the suffix after the last `--` and split on `-`.
+ *   2. Walk tokens; when a token matches a known Figma prop name
+ *      (case-insensitive), open a new property. Accumulate following
+ *      tokens as the value until the next prop match or end-of-suffix.
+ *   3. Camel-case the accumulated value tokens so multi-word values
+ *      (`picker-open` → `PickerOpen`) match Figma's variant names.
+ *
+ * If `figmaKeys` is empty, returns an empty map — without a dictionary
+ * we can't tell which tokens are keys vs values, and over-eager
+ * inference would produce more noise than it clears.
+ */
+function parseStoryVariantSuffix(
+  storyId: string,
+  figmaKeys: string[],
+): Record<string, string> {
+  if (figmaKeys.length === 0) return {};
+  const suffix = storyId.split("--").pop() ?? "";
+  if (!suffix || suffix === "default") return {};
+  const keyByLower = new Map(figmaKeys.map((k) => [k.toLowerCase(), k]));
+  const tokens = suffix.split("-").filter(Boolean);
+  const out: Record<string, string[]> = {};
+  let currentKey: string | null = null;
+  for (const tok of tokens) {
+    const matchedKey = keyByLower.get(tok.toLowerCase());
+    if (matchedKey) {
+      currentKey = matchedKey;
+      out[currentKey] = [];
+    } else if (currentKey) {
+      out[currentKey]!.push(tok);
+    }
+    // Tokens before the first recognized key (e.g. accidental prefix)
+    // are dropped — they're not part of the variant.
+  }
+  const result: Record<string, string> = {};
+  for (const [key, valueTokens] of Object.entries(out)) {
+    if (valueTokens.length === 0) continue;
+    // Camel-case `picker-open` → `PickerOpen`; preserve `true`/`false`
+    // as-is for boolean variants (Figma encodes them lowercase).
+    const joined = valueTokens
+      .map((t) => (t === "true" || t === "false" ? t : t[0]!.toUpperCase() + t.slice(1)))
+      .join("");
+    // Boolean variants stay lowercase — that's how Figma stores them.
+    result[key] = joined === "True" ? "true" : joined === "False" ? "false" : joined;
+  }
+  return result;
 }
 
 /**

@@ -134,6 +134,24 @@ function findByComponentSegment(root: HTMLElement, storyId: string): HTMLElement
   return best;
 }
 
+/**
+ * Pull a token name out of an inline-style value, when the value is a
+ * bare `var(--token)` reference. Anything more complex (gradients,
+ * calc(), shadow lists, etc.) is treated as not a token binding and
+ * returns null. Matches the PostCSS scanner's heuristic so both
+ * front-doors recognize the same shape of binding.
+ *
+ * `var(--font-size-11)` → "font-size-11"
+ * `var(--label-text, #fff)` → "label-text" (fallback discarded)
+ * `var(--c) 50% / cover` → null (compound value)
+ * `11px` → null (literal)
+ */
+const INLINE_VAR_RE = /^var\(\s*--([a-zA-Z0-9_-]+)\s*(?:,[^)]*)?\)\s*$/;
+function extractInlineVarToken(value: string): string | null {
+  const m = INLINE_VAR_RE.exec(value);
+  return m ? (m[1] ?? null) : null;
+}
+
 function snapshotElement(el: HTMLElement): CodeSnapshot {
   const cs = window.getComputedStyle(el);
   const styles: Record<string, string> = {};
@@ -147,6 +165,28 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
     if (attr.name.startsWith("data-token-")) {
       bindings[attr.name.slice("data-token-".length)] = attr.value;
     }
+  }
+
+  // Inline-style binding scan. Inline-styled components (React style={{…}},
+  // styled-components rendered as DOM style attrs, anything that ends up
+  // as `style="foo: var(--bar)"` in the rendered markup) carry their
+  // bindings on `el.style` rather than in a `.css` file the PostCSS
+  // scanner can read. We extract `var(--name)` references directly from
+  // the inline style declarations. Properties with non-var values
+  // (literals, computed, etc.) are ignored — only explicit token
+  // references count as bindings. data-token-* attributes still win when
+  // both are present (they're an explicit override).
+  //
+  // This makes the engine work on codebases that style inline without
+  // requiring consumers to maintain a parallel attribute set or run a
+  // build-time codemod.
+  const inlineStyle = el.style;
+  for (let i = 0; i < inlineStyle.length; i++) {
+    const prop = inlineStyle.item(i);
+    if (!prop) continue;
+    const value = inlineStyle.getPropertyValue(prop).trim();
+    const token = extractInlineVarToken(value);
+    if (token && !bindings[prop]) bindings[prop] = token;
   }
 
   // Visible text content: split innerText on whitespace-y separators and

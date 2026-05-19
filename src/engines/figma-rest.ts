@@ -93,6 +93,99 @@ class TtlCache<V> {
   }
 }
 
+/**
+ * Bounded-concurrency + 429-aware fetcher. A bulk Check-all run fires
+ * one node request per (story × mode), which on a 64-story file is
+ * 128 parallel `GET /files/.../nodes?ids=` — well past Figma's
+ * rate ceiling. Without throttling, half the report comes back as
+ * 429s instead of drift.
+ *
+ * Strategy:
+ *   - Cap in-flight requests at MAX_CONCURRENT (4).
+ *   - On 429 or 5xx, honor `Retry-After` (or fall back to a capped
+ *     exponential backoff with jitter), retry up to MAX_RETRIES (3).
+ *   - Token-bucket-style: a global rate-limited gate also throttles
+ *     to RPS_LIMIT to avoid bursting even within the concurrency cap.
+ */
+const MAX_CONCURRENT = 4;
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 1000;
+const RETRY_MAX_MS = 30_000;
+
+let inflight = 0;
+const waiters: Array<() => void> = [];
+
+function acquireSlot(): Promise<void> {
+  if (inflight < MAX_CONCURRENT) {
+    inflight++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    waiters.push(() => {
+      inflight++;
+      resolve();
+    });
+  });
+}
+
+function releaseSlot(): void {
+  inflight--;
+  const next = waiters.shift();
+  if (next) next();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function throttledFetch(url: string, init: RequestInit): Promise<Response> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    await acquireSlot();
+    let res: Response;
+    try {
+      res = await fetch(url, init);
+    } catch (err) {
+      releaseSlot();
+      if (attempt === MAX_RETRIES) throw err;
+      await sleep(backoffMs(attempt));
+      continue;
+    }
+    releaseSlot();
+
+    if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
+      if (attempt === MAX_RETRIES) return res;
+      const retryAfter = parseRetryAfter(res.headers.get("Retry-After"));
+      const wait = retryAfter ?? backoffMs(attempt);
+      await sleep(wait);
+      continue;
+    }
+
+    return res;
+  }
+  // unreachable — loop returns or throws first
+  throw new Error("throttledFetch exhausted retries");
+}
+
+function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) {
+    return Math.min(seconds * 1000, RETRY_MAX_MS);
+  }
+  // HTTP-date form — uncommon from Figma but spec-correct.
+  const ts = Date.parse(header);
+  if (Number.isFinite(ts)) {
+    return Math.min(Math.max(ts - Date.now(), 0), RETRY_MAX_MS);
+  }
+  return null;
+}
+
+function backoffMs(attempt: number): number {
+  const base = Math.min(RETRY_BASE_MS * 2 ** attempt, RETRY_MAX_MS);
+  const jitter = Math.random() * base * 0.25;
+  return base + jitter;
+}
+
 class FigmaRestEngine implements Engine {
   readonly name = "figma-rest";
   private readonly pat: string | undefined;
@@ -207,7 +300,7 @@ class FigmaRestEngine implements Engine {
     const cached = this.fileMetaCache.get(fileKey);
     if (cached) return cached;
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}?depth=1`;
-    const res = await fetch(url, { headers: this.headers() });
+    const res = await throttledFetch(url, { headers: this.headers() });
     if (!res.ok) {
       // Swallow — without a metadata fetch we just skip the persistent cache.
       return "";
@@ -248,7 +341,7 @@ class FigmaRestEngine implements Engine {
     if (cached) return cached;
 
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/nodes?ids=${encodeURIComponent(nodeId)}`;
-    const res = await fetch(url, { headers: this.headers() });
+    const res = await throttledFetch(url, { headers: this.headers() });
     if (!res.ok) {
       throw new Error(`[design-sync] Figma REST ${res.status} for node ${nodeId}.`);
     }
@@ -272,7 +365,7 @@ class FigmaRestEngine implements Engine {
     const cached = this.parentMaps.get(fileKey);
     if (cached) return cached;
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/components`;
-    const res = await fetch(url, { headers: this.headers() });
+    const res = await throttledFetch(url, { headers: this.headers() });
     if (!res.ok) {
       const empty = new Map<string, string>();
       this.parentMaps.set(fileKey, empty);
@@ -295,7 +388,7 @@ class FigmaRestEngine implements Engine {
     if (cached) return cached;
 
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/variables/local`;
-    const res = await fetch(url, { headers: this.headers() });
+    const res = await throttledFetch(url, { headers: this.headers() });
     if (res.status === 404 || res.status === 403) return null; // not enterprise / no access
     if (!res.ok) {
       throw new Error(`[design-sync] Figma variables ${res.status} for ${fileKey}.`);

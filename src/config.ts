@@ -21,6 +21,14 @@ export interface DesignSyncConfig {
    */
   cssEntries: string[];
   /**
+   * Glob patterns (relative to the consumer's cwd) for `.tsx` files the
+   * scanner reads at startup to extract inline-style token bindings
+   * (`style={{ paddingTop: "var(--space-4)" }}`). Default matches the
+   * common `src/**\/*.tsx` layout. Set explicitly when stories live in
+   * a sibling package (e.g. `["../../packages/*\/src/**\/*.tsx"]`).
+   */
+  tsxEntries: string[];
+  /**
    * Glob patterns (relative to the consumer's cwd) where stories live.
    * Used by the CLI for discovery. Set this in monorepos where stories
    * are siblings of the Storybook host (e.g.
@@ -35,6 +43,7 @@ const DEFAULTS = {
   registryPath: ".design-sync/registry.json",
   codeTargets: [] as CodeTarget[],
   cssEntries: ["src/**/*.css"],
+  tsxEntries: ["src/**/*.tsx"],
   storyGlobs: [
     "src/**/*.stories.@(ts|tsx|js|jsx|mjs|mts)",
     "stories/**/*.stories.@(ts|tsx|js|jsx|mjs|mts)",
@@ -78,6 +87,7 @@ function normalize(raw: unknown): DesignSyncConfig {
     fileKey: r.fileKey,
     codeTargets: r.codeTargets ?? [...DEFAULTS.codeTargets],
     cssEntries: r.cssEntries ?? [...DEFAULTS.cssEntries],
+    tsxEntries: r.tsxEntries ?? [...DEFAULTS.tsxEntries],
     storyGlobs: r.storyGlobs ?? [...DEFAULTS.storyGlobs],
   };
 }

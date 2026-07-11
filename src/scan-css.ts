@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import postcss, { type Rule, type Declaration } from "postcss";
 import { glob } from "tinyglobby";
 import { deriveSelectorChain } from "@metalab/design-sync-core";
+import { expandDecl, extractBareVarToken } from "./binding-shape.js";
 
 /**
  * Map of CSS selector → { CSS property → token name }.
@@ -30,26 +31,6 @@ export interface ScanResult {
   scannedFiles: string[];
 }
 
-const VAR_RE = /^var\(\s*--([a-zA-Z0-9_-]+)\s*(?:,[^)]*)?\)\s*$/;
-
-/**
- * Bare-var-only shorthand expansion. Keys are CSS shorthand props; values
- * are the longhand props the addon's snapshot compares against. Expansion
- * only fires when the declaration value is exactly `var(--x)` — anything
- * more complex (`background: var(--c) center/cover`) is treated as not a
- * token binding and skipped.
- */
-const SHORTHAND_EXPANSIONS: Record<string, string[]> = {
-  padding: ["padding-top", "padding-right", "padding-bottom", "padding-left"],
-  "border-radius": [
-    "border-top-left-radius",
-    "border-top-right-radius",
-    "border-bottom-left-radius",
-    "border-bottom-right-radius",
-  ],
-  background: ["background-color"],
-};
-
 /**
  * Pseudo-class / pseudo-element rules don't contribute to the resting-state
  * map. The addon snapshots `getComputedStyle` on the un-hovered element, so
@@ -61,17 +42,6 @@ const SHORTHAND_EXPANSIONS: Record<string, string[]> = {
  */
 function isPseudoSelector(sel: string): boolean {
   return /:/.test(sel);
-}
-
-function expandDecl(prop: string, tokenName: string): Array<[string, string]> {
-  const longhands = SHORTHAND_EXPANSIONS[prop];
-  if (longhands) return longhands.map((p) => [p, tokenName] as [string, string]);
-  return [[prop, tokenName]];
-}
-
-function extractToken(value: string): string | null {
-  const m = VAR_RE.exec(value.trim());
-  return m ? (m[1] ?? null) : null;
 }
 
 function splitSelectors(selectorList: string): string[] {
@@ -92,7 +62,7 @@ function processRule(rule: Rule, map: AutoTokenMap): void {
   for (const node of rule.nodes ?? []) {
     if (node.type !== "decl") continue;
     const decl = node as Declaration;
-    const token = extractToken(decl.value);
+    const token = extractBareVarToken(decl.value);
     if (!token) continue;
     const pairs = expandDecl(decl.prop, token);
     for (const sel of wantedSelectors) {

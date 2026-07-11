@@ -1,6 +1,7 @@
 import { registerServerChannel } from "./server.js";
 import { loadConfig } from "./config.js";
-import { scanCss } from "./scan-css.js";
+import { scanCss, type AutoTokenMap } from "./scan-css.js";
+import { scanTsx } from "./scan-tsx.js";
 import { setAutoTokenMap } from "./auto-tokens.js";
 
 /**
@@ -23,18 +24,40 @@ interface ChannelLike {
 
 let scanPromise: Promise<void> | null = null;
 
+/**
+ * Merge two scan maps. When the same selector exists in both, per-property
+ * keys overlay — TSX entries win, on the rationale that inline-style
+ * declarations are closer to the rendered element than a CSS rule and
+ * tend to be the explicit binding when both exist. v0: simple last-wins
+ * merge; collision logging can come later if it matters.
+ */
+function mergeMaps(a: AutoTokenMap, b: AutoTokenMap): AutoTokenMap {
+  const out: AutoTokenMap = { ...a };
+  for (const [sel, props] of Object.entries(b)) {
+    out[sel] = { ...(out[sel] ?? {}), ...props };
+  }
+  return out;
+}
+
 async function runInitialScan(): Promise<void> {
   try {
     const config = await loadConfig();
-    const result = await scanCss(process.cwd(), config.cssEntries);
-    setAutoTokenMap(result.map);
-    const selectorCount = Object.keys(result.map).length;
+    const cwd = process.cwd();
+    const [cssResult, tsxResult] = await Promise.all([
+      scanCss(cwd, config.cssEntries),
+      scanTsx(cwd, config.tsxEntries),
+    ]);
+    const merged = mergeMaps(cssResult.map, tsxResult.map);
+    setAutoTokenMap(merged);
     // eslint-disable-next-line no-console
     console.log(
-      `[design-sync] Scanned ${result.scannedFiles.length} CSS file(s); ` +
-        `derived bindings for ${selectorCount} selector(s).`,
+      `[design-sync] Scanned ${cssResult.scannedFiles.length} CSS + ` +
+        `${tsxResult.scannedFiles.length} TSX file(s); ` +
+        `derived bindings for ${Object.keys(merged).length} selector(s) ` +
+        `(css: ${Object.keys(cssResult.map).length}, ` +
+        `tsx: ${Object.keys(tsxResult.map).length}).`,
     );
-    for (const w of result.warnings) {
+    for (const w of [...cssResult.warnings, ...tsxResult.warnings]) {
       // eslint-disable-next-line no-console
       console.warn(`[design-sync] scan warning (${w.file}): ${w.message}`);
     }
@@ -44,7 +67,7 @@ async function runInitialScan(): Promise<void> {
     // scanner didn't run.
     const m = err instanceof Error ? err.message : String(err);
     // eslint-disable-next-line no-console
-    console.warn(`[design-sync] CSS scan skipped: ${m}`);
+    console.warn(`[design-sync] Scan skipped: ${m}`);
     setAutoTokenMap({});
   }
 }

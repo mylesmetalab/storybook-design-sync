@@ -160,6 +160,41 @@ function flattenDualModeValue(value: unknown): string | null {
  *
  * Returns null if the row isn't fixable in the requested direction.
  */
+/**
+ * Single source of truth for "can the Apply path do anything with this
+ * token-grouped row?". Mirrors the conditions inside `buildEdit` so the
+ * UI partitioner and the row renderer agree on whether to draw a button
+ * or surface the row as informational-only.
+ *
+ * - `bindingFixable`: the binding-diff has a concrete value on both sides
+ *   and is drifted, so we can swap the var(--…) reference.
+ * - `valueFixable`: the value-diff is drifted *and* Figma resolved
+ *   through a named token (engine attached `tokenName`), so we can
+ *   promote the literal in code to `var(--token)`.
+ *
+ * Both sides being false means the row has nothing the engines can act
+ * on — it belongs in the informational section, not the action table.
+ */
+function tokenRowFixability(
+  value: DimensionDiff | undefined,
+  binding: DimensionDiff | undefined,
+): { bindingFixable: boolean; valueFixable: boolean } {
+  const bindingFixable = !!(
+    binding &&
+    binding.status === "drift" &&
+    flattenDualModeValue(binding.codeValue) !== null &&
+    flattenDualModeValue(binding.figmaValue) !== null
+  );
+  const valueTokenName = value?.tokenName ?? null;
+  const valueFixable = !!(
+    !bindingFixable &&
+    value &&
+    value.status === "drift" &&
+    valueTokenName !== null
+  );
+  return { bindingFixable, valueFixable };
+}
+
 function buildEdit(
   d: DimensionDiff,
   storyId: string,
@@ -167,9 +202,45 @@ function buildEdit(
   scope: ApplyScope,
   nodeId: string | undefined,
 ): Record<string, unknown> | null {
-  if (d.kind !== "token-binding" && d.kind !== "token-value") return null;
+  if (d.kind !== "token-binding" && d.kind !== "token-value" && d.kind !== "copy") return null;
   const codeFlat = flattenDualModeValue(d.codeValue);
   const figmaFlat = flattenDualModeValue(d.figmaValue);
+
+  // Copy edits don't go through the selector → property → token machinery;
+  // they target the JSX text child (code) or the TEXT descendant
+  // (figma) directly. Handled with its own envelope: storyId routes the
+  // code engine, nodeId routes the plugin.
+  if (d.kind === "copy") {
+    if (codeFlat === null || figmaFlat === null) return null;
+    if (scope === "figma" && !nodeId) return null;
+    const id =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${storyId}-copy-${Date.now()}`;
+    const base = {
+      id,
+      kind: "copy" as const,
+      source: "storybook-design-sync",
+      timestamp: new Date().toISOString(),
+    };
+    if (scope === "code") {
+      return {
+        ...base,
+        scope: "code",
+        target: { property: "text", storyId },
+        oldValue: codeFlat,
+        newValue: figmaFlat,
+      };
+    }
+    return {
+      ...base,
+      scope: "figma",
+      target: { nodeId, property: "text", storyId },
+      oldValue: figmaFlat,
+      newValue: codeFlat,
+      confirm: true,
+    };
+  }
   // `selector` is required by the pipeline's `code-css-postcss` engine
   // (it scopes the rewrite to a CSS rule). The `code-tsx-inline` engine
   // doesn't need it — it walks `codeTargets` and matches JSX attribute
@@ -474,7 +545,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       const selector = storyParams.target;
       const pipelineUrl = storyParams.pipelineUrl ?? PIPELINE_DEFAULT_URL;
 
-      for (const d of report.dimensions) {
+      for (const d of visibleDimensions(report)) {
         if (d.status !== "drift") continue;
         setBulk((prev) => (prev?.apply ? { ...prev, apply: { ...prev.apply, current: row.storyId } } : prev));
 
@@ -597,8 +668,21 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
             // ahead of it. Re-running puts the panel back in sync with the
             // file and Figma, so subsequent Update <other side> clicks
             // operate on fresh data instead of stale token names.
+            //
+            // Code-side edits race Vite's HMR: pipeline writes the file,
+            // but the iframe hasn't yet been pushed the new module + re-
+            // rendered when we snapshot. Wait a beat so the DOM reflects
+            // the write. Figma-side edits skip the wait — the next REST
+            // fetch reads the latest directly. 800ms is empirically enough
+            // for a single-file rewrite + React re-render; we deliberately
+            // don't try to listen for an HMR signal (would require Vite-
+            // specific plumbing across the addon/preview boundary).
             if (result.status === "applied") {
-              onCheck();
+              if (scope === "code") {
+                setTimeout(() => onCheck(), 800);
+              } else {
+                onCheck();
+              }
             }
           }}
           onUndo={async (key, scope, inverse) => {
@@ -637,75 +721,205 @@ interface DiffTableProps {
   onUndo: (key: string, scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, onUndo }) => (
-  <div style={styles.section}>
-    <h3 style={styles.h3}>
-      Drift report{" "}
-      <span style={styles.muted}>
-        — node {report.nodeId}
-        {report.mode ? ` · mode: ${report.mode}` : ""} · {new Date(report.generatedAt).toLocaleTimeString()}
-        {report.timing && (
-          <> · {report.timing.totalMs}ms (fetch {report.timing.figmaFetchMs}ms · {report.timing.cacheHits} cache hits / {report.timing.cacheMisses} misses)</>
-        )}
-      </span>
-    </h3>
-    <div style={styles.legend}>
-      <span>
-        <strong>Value</strong> — does it look right today (px, color match)?
-      </span>
-      <span style={styles.legendDivider}>·</span>
-      <span>
-        <strong>Wiring</strong> — is the code declaring the same token as Figma, so it follows when the token changes?
-      </span>
+/**
+ * Dimensions the diff engine still emits as placeholders but the UI
+ * deliberately hides — they have no payload, no engine, and no near-term
+ * roadmap engine. Kept in the engine so future work has a single place
+ * to wire real comparison logic into; removed from this set the moment
+ * an engine starts producing meaningful data. Don't delete the engine
+ * code that emits these; just edit this set.
+ */
+const HIDDEN_DIMENSION_KINDS = new Set<DimensionDiff["kind"]>([
+  "structure",
+  "motion",
+]);
+
+/**
+ * Apply the hidden-kinds filter at every consumer of `report.dimensions`
+ * (table render, bulk apply, summary counts, markdown/json exports). Going
+ * through this one helper means turning a dimension back on is a one-line
+ * change to `HIDDEN_DIMENSION_KINDS` rather than a hunt across the file.
+ */
+function visibleDimensions(report: DriftReport): DimensionDiff[] {
+  return report.dimensions.filter((d) => !HIDDEN_DIMENSION_KINDS.has(d.kind));
+}
+
+const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, onUndo }) => {
+  const grouped = groupDimensions(visibleDimensions(report));
+  const mainRows = grouped.filter((r) => partitionRow(r) === "main");
+  const infoRows = grouped.filter((r) => partitionRow(r) === "info");
+
+  const renderRow = (row: GroupedRow, i: number, fixable: boolean) => {
+    if (row.kind === "token") {
+      const key = `token-${row.property}-${i}`;
+      return (
+        <TokenRow
+          key={key}
+          rowKey={key}
+          property={row.property}
+          value={row.value}
+          binding={row.binding}
+          applyResults={applyResults}
+          onApply={onApply}
+          onUndo={onUndo}
+        />
+      );
+    }
+    const d = row.diff;
+    const key = `${d.kind}-${d.property}-${i}`;
+    return (
+      <OtherRow
+        key={key}
+        d={d}
+        fixable={fixable}
+        {...(fixable ? {} : { infoNote: explainInfo(row) })}
+        codeResult={applyResults[`${key}:code`]}
+        figmaResult={applyResults[`${key}:figma`]}
+        onApply={(scope) => onApply(d, key, scope)}
+        onUndo={(scope, inverse) => onUndo(key, scope, inverse)}
+      />
+    );
+  };
+
+  return (
+    <div style={styles.section}>
+      <h3 style={styles.h3}>
+        Drift report{" "}
+        <span style={styles.muted}>
+          — node {report.nodeId}
+          {report.mode ? ` · mode: ${report.mode}` : ""} · {new Date(report.generatedAt).toLocaleTimeString()}
+          {report.timing && (
+            <> · {report.timing.totalMs}ms (fetch {report.timing.figmaFetchMs}ms · {report.timing.cacheHits} cache hits / {report.timing.cacheMisses} misses)</>
+          )}
+        </span>
+      </h3>
+      <div style={styles.legend}>
+        <span>
+          <strong>Value</strong> — does it look right today (px, color match)?
+        </span>
+        <span style={styles.legendDivider}>·</span>
+        <span>
+          <strong>Wiring</strong> — is the code declaring the same token as Figma, so it follows when the token changes?
+        </span>
+      </div>
+
+      {mainRows.length > 0 && (
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>Property</th>
+              <th style={styles.th}>Code</th>
+              <th style={styles.th}>Figma</th>
+              <th style={styles.th}>Value</th>
+              <th style={styles.th}>Wiring</th>
+              <th style={styles.th}>Apply</th>
+            </tr>
+          </thead>
+          <tbody>{mainRows.map((row, i) => renderRow(row, i, true))}</tbody>
+        </table>
+      )}
+
+      {infoRows.length > 0 && (
+        <details style={styles.infoDetails}>
+          <summary style={styles.infoSummary}>
+            Detected drift — manual fix ({infoRows.length})
+            <span style={styles.muted}>
+              {" "}— shown for context; the addon has no automated apply path for these.
+            </span>
+          </summary>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                <th style={styles.th}>Property</th>
+                <th style={styles.th}>Code</th>
+                <th style={styles.th}>Figma</th>
+                <th style={styles.th}>Value</th>
+                <th style={styles.th}>Wiring</th>
+                <th style={styles.th}>Why no Apply</th>
+              </tr>
+            </thead>
+            <tbody>{infoRows.map((row, i) => renderRow(row, i, false))}</tbody>
+          </table>
+        </details>
+      )}
     </div>
-    <table style={styles.table}>
-      <thead>
-        <tr>
-          <th style={styles.th}>Property</th>
-          <th style={styles.th}>Code</th>
-          <th style={styles.th}>Figma</th>
-          <th style={styles.th}>Value</th>
-          <th style={styles.th}>Wiring</th>
-          <th style={styles.th}>Apply</th>
-        </tr>
-      </thead>
-      <tbody>
-        {groupDimensions(report.dimensions).map((row, i) => {
-          if (row.kind === "token") {
-            return (
-              <TokenRow
-                key={`token-${row.property}-${i}`}
-                rowKey={`token-${row.property}-${i}`}
-                property={row.property}
-                value={row.value}
-                binding={row.binding}
-                applyResults={applyResults}
-                onApply={onApply}
-                onUndo={onUndo}
-              />
-            );
-          }
-          const d = row.diff;
-          const key = `${d.kind}-${d.property}-${i}`;
-          return (
-            <OtherRow
-              key={key}
-              d={d}
-              codeResult={applyResults[`${key}:code`]}
-              figmaResult={applyResults[`${key}:figma`]}
-              onApply={(scope) => onApply(d, key, scope)}
-              onUndo={(scope, inverse) => onUndo(key, scope, inverse)}
-            />
-          );
-        })}
-      </tbody>
-    </table>
-  </div>
-);
+  );
+};
 
 type GroupedRow =
   | { kind: "token"; property: string; value?: DimensionDiff; binding?: DimensionDiff }
   | { kind: "other"; diff: DimensionDiff };
+
+/**
+ * Decide whether a grouped row belongs in the main action table or the
+ * collapsed informational section. A row is "informational" when there
+ * is drift but the addon's Apply path can't act on it — either because
+ * the dimension kind has no engine (`copy`, `props`, `variant-set`,
+ * `structure`, `motion`) or because the token row lacks the wiring
+ * data the engines need. Matching rows always stay in the main section;
+ * they're confirmation, not a problem.
+ */
+function partitionRow(row: GroupedRow): "main" | "info" {
+  if (row.kind === "token") {
+    const valueDrifted = row.value?.status === "drift";
+    const bindingDrifted = row.binding?.status === "drift";
+    if (!valueDrifted && !bindingDrifted) return "main";
+    const { bindingFixable, valueFixable } = tokenRowFixability(row.value, row.binding);
+    return bindingFixable || valueFixable ? "main" : "info";
+  }
+  // `other`-kind diffs (copy, props, variant-set, structure, motion):
+  // most return null from buildEdit — informational. The exception is
+  // `copy`, which has its own engine (code-tsx-text + plugin characters
+  // write) when both sides carry concrete strings. Matches always stay
+  // in the main section as confirmation.
+  if (row.diff.status !== "drift") return "main";
+  if (row.diff.kind === "copy") {
+    const codeFlat = flattenDualModeValue(row.diff.codeValue);
+    const figmaFlat = flattenDualModeValue(row.diff.figmaValue);
+    return codeFlat !== null && figmaFlat !== null ? "main" : "info";
+  }
+  return "info";
+}
+
+/**
+ * Per-row reason the row landed in the informational section. Pre-C this
+ * was just "no engine for X" for every other-kind row; now that copy has
+ * a real engine, the reasons fan out — each branch points at the actual
+ * blocker so the user knows what to change if they want auto-apply to
+ * start working.
+ */
+function explainInfo(row: GroupedRow): string {
+  if (row.kind === "token") {
+    const valueDrift = row.value?.status === "drift";
+    const bindingDrift = row.binding?.status === "drift";
+    if (valueDrift && row.value?.tokenName == null) {
+      return "Value drift, but Figma's side doesn't resolve to a named token — there's no token to promote the code literal to.";
+    }
+    if (bindingDrift) {
+      return "Wiring drift, but the scanner couldn't find a clean var(--token) binding on the code side. Convert the inline value to `\"var(--token)\"` (or the equivalent CSS) so the engine has something to rewrite.";
+    }
+    return "Drifted, but the addon couldn't find a token binding for this property — wire it up in CSS/JSX, or fix manually.";
+  }
+  const d = row.diff;
+  if (d.kind === "copy") {
+    const codeFlat = flattenDualModeValue(d.codeValue);
+    const figmaFlat = flattenDualModeValue(d.figmaValue);
+    if (codeFlat === null && figmaFlat !== null) {
+      return `Code renders no static text matching "${figmaFlat}". The component likely uses a dynamic child (e.g. \`{label}\`) — copy auto-apply can only rewrite literal JSX text.`;
+    }
+    if (codeFlat !== null && figmaFlat === null) {
+      return "Figma's matching TEXT node is empty or missing — nothing to compare against, fix manually.";
+    }
+    return "Copy drift detected but values aren't both concrete strings — fix manually.";
+  }
+  if (d.kind === "variant-set" || d.kind === "props") {
+    return `${d.kind === "variant-set" ? "Variant-set" : "Props"} drift has no auto-apply engine yet — fix in code or Figma manually.`;
+  }
+  if (d.kind === "structure" || d.kind === "motion") {
+    return `\`${d.kind}\` dimension is reserved for a future engine — surfaced for awareness only.`;
+  }
+  return `No engine for "${d.kind}" dimension yet — fix in code or Figma manually.`;
+}
 
 function groupDimensions(diffs: DimensionDiff[]): GroupedRow[] {
   const indexByProp = new Map<string, number>();
@@ -763,20 +977,8 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
   const figmaShown = display?.figmaValue ?? null;
   const modes = display?.modes;
 
-  const bindingFixable =
-    binding &&
-    binding.status === "drift" &&
-    flattenDualModeValue(binding.codeValue) !== null &&
-    flattenDualModeValue(binding.figmaValue) !== null;
-
-  // Value-drift "Update code" — when the computed CSS value disagrees with
-  // Figma even though Wiring matches (or is undeclared in code), we can
-  // rewrite the literal in CSS to `var(--token)`. The engine attaches the
-  // bare token name to value-drift diffs as `d.tokenName`; use that when
-  // present.
+  const { bindingFixable, valueFixable } = tokenRowFixability(value, binding);
   const valueTokenName = value?.tokenName ?? null;
-  const valueFixable =
-    !bindingFixable && value && value.status === "drift" && valueTokenName !== null;
 
   const valueTitle = value
     ? value.status === "match"
@@ -855,13 +1057,21 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
 
 interface OtherRowProps {
   d: DimensionDiff;
+  /**
+   * Whether the addon's Apply path can act on this diff. When false, the
+   * Apply column renders an explanatory note instead of buttons that
+   * would always reject (see CLAUDE.md anti-pattern #3 / "honest Apply").
+   */
+  fixable: boolean;
+  /** Human-readable reason shown in the Apply column when `fixable` is false. */
+  infoNote?: string;
   codeResult: ApplyResult | undefined;
   figmaResult: ApplyResult | undefined;
   onApply: (scope: ApplyScope) => void;
   onUndo: (scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-const OtherRow: React.FC<OtherRowProps> = ({ d, codeResult, figmaResult, onApply, onUndo }) => {
+const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, infoNote, codeResult, figmaResult, onApply, onUndo }) => {
   return (
     <tr>
       <td style={styles.td}>
@@ -884,24 +1094,28 @@ const OtherRow: React.FC<OtherRowProps> = ({ d, codeResult, figmaResult, onApply
         {d.note && <div style={styles.muted}>{d.note}</div>}
       </td>
       <td style={styles.td}>
-        <div style={styles.applyButtons}>
-          <ApplyButton
-            label="Update code"
-            scope="code"
-            result={codeResult}
-            onClick={() => onApply("code")}
-            onUndo={(inverse) => onUndo("code", inverse)}
-            title={`Write ${stringifyValue(d.figmaValue)} to code (Figma value wins)`}
-          />
-          <ApplyButton
-            label="Update Figma"
-            scope="figma"
-            result={figmaResult}
-            onClick={() => onApply("figma")}
-            onUndo={(inverse) => onUndo("figma", inverse)}
-            title={`Write ${stringifyValue(d.codeValue)} to Figma (code value wins)`}
-          />
-        </div>
+        {fixable ? (
+          <div style={styles.applyButtons}>
+            <ApplyButton
+              label="Update code"
+              scope="code"
+              result={codeResult}
+              onClick={() => onApply("code")}
+              onUndo={(inverse) => onUndo("code", inverse)}
+              title={`Write ${stringifyValue(d.figmaValue)} to code (Figma value wins)`}
+            />
+            <ApplyButton
+              label="Update Figma"
+              scope="figma"
+              result={figmaResult}
+              onClick={() => onApply("figma")}
+              onUndo={(inverse) => onUndo("figma", inverse)}
+              title={`Write ${stringifyValue(d.codeValue)} to Figma (code value wins)`}
+            />
+          </div>
+        ) : (
+          <div style={styles.muted} title={infoNote}>{infoNote ?? "Manual fix only."}</div>
+        )}
       </td>
     </tr>
   );
@@ -1091,7 +1305,7 @@ function checkOneStory(
 
 function countRows(report: DriftReport): { match: number; drift: number; flagOnly: number } {
   const counts = { match: 0, drift: 0, flagOnly: 0 };
-  for (const d of report.dimensions) {
+  for (const d of visibleDimensions(report)) {
     if (d.status === "match") counts.match++;
     else if (d.status === "drift") counts.drift++;
     else if (d.status === "flag-only") counts.flagOnly++;
@@ -1458,7 +1672,7 @@ function renderStorySection(
 ): void {
   const report = row.report;
   if (!report) return;
-  const rows = report.dimensions.filter((d) => include.includes(d.status));
+  const rows = visibleDimensions(report).filter((d) => include.includes(d.status));
   if (rows.length === 0) return;
   lines.push(`### \`${row.storyId}\` — node ${report.nodeId}`);
   lines.push("");
@@ -1611,6 +1825,20 @@ const styles: Record<string, React.CSSProperties> = {
   td: { padding: "6px 8px", borderBottom: "1px solid #f0f0f0", verticalAlign: "top" },
   muted: { color: "#7a7a7a", fontSize: 12 },
   modes: { color: "#7a7a7a", fontSize: 11, marginTop: 2 },
+  infoDetails: {
+    marginTop: 16,
+    border: "1px solid #e5e5e5",
+    borderRadius: 4,
+    background: "#fafafa",
+  },
+  infoSummary: {
+    cursor: "pointer",
+    padding: "8px 12px",
+    fontWeight: 600,
+    fontSize: 12,
+    color: "#525252",
+    userSelect: "none" as const,
+  },
 };
 
 addons.register(ADDON_ID, () => {

@@ -75,6 +75,7 @@ system. Highlights of the work already done:
 | H5   | Cross-repo audit docs caught up to reality (plugin README's real property surface, pipeline ARCHITECTURE.md's correct engine roster) | figma-plugin #3 + pipeline #9 |
 | H6   | Inline-scanner compound values + shorthand normalization (`borderBottom: "1px solid var(--x)"`, `border-bottom-color` → `border-color`) | addon #27 |
 | H7   | `code-tsx-inline` write engine — closes the Apply-all loop on inline-styled codebases. Mirrors `code-css-postcss` semantics on JSX `style={{ … }}` expressions via ts-morph AST. | pipeline #11 |
+| P1.3 | Shared types + helpers package `@metalab/design-sync-core` — one `Edit`/`EditResult` wire contract + `normalizeTokenName`/`tokenNameToCssVar`/`deriveSelectorChain`/`isSingleValue`, imported by all three repos (local copies deleted). Plugin gained the typed contract (20 sites got the required `EditResult.id`); addon's selector fallback went 1→4 levels (verified no-op on mde's 154 selectors). | core v0.0.1 + addon #37 (v0.0.24) + pipeline #12 (v0.0.9) + plugin #7 (v0.0.3) |
 
 ## Active roadmap
 
@@ -95,7 +96,7 @@ of bug; finishing unfinished features afterwards becomes much cheaper.
 | ----- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------ |
 | ~~P1.1~~ | ~~Auto-derive tokens from CSS (kill the third copy)~~ | ✅ Shipped — addon v0.0.23, mde stories codemodded (Downmark#21).                          | 1d   |
 | ~~P1.2~~ | ~~PostCSS-based code-write engine (replace regex swap)~~ | ✅ Shipped — pipeline v0.0.8. Regex engine deleted, AST engine has 21 unit tests, stale-check tightened. | 2d   |
-| P1.3  | Shared types + normalizers package                      | One `Edit` definition, one `normalizeTokenName`, imported by all three repos.               | 0.5d   |
+| ~~P1.3~~ | ~~Shared types + normalizers package~~                  | ✅ Shipped — `@metalab/design-sync-core` v0.0.1; addon v0.0.24 / pipeline v0.0.9 / plugin v0.0.3 import it, local copies deleted. | 0.5d   |
 | P1.4  | Move CSS writes from pipeline into addon preset         | Update code works without the pipeline binary running. Pipeline only needed for Figma writes. | 0.5–1d |
 | ~~P1.5~~ | ~~Drift-engine honesty pass~~ | ✅ Shipped — addon #27. Bulk Check all now honors "Both modes", `findFirstTextNode` prefers alphanumeric labels over single-glyph children, border read from drawn edge (not always `border-top-*`), mode-detection no longer guesses "light" on missing attribute, `gap: normal` / transparent / `rgba(R,G,B,1)` / Figma `lineHeight: AUTO` all stop producing false-positive drift. | 1d |
 | ~~P1.6~~ | ~~Inline-style binding scan (read side of P5.2)~~ | ✅ Shipped — addon #27. Preview's `snapshotElement` now reads `var(--token)` references directly from `el.style` and synthesizes bindings. Token-binding rows populate on codebases that style inline without any consumer config. | 0.5d |

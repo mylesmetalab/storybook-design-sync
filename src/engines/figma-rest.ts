@@ -10,6 +10,7 @@ import type {
   DriftReport,
   ModeAwareValue,
 } from "../dimensions/types.js";
+import { normalizeTokenName } from "@metalab/design-sync-core";
 import { PersistentCache } from "../cache.js";
 
 const FIGMA_API = "https://api.figma.com/v1";
@@ -1341,30 +1342,6 @@ function parseVariantName(name: string): Record<string, string> {
 function isFalsyVariantValue(value: string): boolean {
   const v = value.toLowerCase();
   return v === "false" || v === "default" || v === "off" || v === "no" || v === "none";
-}
-
-/**
- * Reduce a token name to a canonical key for "do these mean the same thing"
- * comparisons. Strips a leading `--`, collapses `/` `.` and runs of `-` into
- * a single `-`, lowercases. Examples:
- *   "radius/xl"     → "radius-xl"
- *   "radius-xl"     → "radius-xl"
- *   "--radius-xl"   → "radius-xl"
- *   "Radius/XL"     → "radius-xl"
- *   "color/bg/kbd"  → "color-bg-kbd"
- *
- * Used by the binding diff so that the same token expressed in different
- * naming conventions doesn't produce false-positive drift. Figma uses
- * `group/name`; CSS custom properties can't contain `/` so codebases use
- * `group-name` or `--group-name`.
- */
-function normalizeTokenName(name: string | undefined): string {
-  if (!name) return "";
-  return name
-    .replace(/^--/, "")
-    .replace(/[\/.]/g, "-")
-    .replace(/-+/g, "-")
-    .toLowerCase();
 }
 
 /**

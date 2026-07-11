@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import postcss, { type Rule, type Declaration } from "postcss";
 import { glob } from "tinyglobby";
+import { deriveSelectorChain } from "@metalab/design-sync-core";
 
 /**
  * Map of CSS selector → { CSS property → token name }.
@@ -155,7 +156,7 @@ export function lookupBindings(
   map: AutoTokenMap,
   selector: string,
 ): Record<string, string> {
-  const chain = selectorFallbackChain(selector);
+  const chain = deriveSelectorChain(selector);
   const out: Record<string, string> = {};
   // Walk from most general → most specific so the specific keys overwrite.
   for (let i = chain.length - 1; i >= 0; i--) {
@@ -165,18 +166,11 @@ export function lookupBindings(
   return out;
 }
 
-export function selectorFallbackChain(selector: string): string[] {
-  const out = [selector];
-  // Strip BEM `--modifier` first (the common case in mde stories).
-  const dashIdx = selector.lastIndexOf("--");
-  if (dashIdx > 0) {
-    out.push(selector.slice(0, dashIdx));
-    return out;
-  }
-  // Then try stripping a trailing adjacent class (.tab.active → .tab).
-  const lastDot = selector.lastIndexOf(".");
-  if (lastDot > 0) {
-    out.push(selector.slice(0, lastDot));
-  }
-  return out;
-}
+/**
+ * @deprecated Use `deriveSelectorChain` from `@metalab/design-sync-core`.
+ * Retained as a stable alias so existing importers of the old name keep
+ * working. Note the behavior change vs the addon's original one-level
+ * implementation: the core version walks up to FOUR BEM/class levels, so a
+ * binding can now resolve on a deeper ancestor selector than before.
+ */
+export const selectorFallbackChain = deriveSelectorChain;

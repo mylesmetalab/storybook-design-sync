@@ -1,3 +1,11 @@
+// ModeAwareValue is part of the shared wire contract; source it from core.
+// Core declares `light?`/`dark?` as optional — call sites must tolerate
+// either field being absent. Imported here and re-exported so existing
+// `import { ModeAwareValue } from ".../dimensions/types.js"` sites (incl.
+// the package's public `index.ts`) keep resolving.
+import type { ModeAwareValue } from "@metalab/design-sync-core";
+export type { ModeAwareValue };
+
 export type DimensionKind =
   | "token-value"
   | "token-binding"
@@ -8,11 +16,6 @@ export type DimensionKind =
   | "motion";
 
 export type DimensionStatus = "match" | "drift" | "flag-only";
-
-export interface ModeAwareValue {
-  light: string;
-  dark: string;
-}
 
 export interface DimensionDiff {
   kind: DimensionKind;

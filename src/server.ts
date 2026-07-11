@@ -1,7 +1,8 @@
 import { loadConfig } from "./config.js";
 import { loadRegistry, lookup, isPending } from "./registry.js";
 import { resolveEngine } from "./engines/index.js";
-import { EVENTS, type CodeSnapshotPayload } from "./channels.js";
+import { EVENTS, type CodeSnapshotPayload, type ApplyCodeRequestPayload } from "./channels.js";
+import { applyCodeEdit } from "./apply-code.js";
 import type { DimensionDiff, DriftReport } from "./dimensions/types.js";
 import { getAutoTokenMap } from "./auto-tokens.js";
 import { lookupBindings } from "./scan-css.js";
@@ -36,6 +37,20 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       // Emit an empty list rather than failing silently — the manager UI
       // can render "no stories registered" sensibly.
       channel.emit(EVENTS.RegisteredStories, { stories: [], fileKey: "" });
+    }
+  });
+
+  channel.on(EVENTS.ApplyCodeRequest, async (payload: unknown) => {
+    const { edit } = payload as ApplyCodeRequestPayload;
+    try {
+      const config = await loadConfig();
+      const result = await applyCodeEdit(edit, process.cwd(), config.codeTargets);
+      channel.emit(EVENTS.ApplyCodeResult, { result });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      channel.emit(EVENTS.ApplyCodeResult, {
+        result: { id: edit.id, status: "error", engine: "addon-apply-code", message },
+      });
     }
   });
 

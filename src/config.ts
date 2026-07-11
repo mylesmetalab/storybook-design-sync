@@ -1,10 +1,18 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import type { CodeTarget } from "@metalab/design-sync-pipeline";
 
 export interface DesignSyncConfig {
   engine: string;
   registryPath: string;
   fileKey: string;
+  /**
+   * Files the addon is allowed to write when applying a **code-scope** edit
+   * in-process (P1.4 — "Update code" without the pipeline binary running).
+   * Mirrors the pipeline's `codeTargets`. Defaults to `[]`, in which case a
+   * code-scope Apply is rejected with a "configure codeTargets" message.
+   */
+  codeTargets: CodeTarget[];
   /**
    * Glob patterns (relative to the consumer's cwd) for the CSS files the
    * scanner reads at startup to build the selector → token map. Default
@@ -25,6 +33,7 @@ export interface DesignSyncConfig {
 const DEFAULTS = {
   engine: "figma-rest",
   registryPath: ".design-sync/registry.json",
+  codeTargets: [] as CodeTarget[],
   cssEntries: ["src/**/*.css"],
   storyGlobs: [
     "src/**/*.stories.@(ts|tsx|js|jsx|mjs|mts)",
@@ -67,6 +76,7 @@ function normalize(raw: unknown): DesignSyncConfig {
     engine: r.engine ?? DEFAULTS.engine,
     registryPath: r.registryPath ?? DEFAULTS.registryPath,
     fileKey: r.fileKey,
+    codeTargets: r.codeTargets ?? [...DEFAULTS.codeTargets],
     cssEntries: r.cssEntries ?? [...DEFAULTS.cssEntries],
     storyGlobs: r.storyGlobs ?? [...DEFAULTS.storyGlobs],
   };

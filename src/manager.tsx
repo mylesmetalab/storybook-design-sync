@@ -10,6 +10,7 @@ import {
   type ProposedEdit,
   type RegisteredStoriesPayload,
   type RegisteredStoryEntry,
+  type ApplyCodeResultPayload,
 } from "./channels.js";
 import type { DriftReport, DimensionDiff } from "./dimensions/types.js";
 
@@ -251,6 +252,9 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     reject: (err: string) => void;
     storyId: string;
   } | null>(null);
+  // Code-scope applies are async channel round-trips to the addon server
+  // (P1.4); correlate each reply to its request by edit id.
+  const pendingApplyRef = useRef<Map<string, (r: ApplyResult) => void>>(new Map());
 
   const emit = useChannel({
     [EVENTS.DriftReport]: (payload: DriftReportPayload) => {
@@ -271,6 +275,17 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       }
       setState({ loading: false, report: null, error: payload.message });
     },
+    [EVENTS.ApplyCodeResult]: (payload: ApplyCodeResultPayload) => {
+      const { result } = payload;
+      const resolve = pendingApplyRef.current.get(result.id);
+      if (resolve) {
+        pendingApplyRef.current.delete(result.id);
+        const mapped: ApplyResult = { status: result.status };
+        if (result.message !== undefined) mapped.message = result.message;
+        if (result.diff !== undefined) mapped.diff = result.diff;
+        resolve(mapped);
+      }
+    },
     [EVENTS.ProposedEdit]: (edit: ProposedEdit) => {
       setEdits((prev) => [edit, ...prev].slice(0, 50));
     },
@@ -285,6 +300,36 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       if (edit) setEdits((prev) => [edit, ...prev].slice(0, 50));
     },
   });
+
+  // Route an edit to the right applier: code-scope goes in-process to the
+  // addon server over the channel (P1.4 — no pipeline binary needed);
+  // figma-scope still POSTs to the pipeline (Variables REST write + plugin
+  // queue). Both resolve to an ApplyResult the panel renders inline.
+  const applyEdit = useCallback(
+    (edit: Record<string, unknown>): Promise<ApplyResult> => {
+      if (edit.scope === "code") {
+        const id = typeof edit.id === "string" ? edit.id : crypto.randomUUID();
+        edit.id = id;
+        return new Promise<ApplyResult>((resolve) => {
+          const timer = setTimeout(() => {
+            pendingApplyRef.current.delete(id);
+            resolve({
+              status: "error",
+              message:
+                "Timed out waiting for the addon server to apply the edit. Is Storybook's dev server running?",
+            });
+          }, 15000);
+          pendingApplyRef.current.set(id, (r) => {
+            clearTimeout(timer);
+            resolve(r);
+          });
+          emit(EVENTS.ApplyCodeRequest, { edit });
+        });
+      }
+      return postEdit(designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL, edit);
+    },
+    [emit, designSync.pipelineUrl],
+  );
 
   // Reset when the story changes.
   useEffect(() => {
@@ -540,10 +585,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
               return;
             }
             setApplyResults((prev) => ({ ...prev, [key + ":" + scope]: { status: "loading" } }));
-            const result = await postEdit(
-              designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL,
-              edit,
-            );
+            const result = await applyEdit(edit);
             // On success, stash the inverse edit so the row can offer Undo.
             if (result.status === "applied") {
               result.inverse = inverseEdit(edit);
@@ -561,10 +603,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
           }}
           onUndo={async (key, scope, inverse) => {
             setApplyResults((prev) => ({ ...prev, [key + ":" + scope]: { status: "loading" } }));
-            const result = await postEdit(
-              designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL,
-              inverse,
-            );
+            const result = await applyEdit(inverse);
             // After undo, the row is back to its original drift state.
             // Reflect that as `undone` so users see the action took effect.
             setApplyResults((prev) => ({

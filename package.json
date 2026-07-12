@@ -5,7 +5,8 @@
   "license": "MIT",
   "type": "module",
   "dependencies": {
-    "@metalab/design-sync-core": "github:mylesmetalab/design-sync-core#v0.0.1"
+    "@metalab/design-sync-core": "github:mylesmetalab/design-sync-core#v0.0.1",
+    "@metalab/design-sync-pipeline": "github:mylesmetalab/design-sync-pipeline#v0.0.9"
   },
   "exports": {
     ".": {
@@ -30,7 +31,8 @@
     "build": "node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "test": "vitest run"
   },
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0",
@@ -54,7 +56,8 @@
     "react-dom": "^19.0.0",
     "storybook": "^10.0.0",
     "tinyglobby": "^0.2.16",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.6"
   },
   "storybook": {
     "displayName": "Design Sync",

@@ -1,5 +1,6 @@
 import type { CodeSnapshot } from "./engines/types.js";
 import type { DriftReport } from "./dimensions/types.js";
+import type { Edit, EditResult } from "@metalab/design-sync-core";
 
 export const ADDON_ID = "metalab/design-sync";
 export const PANEL_ID = `${ADDON_ID}/panel`;
@@ -26,6 +27,15 @@ export const EVENTS = {
    * Reserved contract for the inspector ↔ sync handshake in v1.
    */
   ProposedEdit: "design-sync:proposedEdit",
+  /**
+   * Manager → server: apply a code-scope Edit in-process (P1.4). The server
+   * writes the file with the CSS engine directly — no pipeline binary. The
+   * manager correlates the reply by `edit.id`. Figma-scope edits do NOT use
+   * this path; they still POST to the pipeline over HTTP.
+   */
+  ApplyCodeRequest: "design-sync:applyCodeRequest",
+  /** Server → manager: result of an in-process code-scope apply. */
+  ApplyCodeResult: "design-sync:applyCodeResult",
 } as const;
 
 export interface CheckDriftRequestPayload {
@@ -79,6 +89,14 @@ export interface CodeSnapshotPayload {
 
 export interface DriftReportPayload {
   report: DriftReport;
+}
+
+export interface ApplyCodeRequestPayload {
+  edit: Edit;
+}
+
+export interface ApplyCodeResultPayload {
+  result: EditResult;
 }
 
 export interface DriftErrorPayload {

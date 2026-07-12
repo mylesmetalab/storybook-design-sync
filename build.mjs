@@ -14,6 +14,11 @@ const EXTERNAL = [
   "storybook/internal/*",
   "@storybook/*",
   "node:*",
+  // ts-morph is ~10MB and pulls in CJS-only deps that use __filename,
+  // which isn't defined in ESM-bundled output. Leave it external so Node
+  // resolves it from node_modules at runtime where __filename works.
+  "ts-morph",
+  "@ts-morph/*",
 ];
 
 // Bare node built-ins (no `node:` prefix). CJS deps like postcss

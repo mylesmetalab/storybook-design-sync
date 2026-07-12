@@ -477,29 +477,77 @@ class FigmaRestEngine implements Engine {
     const corners = node.boundVariables?.rectangleCornerRadii as
       | Record<string, FigmaVariableAlias>
       | undefined;
-    if (corners && variables) {
-      for (const [figmaKey, cssProp] of radiusKeys) {
-        const alias = corners[figmaKey];
-        if (!alias) continue;
+    // Map cssProp → raw-node-field for the fallback path. Figma surfaces
+    // per-corner raw radii under `topLeftRadius` etc. when the node has
+    // explicit values, plus the shorthand `cornerRadius` when all four
+    // corners share a value. We use these when no variable binding exists.
+    const rawCornerFields: Record<string, string> = {
+      "border-top-left-radius": "topLeftRadius",
+      "border-top-right-radius": "topRightRadius",
+      "border-bottom-left-radius": "bottomLeftRadius",
+      "border-bottom-right-radius": "bottomRightRadius",
+    };
+
+    for (const [figmaKey, cssProp] of radiusKeys) {
+      let figmaPx: number | null = null;
+      let tokenName: string | undefined;
+
+      // Path 1: variable-bound corner — same as before, carries tokenName
+      // so the value-drift Apply path can promote a code literal to var().
+      const alias = corners?.[figmaKey];
+      if (alias && variables) {
         const v = variables.meta.variables[alias.id];
-        if (!v || v.resolvedType !== "FLOAT") continue;
-        const collection = variables.meta.variableCollections[v.variableCollectionId];
-        if (!collection) continue;
-        const figmaPx = resolveNumericForMode(v, collection, activeMode);
-        if (figmaPx === null) continue;
-        const codeValue = snapshot.styles[cssProp];
-        const codePx = parsePx(codeValue);
-        const status: DimensionDiff["status"] =
-          codePx !== null && Math.abs(codePx - figmaPx) < 0.5 ? "match" : "drift";
-        out.push({
-          kind: "token-value",
-          property: cssProp,
-          codeValue: codeValue ?? null,
-          figmaValue: `${figmaPx}px (token: ${v.name})`,
-          status,
-          tokenName: v.name,
-        });
+        if (v && v.resolvedType === "FLOAT") {
+          const collection = variables.meta.variableCollections[v.variableCollectionId];
+          if (collection) {
+            const resolved = resolveNumericForMode(v, collection, activeMode);
+            if (resolved !== null) {
+              figmaPx = resolved;
+              tokenName = v.name;
+            }
+          }
+        }
       }
+
+      // Path 2: raw px — Figma's UI lets you type a value without binding
+      // it to a token. Previously we emitted no row in this case, which
+      // hid real drift. Now we surface it with the raw figmaValue so the
+      // user at least sees the divergence; the row lands in the
+      // informational section because there's no token name to promote
+      // the code literal to.
+      if (figmaPx === null) {
+        const rawField = rawCornerFields[cssProp];
+        if (rawField) {
+          const raw = (node as Record<string, unknown>)[rawField];
+          if (typeof raw === "number") {
+            figmaPx = raw;
+          } else if (raw === undefined) {
+            // Fallback to the shorthand `cornerRadius` when corners are
+            // uniform — Figma sometimes only sets the shorthand.
+            const uniform = (node as Record<string, unknown>).cornerRadius;
+            if (typeof uniform === "number") figmaPx = uniform;
+          }
+        }
+      }
+
+      if (figmaPx === null) continue;
+      const codeValue = snapshot.styles[cssProp];
+      const codePx = parsePx(codeValue);
+      const status: DimensionDiff["status"] =
+        codePx !== null && Math.abs(codePx - figmaPx) < 0.5 ? "match" : "drift";
+      const dim: DimensionDiff = {
+        kind: "token-value",
+        property: cssProp,
+        codeValue: codeValue ?? null,
+        figmaValue: tokenName ? `${figmaPx}px (token: ${tokenName})` : `${figmaPx}px`,
+        status,
+      };
+      if (tokenName) dim.tokenName = tokenName;
+      else if (status === "drift") {
+        dim.note =
+          "Figma corner has no variable binding; bind it to a radius token in Figma to enable auto-apply.";
+      }
+      out.push(dim);
     }
 
     // Gap — frames carry `itemSpacing` either bound to a variable or as a
@@ -1090,7 +1138,8 @@ class FigmaRestEngine implements Engine {
    */
   private diffCopy(node: FigmaNode, snapshot: CodeSnapshot | undefined): DimensionDiff[] {
     const figmaStrings = collectFigmaText(node);
-    const codeTexts = (snapshot?.texts ?? []).map((s) => s.toLowerCase());
+    const codeStringsRaw = snapshot?.texts ?? [];
+    const codeTexts = codeStringsRaw.map((s) => s.toLowerCase());
     if (figmaStrings.length === 0 && codeTexts.length === 0) return [];
 
     if (figmaStrings.length === 0) {
@@ -1105,6 +1154,31 @@ class FigmaRestEngine implements Engine {
           figmaValue: [],
           status: "flag-only",
           note: "Code has visible text; Figma node has no TEXT children.",
+        },
+      ];
+    }
+
+    // 1:1 pairing — when the component has exactly one visible text on
+    // each side, we know which Figma node pairs with which code string
+    // without ambiguity. Emit a single row that carries both concrete
+    // values, so Apply works in either direction (code-tsx-text rewrites
+    // the JSX literal; the plugin's characters writer pushes to Figma).
+    // Asymmetric cases (multi-text, or Figma-only) fall through to the
+    // legacy per-Figma-string iteration below.
+    if (figmaStrings.length === 1 && codeStringsRaw.length === 1) {
+      const figmaText = figmaStrings[0]!;
+      const codeText = codeStringsRaw[0]!;
+      const match =
+        codeText.toLowerCase() === figmaText.toLowerCase() ||
+        codeText.toLowerCase().includes(figmaText.toLowerCase()) ||
+        figmaText.toLowerCase().includes(codeText.toLowerCase());
+      return [
+        {
+          kind: "copy",
+          property: "text",
+          codeValue: codeText,
+          figmaValue: figmaText,
+          status: match ? "match" : "drift",
         },
       ];
     }

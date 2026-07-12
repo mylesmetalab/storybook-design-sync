@@ -5,6 +5,10 @@ import {
   type CodeSnapshotPayload,
 } from "./channels.js";
 import type { CodeSnapshot } from "./engines/types.js";
+import {
+  normalizeBindingKey,
+  compositeBorderTokens,
+} from "./binding-shape.js";
 
 const SNAPSHOT_PROPERTIES = [
   // Box / background
@@ -158,31 +162,30 @@ function extractInlineVarToken(value: string): string | null {
 }
 
 /**
- * Map per-edge / shorthand CSS properties to the names the Figma engine
- * compares against. The engine reports `border-color` (not
- * `border-bottom-color`) and `background-color` (not `background`), so
- * the inline-style scanner has to project longhand bindings onto the
- * same keys or Wiring rows show "needs setup" even when the binding
- * exists.
+ * Parse a raw inline `style="…"` attribute value into prop/value pairs.
+ * Naive split on `;` then `:` — sufficient for declarations with `var(...)`
+ * because var()'s nested parens never contain a `;` and we trim around
+ * the first colon (not split, so colons inside `url(...)` etc. survive).
  *
- * Mirrors `SHORTHAND_EXPANSIONS` on the PostCSS-scanner side so both
- * front-doors land bindings under the same keys.
+ * Returned values are trimmed; declarations with empty prop or value are
+ * skipped.
  */
-const INLINE_BINDING_KEY: Record<string, string> = {
-  "background": "background-color",
-  "border-top-color": "border-color",
-  "border-right-color": "border-color",
-  "border-bottom-color": "border-color",
-  "border-left-color": "border-color",
-  "border-top-width": "border-width",
-  "border-right-width": "border-width",
-  "border-bottom-width": "border-width",
-  "border-left-width": "border-width",
-};
-
-function normalizeInlineBindingKey(prop: string): string {
-  return INLINE_BINDING_KEY[prop] ?? prop;
+function parseInlineStyle(raw: string): Array<{ prop: string; value: string }> {
+  const out: Array<{ prop: string; value: string }> = [];
+  for (const part of raw.split(";")) {
+    const idx = part.indexOf(":");
+    if (idx === -1) continue;
+    const prop = part.slice(0, idx).trim().toLowerCase();
+    const value = part.slice(idx + 1).trim();
+    if (!prop || !value) continue;
+    out.push({ prop, value });
+  }
+  return out;
 }
+
+// `compositeBorderTokens` + `normalizeBindingKey` live in
+// `binding-shape.ts` so scan-tsx, scan-css, and this DOM scanner share
+// one definition. Keep extraction logic in sync by editing there only.
 
 function snapshotElement(el: HTMLElement): CodeSnapshot {
   const cs = window.getComputedStyle(el);
@@ -202,25 +205,33 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
   // Inline-style binding scan. Inline-styled components (React style={{…}},
   // styled-components rendered as DOM style attrs, anything that ends up
   // as `style="foo: var(--bar)"` in the rendered markup) carry their
-  // bindings on `el.style` rather than in a `.css` file the PostCSS
-  // scanner can read. We extract `var(--name)` references directly from
-  // the inline style declarations. Properties with non-var values
-  // (literals, computed, etc.) are ignored — only explicit token
-  // references count as bindings. data-token-* attributes still win when
-  // both are present (they're an explicit override).
+  // bindings on the rendered element. We parse the raw `style` attribute
+  // string rather than iterating `el.style` because the CSSStyleDeclaration
+  // path drops some shorthand entries when their value contains `var(...)`
+  // (Chrome doesn't enumerate `background: var(--x)` via item()), and we
+  // also need access to the original composite-shorthand strings to
+  // extract a single token reference embedded in them (e.g.
+  // `border-bottom: 1px solid var(--row-border-bottom)`).
   //
-  // This makes the engine work on codebases that style inline without
-  // requiring consumers to maintain a parallel attribute set or run a
-  // build-time codemod.
-  const inlineStyle = el.style;
-  for (let i = 0; i < inlineStyle.length; i++) {
-    const prop = inlineStyle.item(i);
-    if (!prop) continue;
-    const value = inlineStyle.getPropertyValue(prop).trim();
-    const token = extractInlineVarToken(value);
-    if (!token) continue;
-    const key = normalizeInlineBindingKey(prop);
-    if (!bindings[key]) bindings[key] = token;
+  // data-token-* attributes still win when both are present (they're an
+  // explicit override).
+  const rawStyleAttr = el.getAttribute("style") ?? "";
+  for (const decl of parseInlineStyle(rawStyleAttr)) {
+    // Path 1: whole-value bare-var. Most common case; supported on every
+    // property the engines compare against.
+    const bareToken = extractInlineVarToken(decl.value);
+    if (bareToken) {
+      const key = normalizeBindingKey(decl.prop);
+      if (!bindings[key]) bindings[key] = bareToken;
+      continue;
+    }
+    // Path 2: composite border/outline shorthand carrying a single var().
+    // Maps the var to <side>-color so the engine's binding diff sees a
+    // wiring on the longhand it compares against.
+    for (const [longhand, token] of compositeBorderTokens(decl.prop, decl.value)) {
+      const key = normalizeBindingKey(longhand);
+      if (!bindings[key]) bindings[key] = token;
+    }
   }
 
   // Visible text content: split innerText on whitespace-y separators and

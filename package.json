@@ -6,7 +6,7 @@
   "type": "module",
   "dependencies": {
     "@metalab/design-sync-core": "github:mylesmetalab/design-sync-core#v0.0.1",
-    "@metalab/design-sync-pipeline": "github:mylesmetalab/design-sync-pipeline#v0.0.9",
+    "@metalab/design-sync-pipeline": "github:mylesmetalab/design-sync-pipeline#v0.0.10",
     "ts-morph": "^28.0.0"
   },
   "exports": {

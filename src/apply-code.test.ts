@@ -61,4 +61,45 @@ describe("applyCodeEdit — in-process CSS write (no pipeline binary)", () => {
     expect(result.status).toBe("rejected");
     expect(result.message).toMatch(/codeTargets/i);
   });
+
+  it("applies a copy edit to static JSX text via code-tsx-text (P2.1)", async () => {
+    await setup(`.unused {}`);
+    await writeFile(
+      join(dir, "Button.tsx"),
+      `export const B = () => <button>Save changes</button>;`,
+      "utf8",
+    );
+    const result = await applyCodeEdit(
+      codeEdit({
+        kind: "copy",
+        target: { property: "text" },
+        oldValue: "Save changes",
+        newValue: "Save",
+      }),
+      dir,
+      [{ path: "style.css" }, { path: "Button.tsx" }],
+    );
+    expect(result.status).toBe("applied");
+    expect(result.engine).toBe("code-tsx-text");
+    const after = await readFile(join(dir, "Button.tsx"), "utf8");
+    expect(after).toContain("<button>Save</button>");
+  });
+
+  it("applies a token-binding edit to an inline style via code-tsx-inline", async () => {
+    await setup(`.unused {}`);
+    await writeFile(
+      join(dir, "Row.tsx"),
+      `export const R = () => <div style={{ color: "var(--label-text)" }} />;`,
+      "utf8",
+    );
+    const result = await applyCodeEdit(
+      codeEdit({ target: { property: "color" } }),
+      dir,
+      [{ path: "Row.tsx" }],
+    );
+    expect(result.status).toBe("applied");
+    expect(result.engine).toBe("code-tsx-inline");
+    const after = await readFile(join(dir, "Row.tsx"), "utf8");
+    expect(after).toContain('var(--button-text)');
+  });
 });

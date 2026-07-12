@@ -97,7 +97,7 @@ of bug; finishing unfinished features afterwards becomes much cheaper.
 | ~~P1.1~~ | ~~Auto-derive tokens from CSS (kill the third copy)~~ | ✅ Shipped — addon v0.0.23, mde stories codemodded (Downmark#21).                          | 1d   |
 | ~~P1.2~~ | ~~PostCSS-based code-write engine (replace regex swap)~~ | ✅ Shipped — pipeline v0.0.8. Regex engine deleted, AST engine has 21 unit tests, stale-check tightened. | 2d   |
 | ~~P1.3~~ | ~~Shared types + normalizers package~~                  | ✅ Shipped — `@metalab/design-sync-core` v0.0.1; addon v0.0.24 / pipeline v0.0.9 / plugin v0.0.3 import it, local copies deleted. | 0.5d   |
-| P1.4  | Move CSS writes from pipeline into addon preset         | Update code works without the pipeline binary running. Pipeline only needed for Figma writes. | 0.5–1d |
+| ~~P1.4~~ | ~~Move code writes from pipeline into addon preset~~    | ✅ Shipped — addon v0.0.25 (#38) + v0.0.26 (#39). The preset applies code-scope edits in-process via the pipeline's full engine roster (css + tsx-inline + tsx-text); pipeline binary only needed for Figma writes. Consumer sets `codeTargets` in design-sync.config.json (Downmark#27). | 0.5–1d |
 | ~~P1.5~~ | ~~Drift-engine honesty pass~~ | ✅ Shipped — addon #27. Bulk Check all now honors "Both modes", `findFirstTextNode` prefers alphanumeric labels over single-glyph children, border read from drawn edge (not always `border-top-*`), mode-detection no longer guesses "light" on missing attribute, `gap: normal` / transparent / `rgba(R,G,B,1)` / Figma `lineHeight: AUTO` all stop producing false-positive drift. | 1d |
 | ~~P1.6~~ | ~~Inline-style binding scan (read side of P5.2)~~ | ✅ Shipped — addon #27. Preview's `snapshotElement` now reads `var(--token)` references directly from `el.style` and synthesizes bindings. Token-binding rows populate on codebases that style inline without any consumer config. | 0.5d |
 
@@ -108,7 +108,7 @@ can't fulfil.
 
 | #     | Title                                       | Done when                                                                                | Effort |
 | ----- | ------------------------------------------- | ---------------------------------------------------------------------------------------- | ------ |
-| P2.1  | Finish `copy` dimension end-to-end          | A Figma copy change can be one-clicked into the JSX literal on the component, or vice versa. | 2d  |
+| ~~P2.1~~ | ~~Finish `copy` dimension end-to-end~~      | ✅ Shipped — addon v0.0.26 (#39) + pipeline v0.0.10 (#13, `code-tsx-text` w/ 10 tests) + plugin v0.0.4 (#8, `applyCopyEdit`) + Downmark#27 (codeTargets). Code side E2E-verified on a real mde component (apply/stale/undo); Figma side verified to the queue-drain protocol — the in-Figma `characters` write itself still needs a manual pass with the plugin open in Figma desktop. TSX codeTargets are explicit paths until P4.3 (globs). | 2d  |
 | P2.2  | Finish `props` dimension                    | No row shows an Apply button it can't honor. Figma-side Apply for prop defaults; advisory on code side. | 1d |
 | P2.3  | `variant-set` Apply                         | Either real auto-edit or honest advisory, never generic reject.                           | 0.5d   |
 | P2.4  | `story.structure` engine                    | "auto-layout horizontal in Figma, code uses column" surfaces as a drift row.              | 2d     |

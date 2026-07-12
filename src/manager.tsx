@@ -13,6 +13,13 @@ import {
   type ApplyCodeResultPayload,
 } from "./channels.js";
 import type { DriftReport, DimensionDiff } from "./dimensions/types.js";
+import {
+  type GroupedRow,
+  flattenDualModeValue,
+  tokenRowFixability,
+  partitionRow,
+  explainInfo,
+} from "./row-triage.js";
 
 const STORY_RENDERED_EVENT = "storyRendered";
 
@@ -127,22 +134,8 @@ async function postEdit(
 
 type ApplyScope = "code" | "figma";
 
-/**
- * If a value is a `{light, dark}` map produced by dual-mode merging,
- * flatten it to a single string when both modes agree. If modes disagree,
- * return null — that's a per-mode edit which v0 doesn't model.
- */
-function flattenDualModeValue(value: unknown): string | null {
-  if (typeof value === "string") return value;
-  if (value && typeof value === "object") {
-    const v = value as Record<string, unknown>;
-    const modeValues = Object.values(v).filter((x): x is string => typeof x === "string");
-    if (modeValues.length === 0) return null;
-    const first = modeValues[0]!;
-    if (modeValues.every((m) => m === first)) return first;
-  }
-  return null;
-}
+// flattenDualModeValue / tokenRowFixability / partitionRow / explainInfo
+// live in ./row-triage.ts (pure, unit-tested) — imported above.
 
 /**
  * Build a pipeline Edit from a drift row + story context. The scope
@@ -160,41 +153,6 @@ function flattenDualModeValue(value: unknown): string | null {
  *
  * Returns null if the row isn't fixable in the requested direction.
  */
-/**
- * Single source of truth for "can the Apply path do anything with this
- * token-grouped row?". Mirrors the conditions inside `buildEdit` so the
- * UI partitioner and the row renderer agree on whether to draw a button
- * or surface the row as informational-only.
- *
- * - `bindingFixable`: the binding-diff has a concrete value on both sides
- *   and is drifted, so we can swap the var(--…) reference.
- * - `valueFixable`: the value-diff is drifted *and* Figma resolved
- *   through a named token (engine attached `tokenName`), so we can
- *   promote the literal in code to `var(--token)`.
- *
- * Both sides being false means the row has nothing the engines can act
- * on — it belongs in the informational section, not the action table.
- */
-function tokenRowFixability(
-  value: DimensionDiff | undefined,
-  binding: DimensionDiff | undefined,
-): { bindingFixable: boolean; valueFixable: boolean } {
-  const bindingFixable = !!(
-    binding &&
-    binding.status === "drift" &&
-    flattenDualModeValue(binding.codeValue) !== null &&
-    flattenDualModeValue(binding.figmaValue) !== null
-  );
-  const valueTokenName = value?.tokenName ?? null;
-  const valueFixable = !!(
-    !bindingFixable &&
-    value &&
-    value.status === "drift" &&
-    valueTokenName !== null
-  );
-  return { bindingFixable, valueFixable };
-}
-
 function buildEdit(
   d: DimensionDiff,
   storyId: string,
@@ -845,81 +803,6 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, on
     </div>
   );
 };
-
-type GroupedRow =
-  | { kind: "token"; property: string; value?: DimensionDiff; binding?: DimensionDiff }
-  | { kind: "other"; diff: DimensionDiff };
-
-/**
- * Decide whether a grouped row belongs in the main action table or the
- * collapsed informational section. A row is "informational" when there
- * is drift but the addon's Apply path can't act on it — either because
- * the dimension kind has no engine (`copy`, `props`, `variant-set`,
- * `structure`, `motion`) or because the token row lacks the wiring
- * data the engines need. Matching rows always stay in the main section;
- * they're confirmation, not a problem.
- */
-function partitionRow(row: GroupedRow): "main" | "info" {
-  if (row.kind === "token") {
-    const valueDrifted = row.value?.status === "drift";
-    const bindingDrifted = row.binding?.status === "drift";
-    if (!valueDrifted && !bindingDrifted) return "main";
-    const { bindingFixable, valueFixable } = tokenRowFixability(row.value, row.binding);
-    return bindingFixable || valueFixable ? "main" : "info";
-  }
-  // `other`-kind diffs (copy, props, variant-set, structure, motion):
-  // most return null from buildEdit — informational. The exception is
-  // `copy`, which has its own engine (code-tsx-text + plugin characters
-  // write) when both sides carry concrete strings. Matches always stay
-  // in the main section as confirmation.
-  if (row.diff.status !== "drift") return "main";
-  if (row.diff.kind === "copy") {
-    const codeFlat = flattenDualModeValue(row.diff.codeValue);
-    const figmaFlat = flattenDualModeValue(row.diff.figmaValue);
-    return codeFlat !== null && figmaFlat !== null ? "main" : "info";
-  }
-  return "info";
-}
-
-/**
- * Per-row reason the row landed in the informational section. Pre-C this
- * was just "no engine for X" for every other-kind row; now that copy has
- * a real engine, the reasons fan out — each branch points at the actual
- * blocker so the user knows what to change if they want auto-apply to
- * start working.
- */
-function explainInfo(row: GroupedRow): string {
-  if (row.kind === "token") {
-    const valueDrift = row.value?.status === "drift";
-    const bindingDrift = row.binding?.status === "drift";
-    if (valueDrift && row.value?.tokenName == null) {
-      return "Value drift, but Figma's side doesn't resolve to a named token — there's no token to promote the code literal to.";
-    }
-    if (bindingDrift) {
-      return "Wiring drift, but the scanner couldn't find a clean var(--token) binding on the code side. Convert the inline value to `\"var(--token)\"` (or the equivalent CSS) so the engine has something to rewrite.";
-    }
-    return "Drifted, but the addon couldn't find a token binding for this property — wire it up in CSS/JSX, or fix manually.";
-  }
-  const d = row.diff;
-  if (d.kind === "copy") {
-    const codeFlat = flattenDualModeValue(d.codeValue);
-    const figmaFlat = flattenDualModeValue(d.figmaValue);
-    if (codeFlat === null && figmaFlat !== null) {
-      return `Code renders no static text matching "${figmaFlat}". The component likely uses a dynamic child (e.g. \`{label}\`) — copy auto-apply can only rewrite literal JSX text.`;
-    }
-    if (codeFlat !== null && figmaFlat === null) {
-      return "Figma's matching TEXT node is empty or missing — nothing to compare against, fix manually.";
-    }
-    return "Copy drift detected but values aren't both concrete strings — fix manually.";
-  }
-  if (d.kind === "variant-set" || d.kind === "props") {
-    return `${d.kind === "variant-set" ? "Variant-set" : "Props"} drift has no auto-apply engine yet — fix in code or Figma manually.`;
-  }
-  if (d.kind === "structure" || d.kind === "motion") {
-    return `\`${d.kind}\` dimension is reserved for a future engine — surfaced for awareness only.`;
-  }
-  return `No engine for "${d.kind}" dimension yet — fix in code or Figma manually.`;
-}
 
 function groupDimensions(diffs: DimensionDiff[]): GroupedRow[] {
   const indexByProp = new Map<string, number>();

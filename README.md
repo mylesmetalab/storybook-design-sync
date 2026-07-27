@@ -26,10 +26,14 @@ for binding writes, REST for variable values).
 - **Check drift** runs the engine for the current story.
 - **Check all** runs every registered story sequentially with a summary
   table (match / drift / flag-only counts, perf stats, click to drill in).
-- One row per property with two status pills:
-  - **Value** — does Figma resolve to the same px / color as the rendered CSS?
-  - **Wiring** — does the code declare the same design token as Figma, so
-    the code follows automatically when the token's value changes?
+- One row per property with a **Value** status pill — does Figma resolve
+  to the same px / color as the rendered CSS? The panel reports current
+  state only. (The former **Wiring** column — declared-token vs
+  declared-token comparison, i.e. "will the code follow when the token's
+  value changes" — was removed in v0.0.29: it answers a hypothetical
+  future question and belongs to a separate static/contract checker.
+  Token-binding detection still runs under the hood and powers Apply
+  buttons and fix prompts.)
 - Properties compared today: `background-color`, `padding-*` (×4),
   `border-*-radius` (×4), `gap`, `border-width`, `border-color`, `color`,
   `font-size`, `font-weight`, `font-family`, `font-style`, `line-height`,
@@ -37,7 +41,8 @@ for binding writes, REST for variable values).
   `box-shadow`. Diff dimensions: `token-value`, `token-binding`,
   `variant-set`, `copy`, `props`. (`structure`, `motion` reserved.)
 - **Token-name normalization.** `radius/xl` ≡ `radius-xl` ≡ `--radius-xl`.
-  Wiring doesn't false-flag drift on a naming convention difference.
+  Token-binding comparison doesn't false-flag drift on a naming
+  convention difference.
 - **Copy fix prompt** on every drift row (in both apply modes): copies a
   self-contained prompt — story, file paths or selector, property, current
   vs expected value, token name and `var(--token)` form, Figma refs, and
@@ -46,7 +51,7 @@ for binding writes, REST for variable values).
   - `"off"` (default) — audit-only. Full drift detail and advisories,
     no write buttons anywhere.
   - `"experimental"` — enables the write surface (labeled as such):
-    - `Update code` / `Update Figma` for wiring drift.
+    - `Update code` / `Update Figma` for token-binding drift.
     - `Use token` on value drift (rewrites the literal in CSS to `var(--token)`).
     - Success shows `↶ undo` for one-click revert.
     - **Stale check.** Figma writes refuse if the binding has moved since
@@ -58,8 +63,9 @@ for binding writes, REST for variable values).
 - **Both modes** checkbox runs dual-mode comparison; rows where light
   and dark agree are still fixable.
 - Listens for `storybook-design-inspector` `STYLE_UPDATE` events and
-  surfaces them in the **Staged edits** panel (display-only unless
-  `apply: "experimental"`).
+  surfaces them in the **Staged edits** panel. The section is part of the
+  write surface, so it only renders with `apply: "experimental"` — in
+  `apply: "off"` it is hidden entirely.
 
 ## Install
 
@@ -315,22 +321,22 @@ them.
 ```
 Drift report — node 37:30 — 5:31:55 PM
 
-Property                 Code              Figma                          Value   Wiring   Apply
-background-color         rgb(37,99,235)    rgb(37,99,235)                 match   match    —
+Property                 Code              Figma                          Value   Apply
+background-color         rgb(37,99,235)    rgb(37,99,235)                 match   —
                                             light: rgb(37,99,235) ·
                                             dark:  rgb(96,165,250)
-padding-top              8px               8px (token: space/8)           match   match    —
-padding-right            8px               8px (token: space/8)           match   match    —
-padding-bottom           8px               8px (token: space/8)           match   match    —
-padding-left             8px               8px (token: space/8)           match   match    —
-border-top-left-radius   8px               6px (token: radius/lg)         drift   match    Use token
-border-top-right-radius  8px               6px (token: radius/lg)         drift   match    Use token
-border-bottom-left-…     8px               6px (token: radius/lg)         drift   match    Use token
-border-bottom-right-…    8px               6px (token: radius/lg)         drift   match    Use token
-gap                      8px               4px (token: space/4)           drift   match    Use token
-font-size                13px              13px (token: typography/ui/13) match   match    —
-color                    rgb(31,30,30)     rgb(31,30,30)                  match   match    —
-active-variant           ["accent"]        ["accent"]                     match            —
+padding-top              8px               8px (token: space/8)           match   —
+padding-right            8px               8px (token: space/8)           match   —
+padding-bottom           8px               8px (token: space/8)           match   —
+padding-left             8px               8px (token: space/8)           match   —
+border-top-left-radius   8px               6px (token: radius/lg)         drift   Use token
+border-top-right-radius  8px               6px (token: radius/lg)         drift   Use token
+border-bottom-left-…     8px               6px (token: radius/lg)         drift   Use token
+border-bottom-right-…    8px               6px (token: radius/lg)         drift   Use token
+gap                      8px               4px (token: space/4)           drift   Use token
+font-size                13px              13px (token: typography/ui/13) match   —
+color                    rgb(31,30,30)     rgb(31,30,30)                  match   —
+active-variant           ["accent"]        ["accent"]                     match   —
 ```
 
 The four `border-*-radius` rows above are a real finding: code uses

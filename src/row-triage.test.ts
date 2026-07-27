@@ -4,6 +4,9 @@ import {
   explainInfo,
   applyControlsEnabled,
   rowHasDrift,
+  stagedEditsVisible,
+  rowHasAnyValue,
+  bindingScanEmpty,
   type GroupedRow,
 } from "./row-triage.js";
 import type { DimensionDiff } from "./dimensions/types.js";
@@ -77,6 +80,119 @@ describe("applyControlsEnabled — v1 audit-only write gating", () => {
     expect(
       partitionRow(other({ kind: "variant-set", property: "active-variant", codeValue: ["a"], figmaValue: { S: "H" } })),
     ).toBe("info");
+  });
+});
+
+describe('stagedEditsVisible — the Staged edits section is part of the write surface', () => {
+  it('renders only under an explicit apply: "experimental"', () => {
+    expect(stagedEditsVisible("experimental")).toBe(true);
+  });
+
+  it('is hidden entirely in apply:"off", when config is unloaded, and on junk values', () => {
+    expect(stagedEditsVisible("off")).toBe(false);
+    expect(stagedEditsVisible(undefined)).toBe(false);
+    expect(stagedEditsVisible("on")).toBe(false);
+    expect(stagedEditsVisible("")).toBe(false);
+  });
+});
+
+describe("rowHasAnyValue — rows with no code AND no Figma value are dropped", () => {
+  const bindingDiff = (
+    codeValue: unknown,
+    figmaValue: unknown,
+  ): DimensionDiff => ({
+    kind: "token-binding",
+    property: "individualStrokeWeights",
+    codeValue,
+    figmaValue,
+    status: "flag-only",
+  });
+
+  it("drops a binding-only token row that is all em-dashes (the live individualStrokeWeights case)", () => {
+    expect(
+      rowHasAnyValue({
+        kind: "token",
+        property: "individualStrokeWeights",
+        binding: bindingDiff(null, null),
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps a token row when either side of either diff carries a value", () => {
+    expect(
+      rowHasAnyValue({ kind: "token", property: "p", binding: bindingDiff(null, "radius/xl") }),
+    ).toBe(true);
+    expect(
+      rowHasAnyValue({ kind: "token", property: "p", binding: bindingDiff("--radius-xl", null) }),
+    ).toBe(true);
+    expect(
+      rowHasAnyValue({
+        kind: "token",
+        property: "p",
+        value: { kind: "token-value", property: "p", codeValue: "8px", figmaValue: null, status: "flag-only" },
+        binding: bindingDiff(null, null),
+      }),
+    ).toBe(true);
+  });
+
+  it("dual-mode {light, dark} maps count as values", () => {
+    expect(
+      rowHasAnyValue({
+        kind: "token",
+        property: "p",
+        value: {
+          kind: "token-value",
+          property: "p",
+          codeValue: null,
+          figmaValue: { light: "#fff", dark: "#000" },
+          status: "drift",
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("token rows with no diffs at all are dropped", () => {
+    expect(rowHasAnyValue({ kind: "token", property: "p" })).toBe(false);
+  });
+
+  it("other-kind rows are dropped only when both sides are empty", () => {
+    expect(rowHasAnyValue(other({ kind: "copy", codeValue: null, figmaValue: null }))).toBe(false);
+    expect(rowHasAnyValue(other({ kind: "copy", codeValue: null, figmaValue: "B" }))).toBe(true);
+    expect(rowHasAnyValue(other({ kind: "props", codeValue: "sm", figmaValue: null }))).toBe(true);
+  });
+});
+
+// The panel no longer renders a Wiring column (v0.0.29) — this helper is
+// retained for the future static/contract checker. Tests keep it honest.
+describe("bindingScanEmpty — zero-scanned-bindings detection (retained, unused by the panel)", () => {
+  const tokenRow = (codeBinding: string | null, figmaBinding: string | null = "space/md"): GroupedRow => ({
+    kind: "token",
+    property: "gap",
+    binding: {
+      kind: "token-binding",
+      property: "gap",
+      codeValue: codeBinding,
+      figmaValue: figmaBinding,
+      status: codeBinding === null ? "flag-only" : "match",
+    },
+  });
+
+  it("true when every binding diff lacks a code-side declaration (Tailwind/inline-styled case)", () => {
+    expect(bindingScanEmpty([tokenRow(null), tokenRow(null), tokenRow(null)])).toBe(true);
+  });
+
+  it("false when the scanner found at least one binding", () => {
+    expect(bindingScanEmpty([tokenRow(null), tokenRow("--space-md")])).toBe(false);
+  });
+
+  it("false when there are no binding diffs at all (nothing to collapse)", () => {
+    expect(bindingScanEmpty([])).toBe(false);
+    expect(
+      bindingScanEmpty([
+        { kind: "token", property: "gap" },
+        other({ kind: "copy", codeValue: "A", figmaValue: "B" }),
+      ]),
+    ).toBe(false);
   });
 });
 

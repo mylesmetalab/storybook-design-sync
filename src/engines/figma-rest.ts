@@ -12,6 +12,7 @@ import type {
 } from "../dimensions/types.js";
 import { normalizeTokenName } from "@metalab/design-sync-core";
 import { PersistentCache } from "../cache.js";
+import { isTransparentColor, normalizeColor } from "./color-normalize.js";
 
 const FIGMA_API = "https://api.figma.com/v1";
 
@@ -1444,29 +1445,6 @@ function rgbaToCss(c: { r: number; g: number; b: number; a?: number }): string {
   const b = Math.round(c.b * 255);
   const a = c.a ?? 1;
   return a === 1 ? `rgb(${r}, ${g}, ${b})` : `rgba(${r}, ${g}, ${b}, ${a})`;
-}
-
-/** Treat browser's "no opinion" color sentinels as equivalent. */
-function isTransparentColor(value: string | undefined): boolean {
-  if (!value) return true;
-  const v = value.replace(/\s+/g, "").toLowerCase();
-  return v === "rgba(0,0,0,0)" || v === "transparent" || v === "rgba(0,0,0,0.0)";
-}
-
-/**
- * Fold colors into a canonical form so semantically-equivalent expressions
- * compare equal. `rgba(R,G,B,1)` ≡ `rgb(R,G,B)`; whitespace and case are
- * ignored. Returns "transparent" for any zero-alpha or fully-transparent
- * value so the engine can treat them as "no opinion."
- */
-function normalizeColor(value: string): string {
-  if (isTransparentColor(value)) return "transparent";
-  const stripped = value.replace(/\s+/g, "").toLowerCase();
-  // rgba(R, G, B, 1) → rgb(R, G, B). The same channel triple should match
-  // regardless of whether the producer wrote it with an alpha=1 suffix.
-  const m = /^rgba\((\d+),(\d+),(\d+),1(?:\.0+)?\)$/.exec(stripped);
-  if (m) return `rgb(${m[1]},${m[2]},${m[3]})`;
-  return stripped;
 }
 
 interface ResolvedFill {

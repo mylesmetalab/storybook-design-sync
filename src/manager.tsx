@@ -22,6 +22,8 @@ import {
   explainInfo,
   applyControlsEnabled,
   rowHasDrift,
+  stagedEditsVisible,
+  rowHasAnyValue,
 } from "./row-triage.js";
 import { buildFixPrompt } from "./fix-prompt.js";
 
@@ -707,16 +709,22 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         />
       )}
 
-      <StagedEdits
-        edits={edits}
-        applyEnabled={applyEnabled}
-        applyResults={applyResults}
-        pipelineUrl={designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL}
-        target={designSync.target}
-        onResult={(key, result) =>
-          setApplyResults((prev) => ({ ...prev, [key]: result }))
-        }
-      />
+      {/* Staged edits are the write surface for sibling-addon proposals —
+          hidden entirely (not just their buttons) unless writes are
+          explicitly enabled. Gating logic lives in row-triage.ts so it's
+          unit-testable. */}
+      {stagedEditsVisible(configInfo?.apply) && (
+        <StagedEdits
+          edits={edits}
+          applyEnabled={applyEnabled}
+          applyResults={applyResults}
+          pipelineUrl={designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL}
+          target={designSync.target}
+          onResult={(key, result) =>
+            setApplyResults((prev) => ({ ...prev, [key]: result }))
+          }
+        />
+      )}
     </div>
   );
 };
@@ -762,7 +770,9 @@ function visibleDimensions(report: DriftReport): DimensionDiff[] {
 }
 
 const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext, applyResults, onApply, onUndo }) => {
-  const grouped = groupDimensions(visibleDimensions(report));
+  // Rows with neither a code value nor a Figma value carry no information
+  // (all em-dashes) — drop them from the table entirely.
+  const grouped = groupDimensions(visibleDimensions(report)).filter(rowHasAnyValue);
   const mainRows = grouped.filter((r) => partitionRow(r) === "main");
   const infoRows = grouped.filter((r) => partitionRow(r) === "info");
 
@@ -835,10 +845,6 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
         <span>
           <strong>Value</strong> — does it look right today (px, color match)?
         </span>
-        <span style={styles.legendDivider}>·</span>
-        <span>
-          <strong>Wiring</strong> — is the code declaring the same token as Figma, so it follows when the token changes?
-        </span>
       </div>
 
       {mainRows.length > 0 && (
@@ -849,7 +855,6 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
               <th style={styles.th}>Code</th>
               <th style={styles.th}>Figma</th>
               <th style={styles.th}>Value</th>
-              <th style={styles.th}>Wiring</th>
               <th style={styles.th}>
                 {applyEnabled ? (
                   <>
@@ -880,7 +885,6 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
                 <th style={styles.th}>Code</th>
                 <th style={styles.th}>Figma</th>
                 <th style={styles.th}>Value</th>
-                <th style={styles.th}>Wiring</th>
                 <th style={styles.th}>{applyEnabled ? "Why no Apply" : "Notes"}</th>
               </tr>
             </thead>
@@ -961,14 +965,6 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
       : value.note
     : undefined;
 
-  const wiringTitle = binding
-    ? binding.status === "match"
-      ? `Code is wired to ${stringifyValue(binding.codeValue)}.`
-      : binding.status === "drift"
-      ? `Code declares ${stringifyValue(binding.codeValue)} but Figma uses ${stringifyValue(binding.figmaValue)}.`
-      : binding.note ?? "Code hasn't declared which token it uses, so we can't tell whether it will follow when the token changes."
-    : undefined;
-
   return (
     <tr>
       <td style={styles.td}>{property}</td>
@@ -985,9 +981,6 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
       </td>
       <td style={styles.td}>
         <StatusPill status={value?.status} title={valueTitle} />
-      </td>
-      <td style={styles.td}>
-        <StatusPill status={binding?.status} title={wiringTitle} />
       </td>
       <td style={styles.td}>
         {applyEnabled && bindingFixable && binding ? (
@@ -1073,7 +1066,7 @@ const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, applyEnabled, infoNote,
           </div>
         )}
       </td>
-      <td style={styles.td} colSpan={2}>
+      <td style={styles.td}>
         <StatusPill status={d.status} title={d.note} />
         {d.note && <div style={styles.muted}>{d.note}</div>}
       </td>

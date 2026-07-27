@@ -32,6 +32,62 @@ export function applyControlsEnabled(mode: ApplyMode | string | undefined): bool
 }
 
 /**
+ * Whether the "Staged edits" section renders at all. Staged edits exist
+ * solely to be pushed through the pipeline — they are part of the write
+ * surface, so in apply:"off" (the v1 audit-only default) the entire
+ * section is hidden, not just its Apply buttons. Only an explicit
+ * `apply: "experimental"` shows it.
+ */
+export function stagedEditsVisible(mode: ApplyMode | string | undefined): boolean {
+  return applyControlsEnabled(mode);
+}
+
+/** True when a diff cell carries something displayable (string or dual-mode map). */
+function hasCellValue(v: unknown): boolean {
+  return v !== null && v !== undefined;
+}
+
+/**
+ * Whether a grouped row has anything to show in its Code / Figma cells.
+ * Rows where BOTH sides are empty (e.g. a Figma-side binding whose
+ * variable name didn't resolve — seen live as an `individualStrokeWeights`
+ * row that was all em-dashes plus a "needs setup" pill) carry zero
+ * information and are dropped from the drift table entirely.
+ */
+export function rowHasAnyValue(row: GroupedRow): boolean {
+  if (row.kind === "token") {
+    for (const d of [row.value, row.binding]) {
+      if (d && (hasCellValue(d.codeValue) || hasCellValue(d.figmaValue))) return true;
+    }
+    return false;
+  }
+  return hasCellValue(row.diff.codeValue) || hasCellValue(row.diff.figmaValue);
+}
+
+/**
+ * Zero-scanned-bindings detection. True when the report contains at least
+ * one token-binding diff but NONE of them carry a code-side binding —
+ * i.e. the CSS/TSX scanner found no var(--token) declarations for this
+ * story's selector(s) at all (typical for Tailwind/inline-styled
+ * codebases).
+ *
+ * NOTE: as of v0.0.29 the panel no longer renders a Wiring column (the
+ * wiring verdict answers a hypothetical future question, not the current
+ * state of the component — declared-vs-declared comparison belongs to a
+ * static/contract checker). This helper is kept (tested, currently
+ * unused by the panel) for that checker to consume.
+ */
+export function bindingScanEmpty(rows: GroupedRow[]): boolean {
+  let sawBinding = false;
+  for (const row of rows) {
+    if (row.kind !== "token" || !row.binding) continue;
+    sawBinding = true;
+    if (hasCellValue(row.binding.codeValue)) return false;
+  }
+  return sawBinding;
+}
+
+/**
  * Whether a grouped row carries any drift. Drives the per-row
  * "Copy fix prompt" button (shown in both apply modes).
  */

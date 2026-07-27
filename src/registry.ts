@@ -20,15 +20,26 @@ export async function loadRegistry(
   cwd: string = process.cwd(),
 ): Promise<Registry> {
   const full = resolve(cwd, registryPath);
+  let raw: string;
   try {
-    const raw = await readFile(full, "utf8");
-    const parsed = JSON.parse(raw);
-    return normalize(parsed);
+    raw = await readFile(full, "utf8");
   } catch (err: unknown) {
     if (isNotFound(err)) {
+      // No registry yet is a legitimate starting state (every story simply
+      // reports "Not registered"). fileKey falls back to the config's.
       return { fileKey: "", stories: {} };
     }
-    throw err;
+    const m = err instanceof Error ? err.message : String(err);
+    throw new Error(`[design-sync] registry failed to load: ${m} at ${full}`);
+  }
+  // Parse/shape errors must NOT be swallowed into an empty registry — that
+  // silently reports every story as unregistered. Rethrow with the path so
+  // the panel can show an actionable message.
+  try {
+    return normalize(JSON.parse(raw));
+  } catch (err: unknown) {
+    const m = err instanceof Error ? err.message : String(err);
+    throw new Error(`[design-sync] registry.json failed to parse: ${m} at ${full}`);
   }
 }
 

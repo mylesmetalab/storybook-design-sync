@@ -2,10 +2,23 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { CodeTarget } from "@metalab/design-sync-pipeline";
 
+/**
+ * Write gating for the panel's apply controls (v1 "audit-only" release).
+ *
+ *   - `"off"` (default): the panel is read-only. Drift detail, advisories,
+ *     and "Copy fix prompt" all render, but no Apply / Preview-all /
+ *     bulk-apply buttons are shown.
+ *   - `"experimental"`: the pre-v1 write surface (Apply buttons, dry-run
+ *     preview, bulk apply) is enabled, labeled as experimental.
+ */
+export type ApplyMode = "off" | "experimental";
+
 export interface DesignSyncConfig {
   engine: string;
   registryPath: string;
   fileKey: string;
+  /** Write gating — see {@link ApplyMode}. Defaults to `"off"`. */
+  apply: ApplyMode;
   /**
    * Files the addon is allowed to write when applying a **code-scope** edit
    * in-process (P1.4 — "Update code" without the pipeline binary running).
@@ -41,6 +54,7 @@ export interface DesignSyncConfig {
 const DEFAULTS = {
   engine: "figma-rest",
   registryPath: ".design-sync/registry.json",
+  apply: "off" as ApplyMode,
   codeTargets: [] as CodeTarget[],
   cssEntries: ["src/**/*.css"],
   tsxEntries: ["src/**/*.tsx"],
@@ -50,29 +64,32 @@ const DEFAULTS = {
   ],
 } as const;
 
-const CANDIDATES = [
-  "design-sync.config.json",
-  "design-sync.config.ts",
-];
+// JSON only. A `.ts` config would need `await import()` of a TypeScript
+// file, which stock Node rejects (ERR_UNKNOWN_FILE_EXTENSION) — advertising
+// it was a lie. If typed config is ever wanted, it needs a real loader.
+const CONFIG_NAME = "design-sync.config.json";
 
 export async function loadConfig(cwd: string = process.cwd()): Promise<DesignSyncConfig> {
-  for (const name of CANDIDATES) {
-    const full = resolve(cwd, name);
-    try {
-      if (name.endsWith(".json")) {
-        const raw = await readFile(full, "utf8");
-        return normalize(JSON.parse(raw));
-      }
-      const mod = await import(full);
-      return normalize(mod.default ?? mod);
-    } catch (err: unknown) {
-      if (isNotFound(err)) continue;
-      throw err;
+  const full = resolve(cwd, CONFIG_NAME);
+  let raw: string;
+  try {
+    raw = await readFile(full, "utf8");
+  } catch (err: unknown) {
+    if (isNotFound(err)) {
+      throw new Error(
+        `[design-sync] No config found. Add ${CONFIG_NAME} at ${cwd}.`,
+      );
     }
+    throw err;
   }
-  throw new Error(
-    `[design-sync] No config found. Add design-sync.config.json at ${cwd}.`,
-  );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: unknown) {
+    const m = err instanceof Error ? err.message : String(err);
+    throw new Error(`[design-sync] ${CONFIG_NAME} failed to parse: ${m} at ${full}`);
+  }
+  return normalize(parsed);
 }
 
 function normalize(raw: unknown): DesignSyncConfig {
@@ -81,10 +98,16 @@ function normalize(raw: unknown): DesignSyncConfig {
   }
   const r = raw as Partial<DesignSyncConfig>;
   if (!r.fileKey) throw new Error("[design-sync] Config: `fileKey` is required.");
+  if (r.apply !== undefined && r.apply !== "off" && r.apply !== "experimental") {
+    throw new Error(
+      `[design-sync] Config: \`apply\` must be "off" or "experimental" (got ${JSON.stringify(r.apply)}).`,
+    );
+  }
   return {
     engine: r.engine ?? DEFAULTS.engine,
     registryPath: r.registryPath ?? DEFAULTS.registryPath,
     fileKey: r.fileKey,
+    apply: r.apply ?? DEFAULTS.apply,
     codeTargets: r.codeTargets ?? [...DEFAULTS.codeTargets],
     cssEntries: r.cssEntries ?? [...DEFAULTS.cssEntries],
     tsxEntries: r.tsxEntries ?? [...DEFAULTS.tsxEntries],

@@ -16,6 +16,32 @@ export type GroupedRow =
   | { kind: "token"; property: string; value?: DimensionDiff; binding?: DimensionDiff }
   | { kind: "other"; diff: DimensionDiff };
 
+/** Write-gating mode from `design-sync.config.json` (`apply` field). */
+export type ApplyMode = "off" | "experimental";
+
+/**
+ * v1 "audit-only" gate: whether the panel may render ANY write controls
+ * (per-row Apply buttons, Preview all, bulk Apply for real, staged-edit
+ * applies). Only an explicit `apply: "experimental"` opts in — `"off"`,
+ * `undefined` (config not yet loaded / older config), and anything
+ * unrecognized all stay read-only. Rows still show full drift detail and
+ * advisories either way; this gates buttons, not information.
+ */
+export function applyControlsEnabled(mode: ApplyMode | string | undefined): boolean {
+  return mode === "experimental";
+}
+
+/**
+ * Whether a grouped row carries any drift. Drives the per-row
+ * "Copy fix prompt" button (shown in both apply modes).
+ */
+export function rowHasDrift(row: GroupedRow): boolean {
+  if (row.kind === "token") {
+    return row.value?.status === "drift" || row.binding?.status === "drift";
+  }
+  return row.diff.status === "drift";
+}
+
 /**
  * If a value is a `{light, dark}` map produced by dual-mode merging,
  * flatten it to a single string when both modes agree. If modes disagree,

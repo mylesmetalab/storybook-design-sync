@@ -273,7 +273,7 @@ const channel = addons.getChannel();
 
 /**
  * Read the active mode from the rendered DOM. Default attribute is
- * `data-theme` (the Downmark / common convention). Falls back to "light".
+ * `data-theme` (the common theming convention). Falls back to "light".
  *
  * The attribute is read off the document root (`<html>`) but stories using
  * a wrapping element can override via `parameters.designSync.modeAttribute`

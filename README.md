@@ -204,6 +204,22 @@ The preview hook reads:
 If the registry doesn't list the current story, the panel shows:
 > Not registered. Add this story to `.design-sync/registry.json`.
 
+### Color folding
+
+Figma always arrives as `rgb()`/`rgba()`, but the browser returns whatever
+color space the author wrote. Before comparing, both sides fold to
+`rgb(R,G,B)` (or `rgba(R,G,B,A)` below full opacity): `rgb()`/`rgba()`, 3-, 4-,
+6- and 8-digit hex, and the modern spaces `oklch()`, `oklab()` and
+`color(display-p3 …)`.
+
+`oklch()` matters in particular — **shadcn / Tailwind v4 themes ship `oklch()`
+by default** and `getComputedStyle` returns it verbatim, so without the
+conversion a *correct* themed color would be reported as drift on every check.
+Conversion is OKLab → linear sRGB → sRGB transfer function → 8-bit, clamped for
+out-of-gamut values; comparison is exact at 8-bit with no epsilon. Anything
+still unrecognised is compared as a whitespace-stripped lowercase string, as
+before.
+
 ## CLI
 
 The package ships a `design-sync` binary with four subcommands:

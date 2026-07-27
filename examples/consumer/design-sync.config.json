@@ -1,5 +1,6 @@
 {
   "engine": "figma-rest",
   "registryPath": ".design-sync/registry.json",
-  "fileKey": "XgZr68XNB9lc3Lh6yUZZjU"
+  "fileKey": "YOUR_FIGMA_FILE_KEY",
+  "apply": "off"
 }

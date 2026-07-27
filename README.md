@@ -7,12 +7,17 @@
 > [architecture](https://github.com/mylesmetalab/design-sync-pipeline/blob/main/ARCHITECTURE.md)
 
 A Storybook 10 addon that detects drift between a story and its Figma
-counterpart, surfaces it as a per-dimension diff table, and lets you fix
-drift in either direction with one click.
+counterpart and surfaces it as a per-dimension diff table. v1 is
+**audit-only by default**: the panel reports drift and hands you a
+ready-to-paste fix prompt per row; one-click writes (in either
+direction) are opt-in via `apply: "experimental"`.
 
 The addon is the *surface*. Drift detection runs through an engine adapter
-(today: `figma-rest`); writes go through the [`design-sync-pipeline`](https://github.com/mylesmetalab/design-sync-pipeline)
-orchestrator + engines (CSS token swap for code, [Figma plugin](https://github.com/mylesmetalab/design-sync-figma-plugin)
+(today: `figma-rest`). When writes are enabled, code-scope edits are applied
+in-process by the addon's Node server (PostCSS / TSX engines, no extra
+binary needed); Figma-scope edits go through the
+[`design-sync-pipeline`](https://github.com/mylesmetalab/design-sync-pipeline)
+server ([Figma plugin](https://github.com/mylesmetalab/design-sync-figma-plugin)
 for binding writes, REST for variable values).
 
 ## What it does
@@ -33,24 +38,33 @@ for binding writes, REST for variable values).
   `variant-set`, `copy`, `props`. (`structure`, `motion` reserved.)
 - **Token-name normalization.** `radius/xl` ≡ `radius-xl` ≡ `--radius-xl`.
   Wiring doesn't false-flag drift on a naming convention difference.
-- **Apply** column on every fixable row:
-  - `Update code` / `Update Figma` for wiring drift.
-  - `Use token` on value drift (rewrites the literal in CSS to `var(--token)`).
-  - Success shows `↶ undo` for one-click revert.
-- **Stale check.** Figma writes refuse if the binding has moved since the
-  drift snapshot — re-run Check drift, try again. Avoids stomping on
-  changes you made manually.
-- **Auto-recheck after Apply.** A successful write triggers a fresh
-  drift check so subsequent clicks operate on current data.
+- **Copy fix prompt** on every drift row (in both apply modes): copies a
+  self-contained prompt — story, file paths or selector, property, current
+  vs expected value, token name and `var(--token)` form, Figma refs, and
+  closing instructions — ready to paste to a coding agent or teammate.
+- **Apply controls are gated** by the `apply` config field:
+  - `"off"` (default) — audit-only. Full drift detail and advisories,
+    no write buttons anywhere.
+  - `"experimental"` — enables the write surface (labeled as such):
+    - `Update code` / `Update Figma` for wiring drift.
+    - `Use token` on value drift (rewrites the literal in CSS to `var(--token)`).
+    - Success shows `↶ undo` for one-click revert.
+    - **Stale check.** Figma writes refuse if the binding has moved since
+      the drift snapshot — re-run Check drift, try again.
+    - **Auto-recheck after Apply.** A successful write triggers a fresh
+      drift check so subsequent clicks operate on current data.
+    - **Preview all (dry-run)** / **Apply for real** bulk actions on the
+      Check-all summary.
 - **Both modes** checkbox runs dual-mode comparison; rows where light
   and dark agree are still fixable.
 - Listens for `storybook-design-inspector` `STYLE_UPDATE` events and
-  surfaces them in the **Staged edits** panel.
+  surfaces them in the **Staged edits** panel (display-only unless
+  `apply: "experimental"`).
 
 ## Install
 
 ```sh
-npm i -D mylesmetalab/storybook-design-sync#v0.0.21
+npm i -D mylesmetalab/storybook-design-sync#v0.0.28
 ```
 
 In `.storybook/main.ts`:
@@ -64,21 +78,37 @@ const config = {
 
 ## Configure
 
-`design-sync.config.json` at repo root:
+`design-sync.config.json` at repo root (JSON only — there is no `.ts`
+config; the addon runs in Storybook's Node process, which can't import
+TypeScript config files):
 
 ```json
 {
   "engine": "figma-rest",
   "registryPath": ".design-sync/registry.json",
-  "fileKey": "XgZr68XNB9lc3Lh6yUZZjU"
+  "fileKey": "YOUR_FIGMA_FILE_KEY",
+  "apply": "off"
 }
 ```
+
+All fields except `fileKey` are optional:
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| `fileKey` | *(required)* | The Figma file key drift checks run against (from the file's URL: `figma.com/design/<fileKey>/...`). |
+| `apply` | `"off"` | Write gating. `"off"` = audit-only panel (drift detail, advisories, and Copy fix prompt, but no write buttons). `"experimental"` = enables the Apply / Preview-all / bulk-apply write surface, labeled experimental. |
+| `engine` | `"figma-rest"` | Drift-engine adapter name. |
+| `registryPath` | `".design-sync/registry.json"` | Where the story ↔ Figma-node registry lives. |
+| `codeTargets` | `[]` | Files the addon may **write** when applying a code-scope edit in-process, e.g. `[{ "path": "src/components/Button.css" }, { "path": "src/components/Button.tsx" }]`. Required for `apply: "experimental"` code writes (`.css` → PostCSS token swaps, `.tsx`/`.jsx` → inline-style and JSX-text edits); with an empty list, code-scope applies are rejected with a "configure codeTargets" message. Also used by fix prompts to name the files involved. |
+| `cssEntries` | `["src/**/*.css"]` | Globs (relative to the Storybook host's cwd) for the CSS files the startup scanner **reads** to derive `selector → token` bindings. |
+| `tsxEntries` | `["src/**/*.tsx"]` | Globs for `.tsx` files the scanner reads to extract inline-style token bindings (`style={{ paddingTop: "var(--space-4)" }}`). Set explicitly when components live in a sibling package. |
+| `storyGlobs` | `src/**/*.stories.*`, `stories/**/*.stories.*` | Where the CLI looks for stories (see [CLI](#cli)). |
 
 `.design-sync/registry.json` maps story IDs to Figma node IDs:
 
 ```json
 {
-  "fileKey": "XgZr68XNB9lc3Lh6yUZZjU",
+  "fileKey": "YOUR_FIGMA_FILE_KEY",
   "stories": {
     "atoms-iconbutton--accent": {
       "nodeId": "37:30",
@@ -121,6 +151,22 @@ export const Accent: StoryObj<typeof IconButton> = {
   },
 };
 ```
+
+Fields the addon reads from `parameters.designSync`:
+
+- `target` *(string)* — CSS selector for the element to snapshot. The only
+  field most stories need.
+- `pipelineUrl` *(string, default `http://127.0.0.1:7099`)* — where the
+  [`design-sync-pipeline`](https://github.com/mylesmetalab/design-sync-pipeline)
+  server listens. Only used for **Figma-scope** writes (`apply:
+  "experimental"`) and staged-edit applies; drift checks and in-process
+  code writes never touch it. Set it globally in `.storybook/preview.ts`
+  (`parameters: { designSync: { pipelineUrl: "http://127.0.0.1:7099" } }`)
+  if your pipeline runs on a non-default port.
+- `modeAttribute` *(string, default `data-theme`)* — attribute on `<html>`
+  that carries the active theme mode name, used by mode-aware and
+  dual-mode checks.
+- `tokens` — deprecated, see below.
 
 `target` is the only field most stories need. The addon's PostCSS scanner
 runs once at Storybook startup and builds a map of `selector → { CSS
@@ -289,9 +335,10 @@ active-variant           ["accent"]        ["accent"]                     match 
 
 The four `border-*-radius` rows above are a real finding: code uses
 `var(--radius-xl)` (8px) but the Figma variant binds to `radius/lg` (6px).
-**Use token** rewrites the CSS literal to `var(--radius-lg)` in one click.
-Either the design or the code is wrong — the Apply column resolves it
-without leaving Storybook.
+Either the design or the code is wrong. With the default `apply: "off"`,
+each row's **Copy fix prompt** hands the fix to a coding agent; with
+`apply: "experimental"`, **Use token** rewrites the CSS literal to
+`var(--radius-lg)` in one click without leaving Storybook.
 
 ## What this addon is NOT
 
@@ -301,7 +348,7 @@ without leaving Storybook.
 - Not coupled to a specific consumer stack. The diff is dimension-shaped,
   not framework-shaped.
 - Not the inspector. A sibling addon does live token inspection. This addon
-  only commits/syncs; v0 doesn't even commit yet.
+  detects and (optionally, behind `apply: "experimental"`) syncs.
 
 ## Roadmap
 

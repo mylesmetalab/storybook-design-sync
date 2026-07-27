@@ -421,10 +421,7 @@ class FigmaRestEngine implements Engine {
     if (!isTransparentColor(codeBg) || figmaBg !== undefined) {
       const modes = figmaBg?.modes;
       const figmaValue = figmaBg?.value;
-      const status: DimensionDiff["status"] =
-        codeBg && figmaValue && normalizeColor(codeBg) === normalizeColor(figmaValue)
-          ? "match"
-          : "drift";
+      const status = colorRowStatus(codeBg, figmaValue);
       const diff: DimensionDiff = {
         kind: "token-value",
         property: "background-color",
@@ -450,9 +447,7 @@ class FigmaRestEngine implements Engine {
       if (!aliasObj || !variables) continue;
       const v = variables.meta.variables[aliasObj.id];
       if (!v || v.resolvedType !== "FLOAT") continue;
-      const collection = variables.meta.variableCollections[v.variableCollectionId];
-      if (!collection) continue;
-      const figmaPx = resolveNumericForMode(v, collection, activeMode);
+      const figmaPx = resolveNumericForMode(v, variables, activeMode);
       if (figmaPx === null) continue;
       const codeValue = snapshot.styles[cssProp];
       const codePx = parsePx(codeValue);
@@ -499,13 +494,10 @@ class FigmaRestEngine implements Engine {
       if (alias && variables) {
         const v = variables.meta.variables[alias.id];
         if (v && v.resolvedType === "FLOAT") {
-          const collection = variables.meta.variableCollections[v.variableCollectionId];
-          if (collection) {
-            const resolved = resolveNumericForMode(v, collection, activeMode);
-            if (resolved !== null) {
-              figmaPx = resolved;
-              tokenName = v.name;
-            }
+          const resolved = resolveNumericForMode(v, variables, activeMode);
+          if (resolved !== null) {
+            figmaPx = resolved;
+            tokenName = v.name;
           }
         }
       }
@@ -561,11 +553,8 @@ class FigmaRestEngine implements Engine {
       if (aliasObj && variables) {
         const v = variables.meta.variables[aliasObj.id];
         if (v && v.resolvedType === "FLOAT") {
-          const collection = variables.meta.variableCollections[v.variableCollectionId];
-          if (collection) {
-            const px = resolveNumericForMode(v, collection, activeMode);
-            if (px !== null) figmaGap = { value: px, tokenName: v.name };
-          }
+          const px = resolveNumericForMode(v, variables, activeMode);
+          if (px !== null) figmaGap = { value: px, tokenName: v.name };
         }
       }
       if (!figmaGap && typeof node.itemSpacing === "number") {
@@ -621,11 +610,8 @@ class FigmaRestEngine implements Engine {
       if (aliasObj && variables) {
         const v = variables.meta.variables[aliasObj.id];
         if (v && v.resolvedType === "FLOAT") {
-          const collection = variables.meta.variableCollections[v.variableCollectionId];
-          if (collection) {
-            const px = resolveNumericForMode(v, collection, activeMode);
-            if (px !== null) figmaWeight = { value: px, tokenName: v.name };
-          }
+          const px = resolveNumericForMode(v, variables, activeMode);
+          if (px !== null) figmaWeight = { value: px, tokenName: v.name };
         }
       }
       if (!figmaWeight && figmaHasVisibleStroke && typeof node.strokeWeight === "number") {
@@ -669,10 +655,7 @@ class FigmaRestEngine implements Engine {
       }
       const codeValue = snapshot.styles[`border-${codeBorderEdge}-color`];
       if (figmaStroke || !isTransparentColor(codeValue)) {
-        const status: DimensionDiff["status"] =
-          codeValue && figmaStroke && normalizeColor(codeValue) === normalizeColor(figmaStroke.value)
-            ? "match"
-            : "drift";
+        const status = colorRowStatus(codeValue, figmaStroke?.value);
         const diff: DimensionDiff = {
           kind: "token-value",
           property: "border-color",
@@ -840,15 +823,8 @@ class FigmaRestEngine implements Engine {
           if (v) {
             tokenName = v.name;
             if (v.resolvedType === "STRING") {
-              const collection = variables.meta.variableCollections[v.variableCollectionId];
-              const raw =
-                (activeMode && collection
-                  ? v.valuesByMode[
-                      collection.modes.find((m) => m.name.toLowerCase() === activeMode)?.modeId ?? ""
-                    ]
-                  : undefined) ??
-                v.valuesByMode[collection?.defaultModeId ?? ""];
-              if (typeof raw === "string") figmaFamily = raw;
+              const raw = resolveStringForMode(v, variables, activeMode);
+              if (raw !== null) figmaFamily = raw;
             }
           }
         }
@@ -888,10 +864,7 @@ class FigmaRestEngine implements Engine {
           if (!figmaColor && fill.color) figmaColor = { value: rgbaToCss(fill.color) };
         }
         if (codeValue || figmaColor) {
-          const status: DimensionDiff["status"] =
-            codeValue && figmaColor && normalizeColor(codeValue) === normalizeColor(figmaColor.value)
-              ? "match"
-              : "drift";
+          const status = colorRowStatus(codeValue, figmaColor?.value);
           const diff: DimensionDiff = {
             kind: "token-value",
             property: "color",
@@ -1453,6 +1426,20 @@ interface ResolvedFill {
   tokenName?: string;
 }
 
+/**
+ * Verdict for a colour comparison. `drift` requires a concrete value on both
+ * sides — with only one side present there is nothing to compare, and calling
+ * that drift is the exact false positive the honesty invariant forbids. The
+ * row still renders with whatever detail exists; it just doesn't accuse.
+ */
+function colorRowStatus(
+  codeValue: string | undefined,
+  figmaValue: string | undefined,
+): DimensionDiff["status"] {
+  if (!codeValue || !figmaValue) return "flag-only";
+  return normalizeColor(codeValue) === normalizeColor(figmaValue) ? "match" : "drift";
+}
+
 function resolveFillColor(
   node: FigmaNode,
   variables: FigmaLocalVariablesResponse | null,
@@ -1461,15 +1448,103 @@ function resolveFillColor(
   const fill = node.fills?.[0];
   if (!fill) return undefined;
   const alias = fill.boundVariables?.color;
+  const tokenName = alias && variables ? variables.meta.variables[alias.id]?.name : undefined;
   if (alias && variables) {
     const resolved = resolveColorVariable(alias.id, variables, activeMode);
     if (resolved) {
-      const v = variables.meta.variables[alias.id];
-      if (v) resolved.tokenName = v.name;
+      if (tokenName) resolved.tokenName = tokenName;
       return resolved;
     }
   }
-  if (fill.color) return { value: rgbaToCss(fill.color) };
+  // The variable didn't resolve, but Figma also hands back the paint's own
+  // resolved colour — use it, and keep the token name so the row still
+  // knows which token it is nominally bound to.
+  if (fill.color) {
+    return { value: rgbaToCss(fill.color), ...(tokenName ? { tokenName } : {}) };
+  }
+  return undefined;
+}
+
+/**
+ * A raw `valuesByMode` entry that points at another variable rather than
+ * holding a literal. Figma's REST shape for semantic tokens: `Border/Neutral/
+ * Secondary` doesn't store a colour, it stores an alias to `Slate/600`.
+ */
+function asVariableAlias(raw: unknown): FigmaVariableAlias | undefined {
+  if (raw && typeof raw === "object" && (raw as { type?: string }).type === "VARIABLE_ALIAS") {
+    return raw as FigmaVariableAlias;
+  }
+  return undefined;
+}
+
+/**
+ * Match a collection mode by name. Exact (case-insensitive) first, then as a
+ * whole word inside the mode name — real files prefix their modes with the
+ * system name (SDS ships `"SDS Light"` / `"SDS Dark"`, not `"Light"` /
+ * `"Dark"`), and an exact-only match silently sent every dark-mode
+ * comparison to the file's default mode.
+ */
+function findModeId(collection: FigmaVariableCollection, modeName: string): string | undefined {
+  const target = modeName.trim().toLowerCase();
+  if (!target) return undefined;
+  const exact = collection.modes.find((m) => m.name.trim().toLowerCase() === target);
+  if (exact) return exact.modeId;
+  const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const word = new RegExp(`\\b${escaped}\\b`, "i");
+  return collection.modes.find((m) => word.test(m.name))?.modeId;
+}
+
+/** How many alias hops to follow before giving up. Real chains are 1-2 deep. */
+const MAX_ALIAS_DEPTH = 8;
+
+/**
+ * Read a variable's literal value for `modeName`, following `VARIABLE_ALIAS`
+ * indirection to whatever variable actually holds the literal.
+ *
+ * Each hop re-resolves the mode against the *target's own* collection, which
+ * matters because aliases routinely cross collections with unrelated mode
+ * sets — `Color` has `SDS Light`/`SDS Dark`, while the `Color Primitives` it
+ * points into has a single `Value` mode. Falls back to the collection's
+ * default mode whenever `modeName` doesn't name one of its modes.
+ *
+ * Returns `undefined` when the variable is missing, the chain exceeds
+ * `MAX_ALIAS_DEPTH`, or a cycle is detected — never a partially-resolved
+ * stand-in like the variable's name.
+ */
+function resolveVariableLiteral(
+  variableId: string,
+  variables: FigmaLocalVariablesResponse,
+  modeName: string | undefined,
+  seen: Set<string> = new Set(),
+  depth = 0,
+): unknown {
+  if (depth > MAX_ALIAS_DEPTH || seen.has(variableId)) return undefined;
+  seen.add(variableId);
+
+  const v = variables.meta.variables[variableId];
+  if (!v) return undefined;
+  const collection = variables.meta.variableCollections[v.variableCollectionId];
+  if (!collection) return undefined;
+
+  // Prefer the named mode; fall back to the collection's default when this
+  // collection doesn't name it (every hop past the first, since aliases cross
+  // into collections with unrelated mode sets) or defines no value for it.
+  const namedModeId = modeName ? findModeId(collection, modeName) : undefined;
+  const raw =
+    (namedModeId ? v.valuesByMode[namedModeId] : undefined) ??
+    v.valuesByMode[collection.defaultModeId];
+  if (raw === undefined) return undefined;
+
+  const alias = asVariableAlias(raw);
+  if (alias) return resolveVariableLiteral(alias.id, variables, modeName, seen, depth + 1);
+  return raw;
+}
+
+/** Narrow a resolved literal to Figma's `{r,g,b,a}` colour shape (floats 0..1). */
+function asFigmaColor(raw: unknown): { r: number; g: number; b: number; a?: number } | undefined {
+  if (raw && typeof raw === "object" && "r" in raw && "g" in raw && "b" in raw) {
+    return raw as { r: number; g: number; b: number; a?: number };
+  }
   return undefined;
 }
 
@@ -1483,14 +1558,17 @@ function resolveColorVariable(
   const collection = variables.meta.variableCollections[v.variableCollectionId];
   if (!collection) return undefined;
 
+  /**
+   * Resolve for a named mode, but only when THIS variable's collection
+   * actually has that mode. Without the guard, a single-mode collection would
+   * answer every mode name with its default value and we'd emit a
+   * `{light, dark}` map for a token that has no such thing. Alias hops deeper
+   * in the chain are free to fall back — that's `resolveVariableLiteral`'s job.
+   */
   const findByName = (modeName: string): string | undefined => {
-    const mode = collection.modes.find((m) => m.name.toLowerCase() === modeName);
-    if (!mode) return undefined;
-    const raw = v.valuesByMode[mode.modeId];
-    if (raw && typeof raw === "object" && "r" in raw) {
-      return rgbaToCss(raw as { r: number; g: number; b: number; a?: number });
-    }
-    return undefined;
+    if (!findModeId(collection, modeName)) return undefined;
+    const color = asFigmaColor(resolveVariableLiteral(variableId, variables, modeName));
+    return color ? rgbaToCss(color) : undefined;
   };
 
   const light = findByName("light");
@@ -1498,12 +1576,12 @@ function resolveColorVariable(
 
   // The "comparison value" is the active mode if known, else the file default.
   const activeStr = activeMode ? findByName(activeMode) : undefined;
-  const defaultRaw = v.valuesByMode[collection.defaultModeId];
-  const defaultStr =
-    defaultRaw && typeof defaultRaw === "object" && "r" in defaultRaw
-      ? rgbaToCss(defaultRaw as { r: number; g: number; b: number; a?: number })
-      : v.name;
-  const value = activeStr ?? defaultStr;
+  const defaultColor = asFigmaColor(resolveVariableLiteral(variableId, variables, undefined));
+  const value = activeStr ?? (defaultColor ? rgbaToCss(defaultColor) : undefined);
+  // A variable name is not a colour. Returning one here used to poison the
+  // caller's raw-paint fallback and guarantee `drift` on every colour row
+  // whose token aliases another token — report "unresolved" instead.
+  if (value === undefined) return undefined;
 
   if (light && dark) {
     return { value, modes: { light, dark } };
@@ -1513,22 +1591,27 @@ function resolveColorVariable(
 
 /**
  * Pick a numeric (FLOAT) variable's value for the active mode, falling back
- * to the file's default mode if the active one isn't defined.
+ * to the file's default mode if the active one isn't defined. Follows alias
+ * indirection — without it, an aliasing numeric token resolved to `null` and
+ * the row was dropped from the report entirely.
  */
 function resolveNumericForMode(
   v: FigmaVariable,
-  collection: FigmaVariableCollection,
+  variables: FigmaLocalVariablesResponse,
   activeMode?: string,
 ): number | null {
-  if (activeMode) {
-    const mode = collection.modes.find((m) => m.name.toLowerCase() === activeMode);
-    if (mode) {
-      const raw = v.valuesByMode[mode.modeId];
-      if (typeof raw === "number") return raw;
-    }
-  }
-  const defaultRaw = v.valuesByMode[collection.defaultModeId];
-  return typeof defaultRaw === "number" ? defaultRaw : null;
+  const raw = resolveVariableLiteral(v.id, variables, activeMode);
+  return typeof raw === "number" ? raw : null;
+}
+
+/** Same, for STRING variables (font-family). */
+function resolveStringForMode(
+  v: FigmaVariable,
+  variables: FigmaLocalVariablesResponse,
+  activeMode?: string,
+): string | null {
+  const raw = resolveVariableLiteral(v.id, variables, activeMode);
+  return typeof raw === "string" ? raw : null;
 }
 
 interface FigmaBinding {
@@ -1737,13 +1820,10 @@ function pushTypographyNumeric(opts: {
   if (alias && variables) {
     const v = variables.meta.variables[alias.id];
     if (v && v.resolvedType === "FLOAT") {
-      const collection = variables.meta.variableCollections[v.variableCollectionId];
-      if (collection) {
-        const resolved = resolveNumericForMode(v, collection, activeMode);
-        if (resolved !== null) {
-          figmaValue = resolved;
-          tokenName = v.name;
-        }
+      const resolved = resolveNumericForMode(v, variables, activeMode);
+      if (resolved !== null) {
+        figmaValue = resolved;
+        tokenName = v.name;
       }
     }
   }

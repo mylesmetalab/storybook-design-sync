@@ -11,6 +11,7 @@ import {
   type RegisteredStoriesPayload,
   type RegisteredStoryEntry,
   type ApplyCodeResultPayload,
+  type ConfigInfoPayload,
 } from "./channels.js";
 import type { DriftReport, DimensionDiff } from "./dimensions/types.js";
 import {
@@ -19,7 +20,10 @@ import {
   tokenRowFixability,
   partitionRow,
   explainInfo,
+  applyControlsEnabled,
+  rowHasDrift,
 } from "./row-triage.js";
+import { buildFixPrompt } from "./fix-prompt.js";
 
 const STORY_RENDERED_EVENT = "storyRendered";
 
@@ -275,6 +279,14 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   const [args] = useArgs();
   const [applyResults, setApplyResults] = useState<Record<string, ApplyResult>>({});
   const [bulk, setBulk] = useState<BulkState | null>(null);
+  // Addon config surface (apply gating, fileKey, codeTarget paths) relayed
+  // by the server on mount. Null until the reply lands — treated as
+  // apply:"off" (read-only) so write controls never flash on before the
+  // config is known.
+  const [configInfo, setConfigInfo] = useState<ConfigInfoPayload | null>(null);
+  // Registry load/parse failure from a Check-all — rendered as a banner
+  // instead of pretending the registry is empty.
+  const [registryError, setRegistryError] = useState<string | null>(null);
   const sbApi = useStorybookApi();
   const pendingResolversRef = useRef<{
     resolve: (report: DriftReport) => void;
@@ -318,7 +330,16 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     [EVENTS.ProposedEdit]: (edit: ProposedEdit) => {
       setEdits((prev) => [edit, ...prev].slice(0, 50));
     },
+    [EVENTS.ConfigInfo]: (payload: ConfigInfoPayload) => {
+      setConfigInfo(payload);
+    },
     [EVENTS.RegisteredStories]: (payload: RegisteredStoriesPayload) => {
+      if (payload.error) {
+        setRegistryError(payload.error);
+        setBulk(null);
+        return;
+      }
+      setRegistryError(null);
       void runBulk(payload.stories);
     },
     // Bridge: storybook-design-inspector emits its own STYLE_UPDATE events
@@ -364,6 +385,14 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   useEffect(() => {
     setState(initialState);
   }, [storyId]);
+
+  // Ask the server for the config surface (apply gating, fileKey,
+  // codeTarget paths) once the channel is up.
+  useEffect(() => {
+    emit(EVENTS.ConfigRequest);
+  }, [emit]);
+
+  const applyEnabled = applyControlsEnabled(configInfo?.apply);
 
   const onCheck = useCallback(() => {
     if (!storyId) return;
@@ -451,6 +480,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
 
   const onCheckAll = useCallback(() => {
     setBulk(null);
+    setRegistryError(null);
     emit(EVENTS.ListRegisteredRequest);
   }, [emit]);
 
@@ -577,9 +607,21 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         {storyId && <span style={styles.storyId}>{storyId}</span>}
       </div>
 
+      {configInfo?.error && (
+        <div style={styles.error}>
+          Configuration error: {configInfo.error}
+        </div>
+      )}
+      {registryError && (
+        <div style={styles.error}>
+          Registry error: {registryError}
+        </div>
+      )}
+
       {bulk && (
         <BulkSummary
           bulk={bulk}
+          applyEnabled={applyEnabled}
           onSelect={(id) => sbApi?.selectStory(id)}
           onPreviewAll={() => onApplyAll({ dryRun: true })}
           onApplyAllForReal={() => onApplyAll({ dryRun: false })}
@@ -591,6 +633,12 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       {state.report && (
         <DiffTable
           report={state.report}
+          applyEnabled={applyEnabled}
+          fixContext={{
+            selector: designSync.target,
+            filePaths: configInfo?.codeTargetPaths,
+            fileKey: configInfo?.fileKey,
+          }}
           applyResults={applyResults}
           onApply={async (d, key, scope) => {
             const edit = buildEdit(
@@ -661,6 +709,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
 
       <StagedEdits
         edits={edits}
+        applyEnabled={applyEnabled}
         applyResults={applyResults}
         pipelineUrl={designSync.pipelineUrl ?? PIPELINE_DEFAULT_URL}
         target={designSync.target}
@@ -672,8 +721,18 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   );
 };
 
+/** Context threaded into per-row fix prompts (see fix-prompt.ts). */
+interface FixContext {
+  selector?: string | undefined;
+  filePaths?: string[] | undefined;
+  fileKey?: string | undefined;
+}
+
 interface DiffTableProps {
   report: DriftReport;
+  /** v1 write gating — when false, no Apply buttons render anywhere. */
+  applyEnabled: boolean;
+  fixContext: FixContext;
   applyResults: Record<string, ApplyResult>;
   onApply: (d: DimensionDiff, key: string, scope: ApplyScope) => void;
   onUndo: (key: string, scope: ApplyScope, inverse: Record<string, unknown>) => void;
@@ -702,10 +761,27 @@ function visibleDimensions(report: DriftReport): DimensionDiff[] {
   return report.dimensions.filter((d) => !HIDDEN_DIMENSION_KINDS.has(d.kind));
 }
 
-const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, onUndo }) => {
+const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext, applyResults, onApply, onUndo }) => {
   const grouped = groupDimensions(visibleDimensions(report));
   const mainRows = grouped.filter((r) => partitionRow(r) === "main");
   const infoRows = grouped.filter((r) => partitionRow(r) === "info");
+
+  // Build the self-contained fix prompt for a drift row. Shared by both
+  // apply modes — auditing without writes still hands you the fix.
+  const promptFor = (d: DimensionDiff): string =>
+    buildFixPrompt({
+      storyId: report.storyId,
+      kind: d.kind,
+      property: d.property,
+      codeValue: d.codeValue,
+      figmaValue: d.figmaValue,
+      tokenName: d.tokenName,
+      selector: fixContext.selector,
+      filePaths: fixContext.filePaths,
+      nodeId: report.nodeId,
+      fileKey: fixContext.fileKey,
+      note: d.note,
+    });
 
   const renderRow = (row: GroupedRow, i: number, fixable: boolean) => {
     if (row.kind === "token") {
@@ -717,6 +793,8 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, on
           property={row.property}
           value={row.value}
           binding={row.binding}
+          applyEnabled={applyEnabled}
+          promptFor={promptFor}
           applyResults={applyResults}
           onApply={onApply}
           onUndo={onUndo}
@@ -730,7 +808,9 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, on
         key={key}
         d={d}
         fixable={fixable}
+        applyEnabled={applyEnabled}
         {...(fixable ? {} : { infoNote: explainInfo(row) })}
+        promptFor={promptFor}
         codeResult={applyResults[`${key}:code`]}
         figmaResult={applyResults[`${key}:figma`]}
         onApply={(scope) => onApply(d, key, scope)}
@@ -770,7 +850,15 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, on
               <th style={styles.th}>Figma</th>
               <th style={styles.th}>Value</th>
               <th style={styles.th}>Wiring</th>
-              <th style={styles.th}>Apply</th>
+              <th style={styles.th}>
+                {applyEnabled ? (
+                  <>
+                    Apply <span style={styles.experimentalBadge}>experimental</span>
+                  </>
+                ) : (
+                  "Fix"
+                )}
+              </th>
             </tr>
           </thead>
           <tbody>{mainRows.map((row, i) => renderRow(row, i, true))}</tbody>
@@ -793,7 +881,7 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyResults, onApply, on
                 <th style={styles.th}>Figma</th>
                 <th style={styles.th}>Value</th>
                 <th style={styles.th}>Wiring</th>
-                <th style={styles.th}>Why no Apply</th>
+                <th style={styles.th}>{applyEnabled ? "Why no Apply" : "Notes"}</th>
               </tr>
             </thead>
             <tbody>{infoRows.map((row, i) => renderRow(row, i, false))}</tbody>
@@ -847,12 +935,14 @@ interface TokenRowProps {
   property: string;
   value: DimensionDiff | undefined;
   binding: DimensionDiff | undefined;
+  applyEnabled: boolean;
+  promptFor: (d: DimensionDiff) => string;
   applyResults: Record<string, ApplyResult>;
   onApply: (d: DimensionDiff, key: string, scope: ApplyScope) => void;
   onUndo: (key: string, scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, applyResults, onApply, onUndo }) => {
+const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, applyEnabled, promptFor, applyResults, onApply, onUndo }) => {
   // Prefer value diff for the Code/Figma cells (concrete px/rgb is more
   // useful than a token name); fall back to binding if value is absent.
   const display = value ?? binding;
@@ -900,7 +990,7 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
         <StatusPill status={binding?.status} title={wiringTitle} />
       </td>
       <td style={styles.td}>
-        {bindingFixable && binding ? (
+        {applyEnabled && bindingFixable && binding ? (
           <div style={styles.applyButtons}>
             <ApplyButton
               label="Update code"
@@ -919,7 +1009,7 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
               title={`Write ${stringifyValue(binding.codeValue)} to Figma (code value wins)`}
             />
           </div>
-        ) : valueFixable && value ? (
+        ) : applyEnabled && valueFixable && value ? (
           <div style={styles.applyButtons}>
             <ApplyButton
               label="Use token"
@@ -930,6 +1020,14 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
               title={`Replace ${stringifyValue(value.codeValue)} with var(--${valueTokenName}) in CSS`}
             />
           </div>
+        ) : null}
+        {rowHasDrift({ kind: "token", property, ...(value !== undefined ? { value } : {}), ...(binding !== undefined ? { binding } : {}) }) ? (
+          // Prefer the drifted value diff (it carries tokenName); fall back
+          // to the binding diff. `display` is never undefined here — drift
+          // implies at least one of the two exists.
+          <CopyFixPromptButton
+            getText={() => promptFor(value?.status === "drift" ? value : (binding ?? value)!)}
+          />
         ) : (
           <span style={styles.muted}>—</span>
         )}
@@ -946,15 +1044,18 @@ interface OtherRowProps {
    * would always reject (see CLAUDE.md anti-pattern #3 / "honest Apply").
    */
   fixable: boolean;
+  /** v1 write gating — when false, no Apply buttons render even on fixable rows. */
+  applyEnabled: boolean;
   /** Human-readable reason shown in the Apply column when `fixable` is false. */
   infoNote?: string;
+  promptFor: (d: DimensionDiff) => string;
   codeResult: ApplyResult | undefined;
   figmaResult: ApplyResult | undefined;
   onApply: (scope: ApplyScope) => void;
   onUndo: (scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, infoNote, codeResult, figmaResult, onApply, onUndo }) => {
+const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, applyEnabled, infoNote, promptFor, codeResult, figmaResult, onApply, onUndo }) => {
   return (
     <tr>
       <td style={styles.td}>
@@ -977,7 +1078,7 @@ const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, infoNote, codeResult, f
         {d.note && <div style={styles.muted}>{d.note}</div>}
       </td>
       <td style={styles.td}>
-        {fixable ? (
+        {fixable && applyEnabled && (
           <div style={styles.applyButtons}>
             <ApplyButton
               label="Update code"
@@ -996,9 +1097,12 @@ const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, infoNote, codeResult, f
               title={`Write ${stringifyValue(d.codeValue)} to Figma (code value wins)`}
             />
           </div>
-        ) : (
+        )}
+        {!fixable && (
           <div style={styles.muted} title={infoNote}>{infoNote ?? "Manual fix only."}</div>
         )}
+        {d.status === "drift" && <CopyFixPromptButton getText={() => promptFor(d)} />}
+        {fixable && !applyEnabled && d.status !== "drift" && <span style={styles.muted}>—</span>}
       </td>
     </tr>
   );
@@ -1050,6 +1154,60 @@ const ApplyButton: React.FC<ApplyButtonProps> = ({ label, scope, result, onClick
         </div>
       )}
     </div>
+  );
+};
+
+/**
+ * Copy text to the clipboard: async Clipboard API first, hidden-textarea
+ * `document.execCommand("copy")` fallback for restricted contexts (the
+ * manager iframe doesn't always get clipboard-write permission).
+ */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fall through to execCommand
+  }
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Per-row "Copy fix prompt" — copies a self-contained prompt (see
+ * fix-prompt.ts) that a coding agent can act on without any other context.
+ * Rendered on every drift row in BOTH apply modes: it's the audit-only
+ * story's path from "found it" to "fixed it".
+ */
+const CopyFixPromptButton: React.FC<{ getText: () => string }> = ({ getText }) => {
+  const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const onClick = async (): Promise<void> => {
+    const ok = await copyTextToClipboard(getText());
+    setStatus(ok ? "copied" : "failed");
+    setTimeout(() => setStatus("idle"), 2000);
+  };
+  return (
+    <button
+      style={{ ...styles.copyPromptButton, ...(status === "copied" ? styles.applyButtonApplied : {}) }}
+      onClick={() => void onClick()}
+      title="Copy a self-contained prompt describing this drift, ready to paste to a coding agent"
+    >
+      {status === "copied" ? "Copied" : status === "failed" ? "Copy failed" : "Copy fix prompt"}
+    </button>
   );
 };
 
@@ -1204,13 +1362,15 @@ const ValueCell: React.FC<{ value: unknown }> = ({ value }) => {
 
 interface StagedEditsProps {
   edits: ProposedEdit[];
+  /** v1 write gating — when false, staged edits are display-only. */
+  applyEnabled: boolean;
   applyResults: Record<string, ApplyResult>;
   pipelineUrl: string;
   target: string | undefined;
   onResult: (key: string, result: ApplyResult) => void;
 }
 
-const StagedEdits: React.FC<StagedEditsProps> = ({ edits, applyResults, pipelineUrl, target, onResult }) => {
+const StagedEdits: React.FC<StagedEditsProps> = ({ edits, applyEnabled, applyResults, pipelineUrl, target, onResult }) => {
   const apply = useCallback(
     async (e: ProposedEdit, i: number, scope: ApplyScope) => {
       const key = `staged-${i}-${scope}`;
@@ -1277,22 +1437,31 @@ const StagedEdits: React.FC<StagedEditsProps> = ({ edits, applyResults, pipeline
                 </td>
                 <td style={styles.td}>{new Date(e.timestamp).toLocaleTimeString()}</td>
                 <td style={styles.td}>
-                  <div style={styles.applyButtons}>
-                    <ApplyButton
-                      label="Update code"
-                      scope="code"
-                      result={applyResults[`staged-${i}-code`]}
-                      onClick={() => apply(e, i, "code")}
-                      title={`Write ${e.newValue} to code`}
-                    />
-                    <ApplyButton
-                      label="Update Figma"
-                      scope="figma"
-                      result={applyResults[`staged-${i}-figma`]}
-                      onClick={() => apply(e, i, "figma")}
-                      title={`Write ${e.newValue} to Figma`}
-                    />
-                  </div>
+                  {applyEnabled ? (
+                    <div style={styles.applyButtons}>
+                      <ApplyButton
+                        label="Update code"
+                        scope="code"
+                        result={applyResults[`staged-${i}-code`]}
+                        onClick={() => apply(e, i, "code")}
+                        title={`Write ${e.newValue} to code`}
+                      />
+                      <ApplyButton
+                        label="Update Figma"
+                        scope="figma"
+                        result={applyResults[`staged-${i}-figma`]}
+                        onClick={() => apply(e, i, "figma")}
+                        title={`Write ${e.newValue} to Figma`}
+                      />
+                    </div>
+                  ) : (
+                    <span
+                      style={styles.muted}
+                      title='Writes are disabled (apply: "off" — the v1 default). Set apply: "experimental" in design-sync.config.json to enable.'
+                    >
+                      apply off
+                    </span>
+                  )}
                 </td>
               </tr>
             ))}
@@ -1305,6 +1474,8 @@ const StagedEdits: React.FC<StagedEditsProps> = ({ edits, applyResults, pipeline
 
 interface BulkSummaryProps {
   bulk: BulkState;
+  /** v1 write gating — when false, Preview-all / Apply-for-real are hidden. */
+  applyEnabled: boolean;
   onSelect: (storyId: string) => void;
   /** First-touch: dry-run only. Pipeline returns diffs without writing. */
   onPreviewAll: () => void;
@@ -1314,6 +1485,7 @@ interface BulkSummaryProps {
 
 const BulkSummary: React.FC<BulkSummaryProps> = ({
   bulk,
+  applyEnabled,
   onSelect,
   onPreviewAll,
   onApplyAllForReal,
@@ -1387,37 +1559,44 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
           >
             {copied === "json" ? "Copied!" : "Export JSON"}
           </button>
-          <button
-            style={styles.button}
-            disabled={
-              bulk.running ||
-              bulk.apply?.running ||
-              !bulk.rows.some((r) => r.drift > 0)
-            }
-            onClick={onPreviewAll}
-            title="Run every fixable code-side drift through the pipeline in dry-run — no files are written"
-          >
-            {bulk.apply?.running && bulk.apply.dryRun
-              ? `Previewing… (${bulk.apply.applied + bulk.apply.skipped + bulk.apply.notFixable + bulk.apply.errored}/${bulk.apply.total})`
-              : "Preview all (dry-run)"}
-          </button>
-          {/* Apply for real only appears after a successful preview, mirroring
-              the project's read-only-by-default principle (pipeline and
-              figma-plugin both default to dry-run). Disabled while another
-              run is in flight. */}
-          {bulk.apply && !bulk.apply.running && bulk.apply.dryRun && bulk.apply.applied > 0 && (
-            <button
-              style={{ ...styles.button, borderColor: "#b91c1c", color: "#b91c1c" }}
-              onClick={onApplyAllForReal}
-              title="Run for real — files will be written through the pipeline"
-            >
-              Apply for real ({bulk.apply.applied})
-            </button>
-          )}
-          {bulk.apply?.running && !bulk.apply.dryRun && (
-            <button style={styles.button} disabled>
-              Applying… ({bulk.apply.applied + bulk.apply.skipped + bulk.apply.notFixable + bulk.apply.errored}/{bulk.apply.total})
-            </button>
+          {/* Bulk write controls are gated behind `apply: "experimental"`
+              (v1 is audit-only by default). */}
+          {applyEnabled && (
+            <>
+              <button
+                style={styles.button}
+                disabled={
+                  bulk.running ||
+                  bulk.apply?.running ||
+                  !bulk.rows.some((r) => r.drift > 0)
+                }
+                onClick={onPreviewAll}
+                title="Run every fixable code-side drift through the pipeline in dry-run — no files are written"
+              >
+                {bulk.apply?.running && bulk.apply.dryRun
+                  ? `Previewing… (${bulk.apply.applied + bulk.apply.skipped + bulk.apply.notFixable + bulk.apply.errored}/${bulk.apply.total})`
+                  : "Preview all (dry-run)"}
+              </button>
+              {/* Apply for real only appears after a successful preview, mirroring
+                  the project's read-only-by-default principle (pipeline and
+                  figma-plugin both default to dry-run). Disabled while another
+                  run is in flight. */}
+              {bulk.apply && !bulk.apply.running && bulk.apply.dryRun && bulk.apply.applied > 0 && (
+                <button
+                  style={{ ...styles.button, borderColor: "#b91c1c", color: "#b91c1c" }}
+                  onClick={onApplyAllForReal}
+                  title="Run for real — files will be written through the pipeline"
+                >
+                  Apply for real ({bulk.apply.applied})
+                </button>
+              )}
+              {bulk.apply?.running && !bulk.apply.dryRun && (
+                <button style={styles.button} disabled>
+                  Applying… ({bulk.apply.applied + bulk.apply.skipped + bulk.apply.notFixable + bulk.apply.errored}/{bulk.apply.total})
+                </button>
+              )}
+              <span style={styles.experimentalBadge}>experimental</span>
+            </>
           )}
         </span>
       </h3>
@@ -1675,6 +1854,32 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#fff8e6",
     borderColor: "#e0c178",
     color: "#856404",
+  },
+  copyPromptButton: {
+    padding: "3px 10px",
+    fontSize: 11,
+    borderRadius: 3,
+    border: "1px dashed #d4d4d4",
+    background: "#fff",
+    color: "#525252",
+    cursor: "pointer",
+    minWidth: 100,
+    textAlign: "left" as const,
+    whiteSpace: "nowrap" as const,
+    marginTop: 4,
+  },
+  experimentalBadge: {
+    display: "inline-block",
+    padding: "0 6px",
+    borderRadius: 999,
+    fontSize: 10,
+    fontWeight: 600,
+    color: "#92400e",
+    background: "#fef3c7",
+    border: "1px solid #fcd34d",
+    textTransform: "lowercase" as const,
+    verticalAlign: "middle",
+    marginLeft: 4,
   },
   undoButton: {
     padding: "1px 6px",

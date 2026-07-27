@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { partitionRow, explainInfo, type GroupedRow } from "./row-triage.js";
+import {
+  partitionRow,
+  explainInfo,
+  applyControlsEnabled,
+  rowHasDrift,
+  type GroupedRow,
+} from "./row-triage.js";
 import type { DimensionDiff } from "./dimensions/types.js";
 
 function other(diff: Partial<DimensionDiff> & Pick<DimensionDiff, "kind">): GroupedRow {
@@ -48,6 +54,50 @@ describe("partitionRow — the Phase-2 honesty invariant", () => {
 
   it("matches stay in main regardless of kind", () => {
     expect(partitionRow(other({ kind: "props", property: "Size", status: "match" }))).toBe("main");
+  });
+});
+
+describe("applyControlsEnabled — v1 audit-only write gating", () => {
+  it('only an explicit "experimental" enables write controls', () => {
+    expect(applyControlsEnabled("experimental")).toBe(true);
+  });
+
+  it('"off", undefined (config not loaded), and junk all stay read-only', () => {
+    expect(applyControlsEnabled("off")).toBe(false);
+    expect(applyControlsEnabled(undefined)).toBe(false);
+    expect(applyControlsEnabled("on")).toBe(false);
+    expect(applyControlsEnabled("")).toBe(false);
+  });
+
+  it("the honesty invariant survives experimental mode: props/variant-set still partition to info", () => {
+    // Even with writes enabled, rows without an engine must never show an
+    // Apply button — gating widens what CAN render, never what's honest.
+    expect(applyControlsEnabled("experimental")).toBe(true);
+    expect(partitionRow(other({ kind: "props", property: "Size", figmaValue: "Large" }))).toBe("info");
+    expect(
+      partitionRow(other({ kind: "variant-set", property: "active-variant", codeValue: ["a"], figmaValue: { S: "H" } })),
+    ).toBe("info");
+  });
+});
+
+describe("rowHasDrift — drives the Copy fix prompt button (both modes)", () => {
+  it("other rows report drift from their diff status", () => {
+    expect(rowHasDrift(other({ kind: "copy", property: "text" }))).toBe(true);
+    expect(rowHasDrift(other({ kind: "copy", property: "text", status: "match" }))).toBe(false);
+  });
+
+  it("token rows report drift when either value or binding drifted", () => {
+    const diff = (status: DimensionDiff["status"]): DimensionDiff => ({
+      kind: "token-value",
+      property: "gap",
+      codeValue: "8px",
+      figmaValue: "4px",
+      status,
+    });
+    expect(rowHasDrift({ kind: "token", property: "gap", value: diff("drift") })).toBe(true);
+    expect(rowHasDrift({ kind: "token", property: "gap", binding: diff("drift") })).toBe(true);
+    expect(rowHasDrift({ kind: "token", property: "gap", value: diff("match") })).toBe(false);
+    expect(rowHasDrift({ kind: "token", property: "gap" })).toBe(false);
   });
 });
 

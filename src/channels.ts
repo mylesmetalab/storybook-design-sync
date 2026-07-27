@@ -36,6 +36,14 @@ export const EVENTS = {
   ApplyCodeRequest: "design-sync:applyCodeRequest",
   /** Server → manager: result of an in-process code-scope apply. */
   ApplyCodeResult: "design-sync:applyCodeResult",
+  /**
+   * Manager → server: request the addon config surface the panel needs
+   * (apply gating mode, fileKey, code-target paths). Sent once when the
+   * panel mounts.
+   */
+  ConfigRequest: "design-sync:configRequest",
+  /** Server → manager: reply to ConfigRequest (or a config load error). */
+  ConfigInfo: "design-sync:configInfo",
 } as const;
 
 export interface CheckDriftRequestPayload {
@@ -112,6 +120,27 @@ export interface RegisteredStoryEntry {
 export interface RegisteredStoriesPayload {
   stories: RegisteredStoryEntry[];
   fileKey: string;
+  /**
+   * Present when the registry (or config) could not be loaded. The manager
+   * renders this as an error banner instead of treating the empty story
+   * list as "nothing registered".
+   */
+  error?: string;
+}
+
+/**
+ * Config surface the manager panel needs, relayed by the server on
+ * ConfigRequest. Deliberately minimal — no secrets, no absolute paths
+ * beyond the consumer-relative codeTarget paths.
+ */
+export interface ConfigInfoPayload {
+  /** Write gating mode. `"off"` = audit-only panel (v1 default). */
+  apply: "off" | "experimental";
+  fileKey: string;
+  /** Consumer-relative paths of configured codeTargets (for fix prompts). */
+  codeTargetPaths: string[];
+  /** Present when design-sync.config.json failed to load or validate. */
+  error?: string;
 }
 
 /**

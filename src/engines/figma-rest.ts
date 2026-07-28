@@ -1497,6 +1497,21 @@ function findModeId(collection: FigmaVariableCollection, modeName: string): stri
 /** How many alias hops to follow before giving up. Real chains are 1-2 deep. */
 const MAX_ALIAS_DEPTH = 8;
 
+/** Why an alias chain produced no literal. Drives the row's honest message. */
+type UnresolvedReason =
+  | "variable-missing"
+  | "collection-missing"
+  | "no-value"
+  | "wrong-type"
+  | "cycle"
+  | "depth";
+
+type LiteralResolution =
+  | { ok: true; value: unknown; chain: string[] }
+  | { ok: false; reason: UnresolvedReason; chain: string[] };
+
+type UnresolvedLiteral = Extract<LiteralResolution, { ok: false }>;
+
 /**
  * Read a variable's literal value for `modeName`, following `VARIABLE_ALIAS`
  * indirection to whatever variable actually holds the literal.
@@ -1507,9 +1522,12 @@ const MAX_ALIAS_DEPTH = 8;
  * points into has a single `Value` mode. Falls back to the collection's
  * default mode whenever `modeName` doesn't name one of its modes.
  *
- * Returns `undefined` when the variable is missing, the chain exceeds
- * `MAX_ALIAS_DEPTH`, or a cycle is detected — never a partially-resolved
- * stand-in like the variable's name.
+ * Type-agnostic on purpose: COLOR (`{r,g,b,a}`), FLOAT (`number`), STRING and
+ * BOOLEAN variables all alias the same way, so every reader goes through here.
+ *
+ * Never returns a partially-resolved stand-in (a variable *name* is not a
+ * value). On failure it returns the reason plus the chain walked so the caller
+ * can tell the user exactly what couldn't be resolved.
  */
 function resolveVariableLiteral(
   variableId: string,
@@ -1517,14 +1535,22 @@ function resolveVariableLiteral(
   modeName: string | undefined,
   seen: Set<string> = new Set(),
   depth = 0,
-): unknown {
-  if (depth > MAX_ALIAS_DEPTH || seen.has(variableId)) return undefined;
+  chain: string[] = [],
+): LiteralResolution {
+  const v = variables.meta.variables[variableId];
+  // Label hops by name where we have one; the raw id is all we can say about
+  // a variable that isn't in the response (typically a library reference).
+  const walked = [...chain, v?.name ?? variableId];
+
+  // Cycle before depth: a self-referential chain should say "loops", not
+  // "too deep", even though both guards would stop it.
+  if (seen.has(variableId)) return { ok: false, reason: "cycle", chain: walked };
+  if (depth > MAX_ALIAS_DEPTH) return { ok: false, reason: "depth", chain: walked };
   seen.add(variableId);
 
-  const v = variables.meta.variables[variableId];
-  if (!v) return undefined;
+  if (!v) return { ok: false, reason: "variable-missing", chain: walked };
   const collection = variables.meta.variableCollections[v.variableCollectionId];
-  if (!collection) return undefined;
+  if (!collection) return { ok: false, reason: "collection-missing", chain: walked };
 
   // Prefer the named mode; fall back to the collection's default when this
   // collection doesn't name it (every hop past the first, since aliases cross
@@ -1533,14 +1559,67 @@ function resolveVariableLiteral(
   const raw =
     (namedModeId ? v.valuesByMode[namedModeId] : undefined) ??
     v.valuesByMode[collection.defaultModeId];
-  if (raw === undefined) return undefined;
+  if (raw === undefined) return { ok: false, reason: "no-value", chain: walked };
 
   const alias = asVariableAlias(raw);
-  if (alias) return resolveVariableLiteral(alias.id, variables, modeName, seen, depth + 1);
-  return raw;
+  if (alias) return resolveVariableLiteral(alias.id, variables, modeName, seen, depth + 1, walked);
+  return { ok: true, value: raw, chain: walked };
+}
+
+/**
+ * The honest message for a row whose Figma side couldn't be read. Names the
+ * token, what was expected, why the read failed, and states plainly that no
+ * comparison happened — so a reader never mistakes it for a verdict.
+ */
+function describeUnresolvedVariable(
+  res: UnresolvedLiteral,
+  tokenName: string,
+  expected: string,
+  modeName?: string,
+): string {
+  const chain = res.chain.join(" → ");
+  const forMode = modeName ? ` for mode "${modeName}"` : "";
+  let why: string;
+  switch (res.reason) {
+    case "cycle":
+      why = `its alias chain loops back on itself (${chain})`;
+      break;
+    case "depth":
+      why = `its alias chain is more than ${MAX_ALIAS_DEPTH} hops deep (${chain})`;
+      break;
+    case "variable-missing":
+      why =
+        `its alias points at a variable that isn't in this file's local variables (${chain}) — ` +
+        `it likely lives in a library this token can't reach`;
+      break;
+    case "collection-missing":
+      why = `its variable collection is missing from the file's variables response (${chain})`;
+      break;
+    case "no-value":
+      why = `it defines no value${forMode}, nor for its collection's default mode (${chain})`;
+      break;
+    case "wrong-type":
+      why = `its alias chain ends at a value that isn't ${expected} (${chain})`;
+      break;
+  }
+  return (
+    `Figma value unresolved — no comparison was made. The variable "${tokenName}" ` +
+    `could not be resolved to ${expected}: ${why}. "${tokenName}" is a token NAME shown ` +
+    `for context, not a value.`
+  );
 }
 
 /** Narrow a resolved literal to Figma's `{r,g,b,a}` colour shape (floats 0..1). */
+/**
+ * The literal at the end of an alias chain, or `undefined` when the chain
+ * couldn't be walked. Callers that only need the value use this; callers that
+ * need to explain a failure keep the full `LiteralResolution` and hand it to
+ * `describeUnresolvedVariable`.
+ */
+function literalValue(res: LiteralResolution): unknown {
+  return res.ok ? res.value : undefined;
+}
+
 function asFigmaColor(raw: unknown): { r: number; g: number; b: number; a?: number } | undefined {
   if (raw && typeof raw === "object" && "r" in raw && "g" in raw && "b" in raw) {
     return raw as { r: number; g: number; b: number; a?: number };
@@ -1567,7 +1646,7 @@ function resolveColorVariable(
    */
   const findByName = (modeName: string): string | undefined => {
     if (!findModeId(collection, modeName)) return undefined;
-    const color = asFigmaColor(resolveVariableLiteral(variableId, variables, modeName));
+    const color = asFigmaColor(literalValue(resolveVariableLiteral(variableId, variables, modeName)));
     return color ? rgbaToCss(color) : undefined;
   };
 
@@ -1576,7 +1655,9 @@ function resolveColorVariable(
 
   // The "comparison value" is the active mode if known, else the file default.
   const activeStr = activeMode ? findByName(activeMode) : undefined;
-  const defaultColor = asFigmaColor(resolveVariableLiteral(variableId, variables, undefined));
+  const defaultColor = asFigmaColor(
+    literalValue(resolveVariableLiteral(variableId, variables, undefined)),
+  );
   const value = activeStr ?? (defaultColor ? rgbaToCss(defaultColor) : undefined);
   // A variable name is not a colour. Returning one here used to poison the
   // caller's raw-paint fallback and guarantee `drift` on every colour row
@@ -1600,7 +1681,7 @@ function resolveNumericForMode(
   variables: FigmaLocalVariablesResponse,
   activeMode?: string,
 ): number | null {
-  const raw = resolveVariableLiteral(v.id, variables, activeMode);
+  const raw = literalValue(resolveVariableLiteral(v.id, variables, activeMode));
   return typeof raw === "number" ? raw : null;
 }
 
@@ -1610,7 +1691,7 @@ function resolveStringForMode(
   variables: FigmaLocalVariablesResponse,
   activeMode?: string,
 ): string | null {
-  const raw = resolveVariableLiteral(v.id, variables, activeMode);
+  const raw = literalValue(resolveVariableLiteral(v.id, variables, activeMode));
   return typeof raw === "string" ? raw : null;
 }
 

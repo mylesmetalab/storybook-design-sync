@@ -15,7 +15,28 @@ export type DimensionKind =
   | "structure"
   | "motion";
 
-export type DimensionStatus = "match" | "drift" | "flag-only";
+/**
+ * Verdict for one comparison.
+ *
+ * - `match` — both sides carry a concrete value and they agree.
+ * - `drift` — both sides carry a concrete value and they disagree. Only this
+ *   status may render red, offer a fix prompt, or feed an Apply.
+ * - `flag-only` — one side has no opinion (no declared binding, no value).
+ *   Surfaced for awareness; not an accusation.
+ * - `unresolved` — the addon could not produce a comparable value for the
+ *   Figma side at all (e.g. a variable whose alias chain dead-ends), so **no
+ *   comparison happened**. Distinct from `flag-only` because Figma *does* have
+ *   an opinion here — we just couldn't read it — and the row must say what
+ *   couldn't be resolved and why (`note`). Never drift: reporting drift on a
+ *   comparison that never ran is the false positive the honesty invariant
+ *   forbids, and there is no fix to offer for it.
+ *
+ * NOTE: addon-local, not part of the `@metalab/design-sync-core` wire
+ * contract, so extending it doesn't require a core version bump. Consumers
+ * reading a `.design-sync/cache.json` written by an older addon simply never
+ * see `unresolved`.
+ */
+export type DimensionStatus = "match" | "drift" | "flag-only" | "unresolved";
 
 export interface DimensionDiff {
   kind: DimensionKind;

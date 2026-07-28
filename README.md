@@ -43,9 +43,10 @@ for binding writes, REST for variable values).
   `border-*-radius` (×4), `gap`, `border-width`, `border-color`, `color`,
   `font-size`, `font-weight`, `font-family`, `font-style`, `line-height`,
   `letter-spacing`, `text-transform`, `text-decoration-line`, `text-align`,
-  `box-shadow`. Diff dimensions: `token-value`, `token-binding`,
-  `variant-set`, `copy`, `props`. (`structure`, `motion` reserved.)
-  `opacity` is snapshotted but not yet compared.
+  `box-shadow`, `opacity`, and the four layout properties (`flex-direction`,
+  `justify-content`, `align-items`, `flex-wrap` — only where both sides really
+  lay out children). Diff dimensions: `token-value`, `token-binding`,
+  `variant-set`, `copy`, `props`, `structure`. (`motion` reserved.)
 - **No row rather than a wrong row.** Where a faithful comparison isn't
   available, the property is skipped instead of guessed. Documented cases:
   Figma small-caps (an OpenType feature, not a `text-transform`);
@@ -378,6 +379,15 @@ falls back to `.icon-button` when a property isn't redeclared on the variant rul
 Where the CSS lives is configured by `cssEntries` in `design-sync.config.json`
 (default: `["src/**/*.css"]`).
 
+`node_modules` is always ignored. `dist/` and `storybook-static/` are ignored **by
+default only**: an entry that names one of them as a literal path segment
+(`"storybook-static/**/*.css"`) opts in, because explicit configuration beats a
+default. A broad entry that merely reaches build output (`"**/*.css"`) still skips
+it — and logs `[design-sync] NOT SCANNED — …` at startup naming the directory, the
+file count, example paths and the entry that would opt in. Nothing is suppressed
+in silence: a scanner that derived nothing looks exactly like a codebase that
+declares nothing.
+
 `target` is also how you point at **portalled** content and how you resolve an
 ambiguous story root — see [Portalled components](#portalled-components-dialog-popover-tooltip-select).
 
@@ -581,8 +591,37 @@ sanitize(title) + "--" + sanitize(storyNameFromExport(exportName))
 So `title: "Molecules/RowBoolean"` + `export const CheckedTrueStateDefault`
 → `molecules-rowboolean--checked-true-state-default`.
 
-> **Discovery is regex-based.** Files with no detectable `title:` are
-> surfaced as parse warnings rather than silently skipped.
+The id comes from the **export name**. A story's `name: "…"` annotation changes
+only its display name, so `export const WithHeader` is `…--with-header` whether
+or not it is named "With a header".
+
+#### Discovery: autotitle, and what "unreadable" means
+
+Stories are read with the installed Storybook's own machinery — `loadCsf` for
+the exports and `getStoryTitle` for the title — so **CSF3 autotitle** files (no
+`title:` in the meta; the title is derived from the file path) are discovered
+with the title Storybook itself would give them. `storybook` is already a peer
+dependency; nothing extra is installed. Because it is a real CSF parse rather
+than a regex, `excludeStories` is honoured, type-only exports are not counted as
+stories, and CSF factory files (`preview.meta({…})`) are read.
+
+`storyGlobs` are the specifiers used for autotitle derivation, resolved
+**relative to the consumer root** (Storybook's `main.ts` entries are relative to
+`.storybook/`, so keep the two aligned in shape, not in spelling). A
+`titlePrefix` in `main.ts` is not applied — `storyGlobs` is a list of plain
+globs and cannot express one.
+
+If Storybook can't be imported from the CLI, discovery falls back to a local
+implementation of the same title algorithm plus a regex export reader, **and says
+so in its output**. The fallback is unit-tested to produce the same titles as
+`getStoryTitle`.
+
+Any file that matches `storyGlobs` and yields **no story ids** is reported under
+`UNREADABLE`, with the reason, and `audit` exits non-zero. That is deliberate: a
+file the tool cannot read contains stories that nothing registers and nothing
+checks, and a green CI over them is worse than a red one. `.mdx` files are
+reported separately as contributing no story ids (Storybook indexes them as docs
+entries) and do not fail the run.
 
 ### `register` — bulk-register from a hints file
 
@@ -702,8 +741,26 @@ false promise.
 **Compared today.** Background colour · all four paddings · all four corner
 radii · all four border widths and colours · `gap` · text colour · font-size ·
 font-weight · font-family · line-height · letter-spacing · text-align ·
-text-transform · text-decoration · font-style · box-shadow · copy (text
-content) · Figma variant axes · Figma component properties (BOOLEAN, TEXT).
+text-transform · text-decoration · font-style · box-shadow (including
+`INNER_SHADOW` → `inset`) · `opacity` · **layout: `flex-direction`,
+`justify-content`, `align-items`, `flex-wrap`** · copy (text content) · Figma
+variant axes · Figma component properties (BOOLEAN, TEXT).
+
+**Layout (the `structure` dimension).** Figma auto-layout against computed CSS:
+`layoutMode` → `flex-direction`, `primaryAxisAlignItems` → `justify-content`,
+`counterAxisAlignItems` → `align-items`, `layoutWrap` → `flex-wrap`. Only the
+enum values with a clean CSS equivalent are mapped (`MIN`/`CENTER`/`MAX`,
+`SPACE_BETWEEN`, `BASELINE`, `NO_WRAP`/`WRAP`); anything else emits no row.
+
+Every layout comparison is guarded, and the guard is the reason the dimension is
+shown at all: **no row is emitted unless both sides are actually laying out
+children** — Figma's `layoutMode` must be `HORIZONTAL` or `VERTICAL`, and the
+computed `display` must be flex or grid. On a grid container `flex-direction` and
+`flex-wrap` are not compared (they have no effect there). When the two sides'
+primary axes don't correspond — Figma `VERTICAL` against a code `flex-direction:
+row`, or any Figma `VERTICAL` against a grid — the alignment rows are reported as
+`unresolved` with the reason instead of a coincidental match. A property the code
+leaves at its default (`justify-content: normal`) is `flag-only`, never drift.
 
 **Compared only where you declare it.**
 
@@ -724,16 +781,24 @@ content) · Figma variant axes · Figma component properties (BOOLEAN, TEXT).
   cannot take a pseudo-state as an argument, so there is nothing to compare a
   Figma `State=Hover` variant against. Disabled *is* checked, because it is a
   real prop. This is a missing mechanism, not an oversight.
-- **Layout and motion.** The `structure` (auto-layout direction, alignment,
-  wrap) and `motion` dimensions exist in the engine but are hidden, because
-  they are not yet honest enough to show.
+- **Motion.** The `motion` dimension exists in the engine but is hidden, because
+  it is not yet honest enough to show. (`structure` was in this list until
+  v0.0.39 and is now compared — see the layout paragraph above.)
+- **Figma's grid auto-layout** (`layoutMode: "GRID"`). No `flex-direction`
+  equivalent, and Figma's track definitions have no counterpart in the four
+  layout properties compared; the whole layout comparison is skipped for such a
+  node rather than half-run.
+- **Layout properties beyond those four.** `counterAxisAlignContent` →
+  `align-content` (CSS has six values to Figma's two), `itemReverseZIndex` (paint
+  order only), and `clipsContent` → `overflow`.
 - **Breakpoints.** Figma breakpoint variants versus CSS media queries: no
   mechanism.
 - **Anything Figma does not express as a bound variable on a supported
-  property.** `strokeAlign`, hug/fill sizing, blend modes, gradient and image
-  fills, second and subsequent fills, `textAlignVertical`, paragraph spacing,
-  `INSTANCE_SWAP` properties. Only `fills[0]` is read, and only when SOLID —
-  so an image-backed variant is uncheckable on that property.
+  property.** `strokeAlign`, hug/fill sizing (`layoutSizing*`, `layoutGrow`,
+  `layoutAlign`), blend modes, gradient and image fills, second and subsequent
+  fills, `textAlignVertical`, paragraph spacing, `INSTANCE_SWAP` properties. Only
+  `fills[0]` is read, and only when SOLID — so an image-backed variant is
+  uncheckable on that property.
 - **Accessibility.** Contrast is not a drift concern: both sides can agree
   perfectly on a pairing that fails WCAG. The sibling
   `storybook-design-inspector` addon grades contrast per element and across
@@ -741,6 +806,14 @@ content) · Figma variant axes · Figma component properties (BOOLEAN, TEXT).
 
 **Known fragilities.**
 
+- **Story discovery is only as complete as `storyGlobs`.** CSF3 **autotitle**
+  files are discovered since v0.0.39, using the installed Storybook's own title
+  derivation ([details](#discovery-autotitle-and-what-unreadable-means)) — before
+  that they were undercounted, which made a registry look complete over stories
+  nothing checked. Two residual limits: a `titlePrefix` in your Storybook
+  `main.ts` is not applied (`storyGlobs` cannot express one), and a story file
+  living outside every configured glob's directory has no derivable title. Both
+  are reported per file, and an unreadable file fails `audit`.
 - **Token-name matching is heuristic** unless
   [`tokenAliases`](#tokenaliases--when-figma-and-your-theme-name-the-same-token-differently)
   is configured. A name divergence whose value matches is reported as an
@@ -749,6 +822,15 @@ content) · Figma variant axes · Figma component properties (BOOLEAN, TEXT).
 - **No headless check.** Drift checking runs in the panel over the Storybook
   channel. `design-sync audit` gates the *registry* in CI; CI cannot yet gate
   on drift itself.
+- **Upgrading invalidates the drift cache.** `.design-sync/cache.json` carries a
+  schema version, bumped whenever a release changes what a report contains or
+  what its verdicts mean (v0.0.39 added the layout and opacity comparisons). The
+  first check after an upgrade re-fetches rather than replaying a report that
+  predates the new rows.
+- **A stale preview bundle silently narrows coverage.** The layout comparison
+  needs computed `display` in the snapshot, which older preview bundles don't
+  send; without it the comparison emits nothing rather than guessing. Restart the
+  consumer's Storybook after upgrading the addon.
 - **Storybook 10 only.** The preset uses SB10 APIs; 8 and 9 are unsupported.
 - **Tailwind bindings need Tailwind v4's CSS-first `@theme`.** A v3
   `tailwind.config.js` scale is not evaluated. Utilities resolving against

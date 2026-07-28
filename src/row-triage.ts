@@ -10,11 +10,20 @@ import type {
  * the honesty contract (Phase 2: "no Apply button on a row the engine can't
  * honor") is unit-testable outside React.
  *
- * `partitionRow` decides main-table vs collapsed-informational; `explainInfo`
- * produces the per-row advisory for informational rows. P2.2/P2.3 upgraded
- * the props / variant-set advisories from a generic "no engine yet" line to
- * specific, data-driven guidance naming exactly what drifted and what to do
- * on each side.
+ * `classifyRow` says what kind of finding a row is (and drives table order);
+ * `applyEngineCanAct` gates Apply buttons only; `explainInfo` produces the
+ * per-row advisory. P2.2/P2.3 upgraded the props / variant-set advisories from
+ * a generic "no engine yet" line to specific, data-driven guidance naming
+ * exactly what drifted and what to do on each side.
+ *
+ * v0.0.37 deleted the old `partitionRow` — the split that decided *where a row
+ * appeared* from whether a write engine could apply it. In `apply: "off"` (the
+ * shipped default, and v1's only supported mode) no row has a write path, so a
+ * collapsed section headed "the addon has no automated apply path for these"
+ * was false about its own contents and implied the rows above it did have one.
+ * It also buried the single most important finding a designer can hand us — a
+ * Figma value detached from its variable — under trivial matches. Rows are now
+ * ordered by what the finding *is*; write capability only gates buttons.
  */
 
 export type GroupedRow =
@@ -320,36 +329,140 @@ export function tokenRowFixability(
 }
 
 /**
- * Decide whether a grouped row belongs in the main action table or the
- * collapsed informational section. A row is "informational" when there
- * is drift but the addon's Apply path can't act on it — either because
- * the dimension kind has no engine, or because the row's data can't be
- * turned into a valid Edit. Matches always stay in the main section —
- * they're confirmation, not a problem.
+ * Whether the addon's **write engines** could act on this row.
  *
- * Invariant (P2.2): `props` and `variant-set` drift ALWAYS partitions to
- * "info" — there is no engine that can honor an Apply for them, so no
- * Apply button may ever render. Enforced by test.
+ * This is the old `partitionRow` predicate, unchanged in behaviour and renamed
+ * to what it actually decides. Its only remaining job is to keep an Apply
+ * button off a drifted row no engine could honor (only reachable at all under
+ * `apply: "experimental"`). It must NEVER decide where a row appears or how
+ * prominent it is — that was the false partition v0.0.37 removed.
+ *
+ * Invariant (P2.2): `props` and `variant-set` drift ALWAYS answers `false` —
+ * there is no engine that can honor an Apply for them, so no Apply button may
+ * ever render. Enforced by test.
+ *
+ * Matches answer `true` because there is nothing to refuse; that is the
+ * pre-existing behaviour and is preserved deliberately.
  */
-export function partitionRow(row: GroupedRow): "main" | "info" {
+export function applyEngineCanAct(row: GroupedRow): boolean {
   if (row.kind === "token") {
     const valueDrifted = row.value?.status === "drift";
     const bindingDrifted = row.binding?.status === "drift";
-    if (!valueDrifted && !bindingDrifted) return "main";
+    if (!valueDrifted && !bindingDrifted) return true;
     const { bindingFixable, valueFixable } = tokenRowFixability(row.value, row.binding);
-    return bindingFixable || valueFixable ? "main" : "info";
+    return bindingFixable || valueFixable;
   }
-  // `other`-kind diffs (copy, props, variant-set, structure, motion):
-  // most are informational. The exception is `copy`, which has a real
-  // engine pair (code-tsx-text + the plugin's characters write) when both
-  // sides carry concrete strings. Matches always stay in the main section.
-  if (row.diff.status !== "drift") return "main";
+  // `other`-kind diffs (copy, props, variant-set, structure, motion): no
+  // engine, with one exception — `copy` has a real engine pair (code-tsx-text
+  // + the plugin's characters write) when both sides carry concrete strings.
+  if (row.diff.status !== "drift") return true;
   if (row.diff.kind === "copy") {
     const codeFlat = flattenDualModeValue(row.diff.codeValue);
     const figmaFlat = flattenDualModeValue(row.diff.figmaValue);
-    return codeFlat !== null && figmaFlat !== null ? "main" : "info";
+    return codeFlat !== null && figmaFlat !== null;
   }
-  return "info";
+  return false;
+}
+
+/* ------------------------------------------------------------------------- *
+ * what kind of finding a row is (drives table order + row labelling)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * What a row actually found. This is the honest classification the panel
+ * presents, and it replaces the deleted fixability partition.
+ *
+ * - `unbound-figma-value` — drift where Figma's side is a **literal with no
+ *   variable behind it**. A designer detaching a property from its variable is
+ *   a design-system violation and one of the most significant things this tool
+ *   can detect; it used to be *demoted* (no token name → "unfixable") which
+ *   inverted its importance. First-class, top of the table, and its fix routes
+ *   to Figma — never to a hardcoded literal or a re-tuned theme token.
+ * - `value-drift` — drift with a named property and a concrete expected value.
+ *   Mechanical: paste the fix prompt and go.
+ * - `judgement` — the two models disagree structurally and a human has to
+ *   decide which side is wrong: `props` / `variant-set` advisories, a `copy`
+ *   row whose code side is dynamic, and drift where Figma has **no** value for
+ *   a property the code declares.
+ * - `no-drift` — match, `flag-only`, or `unresolved`. Confirmation or setup,
+ *   not a problem.
+ */
+export type RowFinding = "unbound-figma-value" | "value-drift" | "judgement" | "no-drift";
+
+export function classifyRow(row: GroupedRow): RowFinding {
+  if (row.kind === "token") {
+    // `rowHasDrift` is value-drift only (a binding-name difference whose value
+    // matches is not a defect), so a row that isn't drifted is `no-drift` even
+    // when its binding names differ.
+    if (!rowHasDrift(row)) return "no-drift";
+    const value = row.value;
+    if (!value) return "no-drift";
+    if (value.tokenName !== undefined && value.tokenName !== null && value.tokenName !== "") {
+      return "value-drift";
+    }
+    // No token name behind Figma's side. Two very different situations:
+    //  - Figma HAS a value → it was typed in / detached from its variable.
+    //  - Figma has NO value → the design says nothing about a property the
+    //    code declares, which is a structural disagreement, not a detached
+    //    token. Routing that to "re-bind it in Figma" would be wrong.
+    return hasCellValue(value.figmaValue) ? "unbound-figma-value" : "judgement";
+  }
+  const d = row.diff;
+  if (d.status !== "drift") return "no-drift";
+  if (d.kind === "copy") {
+    const codeFlat = flattenDualModeValue(d.codeValue);
+    const figmaFlat = flattenDualModeValue(d.figmaValue);
+    return codeFlat !== null && figmaFlat !== null ? "value-drift" : "judgement";
+  }
+  // props / variant-set / structure / motion.
+  return "judgement";
+}
+
+/**
+ * Sort rank for the single drift table. Lower sorts higher:
+ *
+ *   0  unbound Figma value — a detached token, the most significant finding
+ *   1  value drift — mechanical, one prompt away from fixed
+ *   2  needs a judgement call — structural disagreement, no mechanical fix
+ *   3  no drift, but something is unset or unreadable (`flag-only` /
+ *      `unresolved`) — worth seeing before a wall of matches
+ *   4  no drift, everything agreed
+ *
+ * Drift at the top, matches at the bottom, and nothing hidden.
+ */
+export function rowRank(row: GroupedRow): number {
+  const finding = classifyRow(row);
+  if (finding === "unbound-figma-value") return 0;
+  if (finding === "value-drift") return 1;
+  if (finding === "judgement") return 2;
+  const statuses =
+    row.kind === "token"
+      ? [row.value?.status, row.binding?.status]
+      : [row.diff.status];
+  return statuses.some((s) => s === "flag-only" || s === "unresolved") ? 3 : 4;
+}
+
+/**
+ * Order rows for display: by finding, then by their original order (stable), so
+ * within a rank the engine's / registry's ordering is preserved exactly. Never
+ * drops or merges a row — the input length is the output length.
+ */
+export function sortRowsByFinding(rows: readonly GroupedRow[]): GroupedRow[] {
+  return rows
+    .map((row, i) => ({ row, i, rank: rowRank(row) }))
+    .sort((a, b) => (a.rank === b.rank ? a.i - b.i : a.rank - b.rank))
+    .map((entry) => entry.row);
+}
+
+/**
+ * Whether a row carries an advisory (a sentence about why there is no
+ * mechanical fix, or what actually happened in Figma). True exactly for the two
+ * findings whose next step is not "paste the prompt": `judgement` and
+ * `unbound-figma-value`.
+ */
+export function rowHasAdvisory(row: GroupedRow): boolean {
+  const finding = classifyRow(row);
+  return finding === "judgement" || finding === "unbound-figma-value";
 }
 
 /** Format a `{Prop: Value}` map or array as a compact `[a=b, c]` list. */
@@ -472,16 +585,37 @@ export function unresolvedChildBindings(
 }
 
 /**
- * Per-row reason the row landed in the informational section, with concrete
- * next steps. Each branch points at the actual blocker so the user knows
+ * Per-row advisory: what this row means and what the concrete next step is.
+ * Shown on every `judgement` and `unbound-figma-value` row (see
+ * `rowHasAdvisory`). Each branch points at the actual blocker so the user knows
  * what to change — never a generic "no engine" shrug (P2.3).
+ *
+ * Every branch below other than the two token-value ones is byte-identical to
+ * the text this function has always produced; removing the fixability partition
+ * was a presentation change, not a truthfulness change.
  */
 export function explainInfo(row: GroupedRow): string {
   if (row.kind === "token") {
     const valueDrift = row.value?.status === "drift";
     const bindingDrift = row.binding?.status === "drift";
     if (valueDrift && row.value?.tokenName == null) {
-      return "Value drift, but Figma's side doesn't resolve to a named token — there's no token to promote the code literal to.";
+      // Figma has a value but nothing named behind it: the property was
+      // detached from its variable (or typed in directly). Say what happened —
+      // the old wording ("no token to promote the code literal to") described
+      // the addon's inconvenience, not the design-system violation, and read as
+      // a demotion of the row.
+      if (hasCellValue(row.value?.figmaValue)) {
+        return (
+          `Figma's value here is NOT bound to a variable — it is a literal in the design, so there is no token to point at. ` +
+          `Fix it in Figma by binding this property to the variable it should use, then re-run the check. ` +
+          `Do not hardcode Figma's literal in code and do not retune a theme token to match it: either would bake a detached value into the codebase and hide the violation.`
+        );
+      }
+      // Figma has no value at all for a property the code declares.
+      return (
+        `The code declares this property but Figma's node has no value for it, so there is nothing to match it against. ` +
+        `Decide which side is right: drop the declaration in code, or specify the property in Figma (bound to a variable) and re-run the check.`
+      );
     }
     if (bindingDrift) {
       return "Wiring drift, but the scanner couldn't find a clean var(--token) binding on the code side. Convert the inline value to `\"var(--token)\"` (or the equivalent CSS) so the engine has something to rewrite.";

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  partitionRow,
+  applyEngineCanAct,
+  classifyRow,
+  rowRank,
+  sortRowsByFinding,
+  rowHasAdvisory,
   explainInfo,
   applyControlsEnabled,
   rowHasDrift,
@@ -25,45 +29,192 @@ function other(diff: Partial<DimensionDiff> & Pick<DimensionDiff, "kind">): Grou
   };
 }
 
-describe("partitionRow — the Phase-2 honesty invariant", () => {
-  it("props drift NEVER partitions to main (no Apply button possible)", () => {
-    expect(
-      partitionRow(other({ kind: "props", property: "Size", figmaValue: "Large" })),
-    ).toBe("info");
+/**
+ * `applyEngineCanAct` is the old `partitionRow`, renamed to what it actually
+ * decides. Its verdicts are unchanged — the Phase-2 honesty invariant ("no Apply
+ * button on a row the engine can't honor") is the same assertion — but it no
+ * longer has any say in where a row appears. See `classifyRow` below for that.
+ */
+describe("applyEngineCanAct — the Phase-2 honesty invariant (Apply buttons only)", () => {
+  it("props drift NEVER gets an Apply button", () => {
+    expect(applyEngineCanAct(other({ kind: "props", property: "Size", figmaValue: "Large" }))).toBe(
+      false,
+    );
   });
 
-  it("variant-set drift NEVER partitions to main", () => {
+  it("variant-set drift NEVER gets an Apply button", () => {
     expect(
-      partitionRow(
+      applyEngineCanAct(
         other({ kind: "variant-set", property: "active-variant", codeValue: ["primary"], figmaValue: { State: "Hover" } }),
       ),
-    ).toBe("info");
+    ).toBe(false);
     expect(
-      partitionRow(
+      applyEngineCanAct(
         other({ kind: "variant-set", property: "variant-options", codeValue: ["ghost"], figmaValue: ["primary", "accent"] }),
       ),
-    ).toBe("info");
+    ).toBe(false);
   });
 
-  it("structure/motion drift partitions to info", () => {
-    expect(partitionRow(other({ kind: "structure", property: "layout" }))).toBe("info");
-    expect(partitionRow(other({ kind: "motion", property: "transition" }))).toBe("info");
+  it("structure/motion drift has no engine", () => {
+    expect(applyEngineCanAct(other({ kind: "structure", property: "layout" }))).toBe(false);
+    expect(applyEngineCanAct(other({ kind: "motion", property: "transition" }))).toBe(false);
   });
 
-  it("copy drift with both concrete strings partitions to main (real engine)", () => {
+  it("copy drift with both concrete strings does have an engine", () => {
     expect(
-      partitionRow(other({ kind: "copy", property: "text", codeValue: "A", figmaValue: "B" })),
-    ).toBe("main");
+      applyEngineCanAct(other({ kind: "copy", property: "text", codeValue: "A", figmaValue: "B" })),
+    ).toBe(true);
   });
 
-  it("copy drift with a dynamic (null) side partitions to info", () => {
+  it("copy drift with a dynamic (null) side has no engine", () => {
     expect(
-      partitionRow(other({ kind: "copy", property: "text", codeValue: null, figmaValue: "B" })),
-    ).toBe("info");
+      applyEngineCanAct(other({ kind: "copy", property: "text", codeValue: null, figmaValue: "B" })),
+    ).toBe(false);
   });
 
-  it("matches stay in main regardless of kind", () => {
-    expect(partitionRow(other({ kind: "props", property: "Size", status: "match" }))).toBe("main");
+  it("matches answer true regardless of kind — there is nothing to refuse", () => {
+    expect(applyEngineCanAct(other({ kind: "props", property: "Size", status: "match" }))).toBe(
+      true,
+    );
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * classification + ordering (replaces the deleted fixability partition)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Overrides may set a field to `undefined` explicitly — that is exactly how the
+ * engine hands us a row with no `tokenName` — so the helper takes a laxer type
+ * than `Partial<DimensionDiff>` under `exactOptionalPropertyTypes`.
+ */
+type DiffOverride = { [K in keyof DimensionDiff]?: DimensionDiff[K] | undefined };
+
+const valueDiff = (over: DiffOverride = {}): DimensionDiff =>
+  ({
+    kind: "token-value",
+    property: "padding-top",
+    codeValue: "6px",
+    figmaValue: "12px (token: Space/150)",
+    status: "drift",
+    tokenName: "Space/150",
+    ...over,
+  }) as DimensionDiff;
+
+const tokenRowOf = (diff: DimensionDiff): GroupedRow => ({
+  kind: "token",
+  property: diff.property,
+  value: diff,
+});
+
+describe("classifyRow — what the finding IS, not whether a write engine likes it", () => {
+  it("value drift backed by a named token is mechanical", () => {
+    expect(classifyRow(tokenRowOf(valueDiff()))).toBe("value-drift");
+  });
+
+  it("drift where Figma's value has no variable behind it is its own first-class state", () => {
+    // The live case: a designer detached the property from its variable and typed
+    // a literal. Used to be demoted to the collapsed section for lack of a token
+    // name — the single most significant finding, buried under matches.
+    const row = tokenRowOf(
+      valueDiff({ property: "border-top-left-radius", figmaValue: "12px", tokenName: undefined }),
+    );
+    expect(classifyRow(row)).toBe("unbound-figma-value");
+    expect(rowRank(row)).toBe(0);
+  });
+
+  it("drift where Figma has NO value is a judgement call, not a detached token", () => {
+    // Code declares a border Figma doesn't have. Routing this to "re-bind it in
+    // Figma" would be wrong — there is nothing there to re-bind.
+    const row = tokenRowOf(
+      valueDiff({ property: "border-width", figmaValue: null, tokenName: undefined }),
+    );
+    expect(classifyRow(row)).toBe("judgement");
+  });
+
+  it("props / variant-set / structure / motion drift are judgement calls", () => {
+    for (const kind of ["props", "variant-set", "structure", "motion"] as const) {
+      expect(classifyRow(other({ kind, property: "x" })), kind).toBe("judgement");
+    }
+  });
+
+  it("copy drift is mechanical with two concrete strings, a judgement call otherwise", () => {
+    expect(classifyRow(other({ kind: "copy", codeValue: "A", figmaValue: "B" }))).toBe(
+      "value-drift",
+    );
+    expect(classifyRow(other({ kind: "copy", codeValue: null, figmaValue: "B" }))).toBe("judgement");
+  });
+
+  it("matches, flag-only and unresolved are all no-drift", () => {
+    for (const status of ["match", "flag-only", "unresolved"] as const) {
+      expect(classifyRow(tokenRowOf(valueDiff({ status }))), status).toBe("no-drift");
+      expect(classifyRow(other({ kind: "props", status })), status).toBe("no-drift");
+    }
+  });
+
+  it("a binding-name difference whose value matches is not a finding", () => {
+    expect(
+      classifyRow({
+        kind: "token",
+        property: "background-color",
+        value: valueDiff({ property: "background-color", status: "match" }),
+        binding: {
+          kind: "token-binding",
+          property: "background-color",
+          codeValue: "primary",
+          figmaValue: "color/background/brand/default",
+          status: "drift",
+        },
+      }),
+    ).toBe("no-drift");
+  });
+});
+
+describe("rowRank / sortRowsByFinding — drift at the top, matches below, nothing hidden", () => {
+  const unbound = tokenRowOf(valueDiff({ property: "border-color", figmaValue: "#ddd", tokenName: undefined }));
+  const drift = tokenRowOf(valueDiff({ property: "padding-top" }));
+  const judgement = other({ kind: "props", property: "Size", figmaValue: "Large" });
+  const unset = tokenRowOf(valueDiff({ property: "gap", status: "flag-only" }));
+  const match = tokenRowOf(valueDiff({ property: "font-size", status: "match" }));
+
+  it("ranks unbound Figma values above value drift, judgement calls, unset and matches", () => {
+    expect([unbound, drift, judgement, unset, match].map(rowRank)).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it("sorts a shuffled report into that order", () => {
+    const sorted = sortRowsByFinding([match, judgement, unset, drift, unbound]);
+    expect(sorted).toEqual([unbound, drift, judgement, unset, match]);
+  });
+
+  it("drops nothing — every input row comes back exactly once", () => {
+    const input = [match, judgement, unset, drift, unbound];
+    const sorted = sortRowsByFinding(input);
+    expect(sorted).toHaveLength(input.length);
+    for (const row of input) expect(sorted.filter((r) => r === row)).toHaveLength(1);
+  });
+
+  it("is stable within a rank — the engine's row order survives", () => {
+    const a = tokenRowOf(valueDiff({ property: "padding-top" }));
+    const b = tokenRowOf(valueDiff({ property: "padding-right" }));
+    const c = tokenRowOf(valueDiff({ property: "padding-bottom" }));
+    expect(sortRowsByFinding([a, b, c])).toEqual([a, b, c]);
+    expect(sortRowsByFinding([c, a, b])).toEqual([c, a, b]);
+  });
+});
+
+describe("rowHasAdvisory — only rows whose next step isn't 'paste the prompt'", () => {
+  it("is true for judgement calls and unbound Figma values", () => {
+    expect(rowHasAdvisory(other({ kind: "props", property: "Size", figmaValue: "Large" }))).toBe(
+      true,
+    );
+    expect(
+      rowHasAdvisory(tokenRowOf(valueDiff({ figmaValue: "12px", tokenName: undefined }))),
+    ).toBe(true);
+  });
+
+  it("is false for mechanical drift and for matches", () => {
+    expect(rowHasAdvisory(tokenRowOf(valueDiff()))).toBe(false);
+    expect(rowHasAdvisory(tokenRowOf(valueDiff({ status: "match" })))).toBe(false);
   });
 });
 
@@ -79,14 +230,16 @@ describe("applyControlsEnabled — v1 audit-only write gating", () => {
     expect(applyControlsEnabled("")).toBe(false);
   });
 
-  it("the honesty invariant survives experimental mode: props/variant-set still partition to info", () => {
+  it("the honesty invariant survives experimental mode: props/variant-set still get no Apply", () => {
     // Even with writes enabled, rows without an engine must never show an
     // Apply button — gating widens what CAN render, never what's honest.
     expect(applyControlsEnabled("experimental")).toBe(true);
-    expect(partitionRow(other({ kind: "props", property: "Size", figmaValue: "Large" }))).toBe("info");
+    expect(applyEngineCanAct(other({ kind: "props", property: "Size", figmaValue: "Large" }))).toBe(
+      false,
+    );
     expect(
-      partitionRow(other({ kind: "variant-set", property: "active-variant", codeValue: ["a"], figmaValue: { S: "H" } })),
-    ).toBe("info");
+      applyEngineCanAct(other({ kind: "variant-set", property: "active-variant", codeValue: ["a"], figmaValue: { S: "H" } })),
+    ).toBe(false);
   });
 });
 
@@ -295,6 +448,104 @@ describe("explainInfo — advisories are specific, actionable, never generic (P2
     expect(msg).toMatch(/args/);
     expect(msg).toMatch(/deferred/i);
     expect(msg).toMatch(/no unambiguous write target/i);
+  });
+});
+
+/**
+ * Removing the fixability partition was a *presentation* change. These pin the
+ * advisory text byte-for-byte against what the collapsed section used to show,
+ * so a row moving into the main table can never quietly lose or soften the
+ * sentence that told the user what to do.
+ */
+describe("explainInfo — advisory text is byte-identical to the pre-v0.0.37 wording", () => {
+  it("props", () => {
+    expect(explainInfo(other({ kind: "props", property: "Size", figmaValue: "Large" }))).toBe(
+      "Figma variant sets Size=Large, but the story args carry no matching value. " +
+        "Fix code-side by setting the matching value in the story's `args`, or re-register the story against the variant node that matches the current args. " +
+        "Prop-default auto-writes are deferred: this diff has no unambiguous write target (arg? registry binding? Figma default?) — guessing would violate the honesty contract.",
+    );
+  });
+
+  it("variant-set variant-options", () => {
+    expect(
+      explainInfo(
+        other({
+          kind: "variant-set",
+          property: "variant-options",
+          codeValue: ["ghost"],
+          figmaValue: ["primary", "accent"],
+        }),
+      ),
+    ).toBe(
+      "Code declares variant class(es) [ghost] not in the Figma component set's options [primary, accent]. " +
+        "Fix Figma-side by adding the option to the variant property, or code-side by renaming/removing the modifier class. " +
+        "No auto-apply: which side is wrong isn't inferable from the diff.",
+    );
+  });
+
+  it("copy with a dynamic code side", () => {
+    expect(
+      explainInfo(other({ kind: "copy", property: "text", codeValue: null, figmaValue: "Save" })),
+    ).toBe(
+      'Code renders no static text matching "Save". The component likely uses a dynamic child (e.g. `{label}`) — copy auto-apply can only rewrite literal JSX text.',
+    );
+  });
+
+  it("copy with an empty Figma side", () => {
+    expect(
+      explainInfo(other({ kind: "copy", property: "text", codeValue: "Save", figmaValue: null })),
+    ).toBe(
+      "Figma's matching TEXT node is empty or missing — nothing to compare against, fix manually.",
+    );
+  });
+
+  it("structure / motion", () => {
+    expect(explainInfo(other({ kind: "structure", property: "layout" }))).toBe(
+      "`structure` dimension is reserved for a future engine — surfaced for awareness only.",
+    );
+    expect(explainInfo(other({ kind: "motion", property: "transition" }))).toBe(
+      "`motion` dimension is reserved for a future engine — surfaced for awareness only.",
+    );
+  });
+
+  it("token binding drift", () => {
+    expect(
+      explainInfo({
+        kind: "token",
+        property: "gap",
+        binding: {
+          kind: "token-binding",
+          property: "gap",
+          codeValue: null,
+          figmaValue: "Space/200",
+          status: "drift",
+        },
+      }),
+    ).toBe(
+      "Wiring drift, but the scanner couldn't find a clean var(--token) binding on the code side. Convert the inline value to `\"var(--token)\"` (or the equivalent CSS) so the engine has something to rewrite.",
+    );
+  });
+});
+
+describe("explainInfo — the unbound-Figma-value advisory says what actually happened", () => {
+  it("names the detachment and routes the fix to Figma", () => {
+    const msg = explainInfo(
+      tokenRowOf(valueDiff({ property: "border-color", figmaValue: "#ddd", tokenName: undefined })),
+    );
+    expect(msg).toMatch(/NOT bound to a variable/);
+    expect(msg).toMatch(/Fix it in Figma/);
+    expect(msg).toMatch(/Do not hardcode/);
+    expect(msg).toMatch(/do not retune a theme token/);
+    // The old wording described the addon's inconvenience, not the violation.
+    expect(msg).not.toMatch(/no token to promote the code literal to/);
+  });
+
+  it("says something different when Figma simply has no value for the property", () => {
+    const msg = explainInfo(
+      tokenRowOf(valueDiff({ property: "border-width", figmaValue: null, tokenName: undefined })),
+    );
+    expect(msg).toMatch(/Figma's node has no value for it/);
+    expect(msg).not.toMatch(/NOT bound to a variable/);
   });
 });
 

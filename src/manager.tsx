@@ -921,6 +921,7 @@ const STATUS_LABEL: Record<DimensionDiff["status"], string> = {
   match: "match",
   drift: "drift",
   "flag-only": "needs setup",
+  unresolved: "unresolved",
 };
 
 const StatusPill: React.FC<{ status: DimensionDiff["status"] | undefined; title: string | undefined }> = ({ status, title }) => {
@@ -1780,6 +1781,10 @@ function statusStyle(status: DimensionDiff["status"]): React.CSSProperties {
       return { color: "#b91c1c", fontWeight: 600 };
     case "flag-only":
       return { color: "#7a7a7a" };
+    // Not a verdict: the Figma side couldn't be read, so no comparison
+    // happened. Amber, never red — red would read as "your code is wrong".
+    case "unresolved":
+      return { color: "#92610a", fontWeight: 600 };
   }
 }
 

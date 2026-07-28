@@ -59,6 +59,14 @@ for binding writes, REST for variable values).
   correspondence produces no row, and a disagreement with a component
   *default* (rather than an INSTANCE's actual value) is informational, never
   drift.
+- **Whole-component comparison** via declared child bindings. A story can bind
+  inner elements to their own Figma nodes (`"children": { "[data-slot=header]":
+  "2142:11381" }`), so a composed component's header, body, label and icon are
+  compared too instead of only its root element. Rows are grouped per element,
+  root first. Every binding that can't be compared — selector matched nothing,
+  matched several things, isn't valid CSS, or names an unreachable Figma node —
+  is reported by name with zero rows, so a clean table never implies coverage it
+  doesn't have. See [Child bindings](#child-bindings--checking-the-whole-component-not-just-its-root).
 - **Token-name normalization.** `radius/xl` ≡ `radius-xl` ≡ `--radius-xl`.
   Token-binding comparison doesn't false-flag drift on a naming
   convention difference.
@@ -146,6 +154,77 @@ All fields except `fileKey` are optional:
 To find the right `nodeId`, open the variant in Figma and copy its node-id
 from the URL (`?node-id=37-30` → `"37:30"`). Map to the **specific variant**,
 not the `COMPONENT_SET` parent — variant-level fills/bindings differ.
+
+### Child bindings — checking the whole component, not just its root
+
+A drift check snapshots **one** element per story: the story root. On a Button
+that is nearly the whole component. On a Card, Dialog or form field it is not —
+header padding, nested label typography, icon sizing and body spacing are all
+unchecked, so a clean report means *"the root element matches"*, not *"the
+component matches"*.
+
+Declare the inner elements you want compared, and each one is checked against
+its own Figma node:
+
+```json
+{
+  "fileKey": "YOUR_FIGMA_FILE_KEY",
+  "stories": {
+    "ui-card--default": {
+      "nodeId": "2142:11380",
+      "lastSyncedHash": null,
+      "children": {
+        "[data-slot=header]": "2142:11381",
+        "[data-slot=body]":   "2142:11382"
+      }
+    }
+  }
+}
+```
+
+- Selectors are resolved **inside the story root**, descendants only.
+- Every property that works for the root works for a child (padding, per-corner
+  radii, borders, gap, the full typography set, `box-shadow`, colours, plus
+  `token-binding` and `copy`). `variant-set` and `props` are reported once for
+  the root, where a variant identity actually exists — a child element is not a
+  variant of anything.
+- The panel groups rows per element, root first, each group labelled with the
+  selector and the Figma node's name.
+- `children` is optional. An entry without it behaves exactly as before: no
+  extra requests, no extra rows.
+
+Add bindings from the CLI:
+
+```sh
+npx design-sync register --story ui-card--default \
+  --child "[data-slot=header]=2142:11381" \
+  --child "[data-slot=body]=2142:11382"
+```
+
+**Why declared and not inferred.** Matching code children to Figma children by
+document order or by name would be a heuristic, and a mis-paired element yields
+drift numbers that are real but describe a different element — the worst failure
+mode this addon has. So the pairing is authored once, per component, and
+reviewed like any other committed file. (Suggesting pairings at *registration*
+time, for a human to approve, is possible future work; it is not built.)
+
+**A binding that can't be compared is never silent.** Each of these produces a
+visible, named message in the panel (and in the exported markdown report) with
+**zero** rows for that element, so a green table can't imply coverage it
+doesn't have:
+
+| Situation | What you see |
+| --- | --- |
+| Selector matched nothing | `Not compared — child binding \`…\` on story \`…\` matched no element inside the story root.` Plus a note when the story root itself matches it (child selectors only see descendants). |
+| Selector matched more than one element | `Not compared — … matched N elements …` with the candidate elements listed. The addon never picks the first. |
+| Selector isn't valid CSS | `Not compared — … is not a valid CSS selector (…)` |
+| `children` value isn't a node-id string | `Not compared — … is malformed: …` |
+| Declared Figma node id doesn't exist or isn't readable | `Not compared — Figma node \`…\` could not be read (…)`. The selector resolved; the Figma side did not. |
+| The preview reported no result for a declaration | `Not compared — no snapshot arrived for …` (usually a stale preview bundle; restart Storybook.) |
+
+**Cost.** All bound children are fetched in **one** batched
+`GET /files/:key/nodes?ids=…` request — a 3-child component adds exactly one
+HTTP call, and none at all when the node cache is warm.
 
 Set the Figma Personal Access Token in your environment:
 
@@ -383,6 +462,14 @@ Reports Missing (in code, unregistered), Extra (registered, no matching
 story), and Pending (registered but no Figma binding assigned). Exits
 non-zero when Missing or Extra is non-empty so it composes with CI:
 
+It also validates the **shape** of every entry's `children` map and lists any
+malformed ones (non-object `children`, non-string node ids, empty selectors, an
+empty map), exiting non-zero when it finds one. It explicitly does **not** check
+that a selector resolves or that a node id exists — audit has no DOM and makes no
+Figma calls — and it says so in its output rather than letting a green run imply
+otherwise. Run **Check drift** in Storybook for that; it reports both, per
+binding.
+
 ```yaml
 - name: design-sync audit
   run: npx design-sync audit
@@ -420,6 +507,20 @@ npx design-sync register              # write
 ```
 
 Existing registry entries are never overwritten — `register` only adds.
+
+**Declaring child bindings.** `--child "<selector>=<nodeId>"` (repeatable, and
+scoped to one story with `--story`) adds or updates the entry's `children` map:
+
+```sh
+npx design-sync register --story ui-card--default \
+  --child "[data-slot=header]=2142:11381" \
+  --child "[data-slot=body]=2142:11382"
+```
+
+The split is on the **last** `=`, so an attribute selector needs no escaping.
+The story must already be registered against a real Figma node — a child binding
+needs a parent binding to hang off. `--dry-run` previews without writing.
+`ls` prints declared child bindings nested under their story.
 
 ### Pending stubs
 

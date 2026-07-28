@@ -8,6 +8,17 @@ export interface RegistryEntry {
   /** Set to "pending" when the story is known but its Figma binding is
    *  intentionally absent. Server skips drift checks for these. */
   status?: "pending";
+  /**
+   * Declared child bindings: CSS selector → Figma node id. Selectors are
+   * resolved **within the story root** (descendants only), so a composed
+   * component can have its header, body, label, icon etc. compared against
+   * their own Figma nodes instead of only the root element.
+   *
+   * Absent is the legacy shape and behaves exactly as before — no extra
+   * requests, no extra rows, no messages. See `child-bindings.ts` for the
+   * validation and the honesty rules for bindings that don't resolve.
+   */
+  children?: Record<string, string>;
 }
 
 export interface Registry {

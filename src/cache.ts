@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 import type { DriftReport } from "./dimensions/types.js";
-import type { CodeSnapshot } from "./engines/types.js";
+import type { ChildTarget, CodeSnapshot } from "./engines/types.js";
 
 /**
  * Persistent drift-report cache. Sidecar JSON at `.design-sync/cache.json`
@@ -70,12 +70,17 @@ export class PersistentCache {
    *   - no entry for this storyId
    *   - snapshot hash doesn't match
    */
-  get(storyId: string, fileLastModified: string, snapshot: CodeSnapshot | undefined): DriftReport | null {
+  get(
+    storyId: string,
+    fileLastModified: string,
+    snapshot: CodeSnapshot | undefined,
+    children?: readonly ChildTarget[] | undefined,
+  ): DriftReport | null {
     if (!this.loaded) return null;
     if (!fileLastModified || this.cache.fileLastModified !== fileLastModified) return null;
     const entry = this.cache.stories[storyId];
     if (!entry) return null;
-    const currentHash = hashSnapshot(snapshot);
+    const currentHash = hashSnapshot(snapshot, children);
     if (entry.snapshotHash !== currentHash) return null;
     return entry.report;
   }
@@ -85,12 +90,18 @@ export class PersistentCache {
    * everything else is wiped — the file changed, every story is potentially
    * stale.
    */
-  set(storyId: string, fileLastModified: string, snapshot: CodeSnapshot | undefined, report: DriftReport): void {
+  set(
+    storyId: string,
+    fileLastModified: string,
+    snapshot: CodeSnapshot | undefined,
+    report: DriftReport,
+    children?: readonly ChildTarget[] | undefined,
+  ): void {
     if (this.cache.fileLastModified !== fileLastModified) {
       this.cache = { version: 1, fileLastModified, stories: {} };
     }
     this.cache.stories[storyId] = {
-      snapshotHash: hashSnapshot(snapshot),
+      snapshotHash: hashSnapshot(snapshot, children),
       report,
     };
     this.dirty = true;
@@ -121,9 +132,33 @@ export class PersistentCache {
 /**
  * SHA-1 of the snapshot's stable serialization. Fast enough that we don't
  * mind hashing on every check.
+ *
+ * Declared child bindings participate in the hash: the comparison now covers
+ * child elements too, so a change to a child's computed styles (or to which
+ * selectors are declared, or to which Figma node one points at) MUST invalidate
+ * the cached report — otherwise a re-check would replay a report that describes
+ * a component that no longer exists.
+ *
+ * When there are no children the hash is computed over the bare snapshot exactly
+ * as before, so legacy entries keep hitting their existing cache instead of all
+ * missing once on upgrade.
  */
-function hashSnapshot(snapshot: CodeSnapshot | undefined): string {
+function hashSnapshot(
+  snapshot: CodeSnapshot | undefined,
+  children?: readonly ChildTarget[] | undefined,
+): string {
+  if (children && children.length > 0) {
+    return sha1(stableStringify({ snapshot: snapshot ?? null, children }));
+  }
   if (!snapshot) return "no-snapshot";
+  return sha1(stableStringify(snapshot));
+}
+
+function sha1(value: string): string {
+  return createHash("sha1").update(value).digest("hex");
+}
+
+function stableStringify(input: unknown): string {
   // Recursively sort keys so the serialization is stable regardless of the
   // insertion order the snapshot is built in. We previously passed
   // `Object.keys(snapshot).sort()` as the second arg, but that's an *allowlist*
@@ -131,7 +166,7 @@ function hashSnapshot(snapshot: CodeSnapshot | undefined): string {
   // `bindings`) didn't appear in the allowlist and were silently dropped from
   // the hash. Result: changing tokens didn't bust the cache, and every check
   // reused a stale "no bindings declared" report.
-  const stable = JSON.stringify(snapshot, (_key, value) => {
+  return JSON.stringify(input, (_key, value) => {
     if (value && typeof value === "object" && !Array.isArray(value)) {
       return Object.keys(value)
         .sort()
@@ -142,5 +177,4 @@ function hashSnapshot(snapshot: CodeSnapshot | undefined): string {
     }
     return value;
   });
-  return createHash("sha1").update(stable).digest("hex");
 }

@@ -3,10 +3,19 @@ import { loadRegistry, lookup, isPending } from "./registry.js";
 import { resolveEngine, type Engine, type EngineContext } from "./engines/index.js";
 import {
   EVENTS,
+  type ChildBindingsInfoPayload,
+  type ChildBindingsRequestPayload,
+  type ChildSnapshotEntry,
   type CodeSnapshotPayload,
   type ApplyCodeRequestPayload,
   type ConfigInfoPayload,
 } from "./channels.js";
+import {
+  formatChildProblem,
+  validateChildBindings,
+  type ChildBindingDeclaration,
+} from "./child-bindings.js";
+import type { ChildTarget } from "./engines/types.js";
 import { applyCodeEdit } from "./apply-code.js";
 import type { DimensionDiff, DriftReport } from "./dimensions/types.js";
 import { getAutoScan, getAutoTokenMap } from "./auto-tokens.js";
@@ -89,6 +98,32 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
     }
   });
 
+  /**
+   * The preview asks (before snapshotting) which child elements this story
+   * binds. Only the well-formed declarations go back — malformed ones can't be
+   * resolved against the DOM anyway, and they are reported separately from the
+   * CodeSnapshot handler, which is the one path that always runs.
+   *
+   * Always replies, including with an empty list, so the preview never waits out
+   * its timeout on a legacy story.
+   */
+  channel.on(EVENTS.ChildBindingsRequest, async (payload: unknown) => {
+    const { storyId } = (payload ?? {}) as ChildBindingsRequestPayload;
+    const reply: ChildBindingsInfoPayload = { storyId, children: [] };
+    try {
+      const config = await loadConfig();
+      const registry = await loadRegistry(config.registryPath);
+      const entry = lookup(registry, storyId);
+      if (entry && !isPending(entry)) {
+        reply.children = validateChildBindings(entry.children).declarations;
+      }
+    } catch {
+      // Config/registry failures are reported by the CodeSnapshot handler with
+      // the full message; swallowing here only means "no children to snapshot".
+    }
+    channel.emit(EVENTS.ChildBindingsInfo, reply);
+  });
+
   channel.on(EVENTS.ApplyCodeRequest, async (payload: unknown) => {
     const { edit } = payload as ApplyCodeRequestPayload;
     try {
@@ -104,7 +139,8 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
   });
 
   channel.on(EVENTS.CodeSnapshot, async (payload: unknown) => {
-    const { storyId, snapshot, mode, args, additionalSnapshots, target } = payload as CodeSnapshotPayload;
+    const { storyId, snapshot, mode, args, additionalSnapshots, target, childSnapshots } =
+      payload as CodeSnapshotPayload;
     try {
       // Each snapshot carries its own mode, so each gets its own resolution —
       // a `dark:` class applies in the dark pass and not the light one.
@@ -114,6 +150,7 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
           mergeAutoBindings(storyId, target, extra.snapshot, args, extra.mode);
         }
       }
+      mergeChildAutoBindings(childSnapshots);
       const config = await loadConfig();
       const registry = await loadRegistry(config.registryPath);
       const entry = lookup(registry, storyId);
@@ -165,10 +202,22 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       const baseInput: import("./engines/types.js").CheckDriftInput = {
         storyId,
         nodeRef: { fileKey, nodeId: entry.nodeId! },
+        registryPath: config.registryPath,
       };
       if (snapshot) baseInput.snapshot = snapshot;
       if (mode) baseInput.mode = mode;
       if (args) baseInput.args = args;
+
+      // Declared child bindings. The registry is authoritative here: every
+      // declaration it carries gets a target, even when the preview reported
+      // nothing for it — so a lost or refused child can never turn into silence.
+      const childTargets = buildChildTargets({
+        storyId,
+        registryPath: config.registryPath,
+        declared: entry.children,
+        received: childSnapshots,
+      });
+      if (childTargets.length > 0) baseInput.children = childTargets;
 
       let report: DriftReport;
       if (additionalSnapshots && additionalSnapshots.length > 0) {
@@ -176,7 +225,14 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         const primary = await engine.checkDrift(baseInput);
         reports.push({ mode: mode ?? "primary", report: primary });
         for (const extra of additionalSnapshots) {
-          const extraInput = { ...baseInput, snapshot: extra.snapshot, mode: extra.mode };
+          const extraInput: import("./engines/types.js").CheckDriftInput = {
+            ...baseInput,
+            snapshot: extra.snapshot,
+            mode: extra.mode,
+          };
+          if (childTargets.length > 0) {
+            extraInput.children = childTargetsForMode(childTargets, childSnapshots, extra.mode);
+          }
           reports.push({ mode: extra.mode, report: await engine.checkDrift(extraInput) });
         }
         report = mergeReports(reports);
@@ -199,6 +255,161 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
   });
 
   return channel;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Declared child bindings
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Turn the registry's `children` map plus the preview's per-selector results
+ * into one `ChildTarget` per declaration.
+ *
+ * The registry is the authority on *what was declared*; the preview is only the
+ * authority on *what resolved*. Iterating the registry (not the received list)
+ * is what guarantees requirement 4: a declaration whose selector matched
+ * nothing, matched several things, is invalid CSS, is malformed in the registry,
+ * or that the preview never reported at all, still becomes a target carrying its
+ * reason — so it reaches the panel as a visible row instead of disappearing.
+ */
+export function buildChildTargets(opts: {
+  storyId: string;
+  registryPath: string;
+  declared: Record<string, string> | undefined;
+  received: ChildSnapshotEntry[] | undefined;
+}): ChildTarget[] {
+  const { declarations, malformed, fatal } = validateChildBindings(opts.declared);
+  const targets: ChildTarget[] = [];
+
+  if (fatal) {
+    return [
+      {
+        selector: "children",
+        nodeId: "",
+        problem: {
+          status: "binding-malformed",
+          message: formatChildProblem({
+            status: "binding-malformed",
+            selector: "children",
+            storyId: opts.storyId,
+            registryPath: opts.registryPath,
+            detail: fatal,
+          }),
+        },
+      },
+    ];
+  }
+
+  const bySelector = new Map((opts.received ?? []).map((e) => [e.selector, e]));
+
+  for (const decl of declarations) {
+    const received = bySelector.get(decl.selector);
+    if (!received) {
+      targets.push(problemTarget(decl, "snapshot-missing", opts, undefined));
+      continue;
+    }
+    if (received.kind === "found" && received.snapshot) {
+      targets.push({ selector: decl.selector, nodeId: decl.nodeId, snapshot: received.snapshot });
+      continue;
+    }
+    if (received.kind === "ambiguous") {
+      targets.push(
+        problemTarget(decl, "selector-ambiguous", opts, undefined, received.candidates),
+      );
+      continue;
+    }
+    if (received.kind === "invalid") {
+      targets.push(problemTarget(decl, "selector-invalid", opts, received.detail));
+      continue;
+    }
+    if (received.kind === "not-found") {
+      targets.push(
+        problemTarget(decl, "selector-not-found", opts, undefined, undefined, received.rootMatches),
+      );
+      continue;
+    }
+    // `kind: "found"` with no snapshot — shouldn't happen, but the honest read
+    // is "we have no measurement", not "it matched".
+    targets.push(problemTarget(decl, "snapshot-missing", opts, undefined));
+  }
+
+  for (const m of malformed) {
+    targets.push({
+      selector: m.selector,
+      nodeId: "",
+      problem: {
+        status: "binding-malformed",
+        message: formatChildProblem({
+          status: "binding-malformed",
+          selector: m.selector,
+          storyId: opts.storyId,
+          registryPath: opts.registryPath,
+          detail: m.detail,
+        }),
+      },
+    });
+  }
+
+  return targets;
+}
+
+function problemTarget(
+  decl: ChildBindingDeclaration,
+  status: "snapshot-missing" | "selector-ambiguous" | "selector-invalid" | "selector-not-found",
+  opts: { storyId: string; registryPath: string },
+  detail: string | undefined,
+  candidates?: string[] | undefined,
+  rootMatches?: boolean | undefined,
+): ChildTarget {
+  return {
+    selector: decl.selector,
+    nodeId: decl.nodeId,
+    problem: {
+      status,
+      message: formatChildProblem({
+        status,
+        selector: decl.selector,
+        storyId: opts.storyId,
+        registryPath: opts.registryPath,
+        nodeId: decl.nodeId,
+        detail,
+        candidates,
+        rootMatches,
+      }),
+    },
+  };
+}
+
+/**
+ * Swap each child's snapshot for the one captured in `mode` during a dual-mode
+ * run. A child whose second-mode snapshot is missing becomes
+ * `snapshot-missing` for that pass rather than silently re-using the first
+ * mode's measurement — comparing a light-mode snapshot against dark-mode Figma
+ * values is exactly the kind of real-but-wrong number this addon must not print.
+ */
+export function childTargetsForMode(
+  base: readonly ChildTarget[],
+  received: ChildSnapshotEntry[] | undefined,
+  mode: string,
+): ChildTarget[] {
+  const bySelector = new Map((received ?? []).map((e) => [e.selector, e]));
+  return base.map((target): ChildTarget => {
+    if (!target.snapshot) return target;
+    const extra = bySelector
+      .get(target.selector)
+      ?.additionalSnapshots?.find((s) => s.mode === mode);
+    if (extra) return { ...target, snapshot: extra.snapshot };
+    const { snapshot: _unused, ...rest } = target;
+    return {
+      ...rest,
+      problem: {
+        status: "snapshot-missing",
+        message:
+          `Not compared in mode "${mode}" — the preview captured no snapshot of ` +
+          `\`${target.selector}\` in that mode.`,
+      },
+    };
+  });
 }
 
 /**
@@ -286,14 +497,77 @@ function annotateClassHints(
 ): void {
   if (Object.keys(classes).length === 0) return;
   for (const dim of report.dimensions) {
+    // Root rows only. The hints are resolved from the story's own target
+    // selector / cva component, so pinning one onto a child's row would tell
+    // the user to edit a class that doesn't style that element.
+    if (dim.childSelector !== undefined) continue;
     const cls = classes[dim.property];
     if (cls) dim.codeClassName = cls;
   }
 }
 
 /**
+ * Give each bound child the CSS-scanner bindings registered for *its own*
+ * selector, the same selector-keyed lookup the story root gets.
+ *
+ * Deliberately does NOT run the Tailwind `cva()` resolution: that is keyed by the
+ * story's component name, so its bindings describe the component's root, and
+ * attributing them to a child would put an authoritative-looking token name on
+ * an element it doesn't style.
+ */
+function mergeChildAutoBindings(childSnapshots: ChildSnapshotEntry[] | undefined): void {
+  if (!childSnapshots) return;
+  for (const child of childSnapshots) {
+    if (child.kind !== "found" || !child.snapshot) continue;
+    const bindings = lookupBindings(getAutoTokenMap(), child.selector);
+    if (Object.keys(bindings).length === 0) continue;
+    child.snapshot.bindings = { ...(child.snapshot.bindings ?? {}), ...bindings };
+    for (const extra of child.additionalSnapshots ?? []) {
+      extra.snapshot.bindings = { ...(extra.snapshot.bindings ?? {}), ...bindings };
+    }
+  }
+}
+
+/**
+ * Merge per-mode `children` arrays. Declaration order comes from the first
+ * report (identical across modes — resolution doesn't depend on the theme).
+ * Status is worst-of: a child that failed to compare in *either* mode is
+ * reported as not compared, because "compared" would otherwise claim coverage
+ * for a mode that has none.
+ */
+function mergeChildReports(
+  entries: Array<{ report: DriftReport }>,
+): ChildBindingReportList | undefined {
+  const withChildren = entries.filter((e) => e.report.children);
+  if (withChildren.length === 0) return undefined;
+  const order = withChildren[0]!.report.children!.map((c) => c.selector);
+  const merged: ChildBindingReportList = [];
+  for (const selector of order) {
+    const all = withChildren
+      .map((e) => e.report.children!.find((c) => c.selector === selector))
+      .filter((c): c is NonNullable<typeof c> => c !== undefined);
+    if (all.length === 0) continue;
+    const failed = all.find((c) => c.status !== "compared");
+    const base = failed ?? all[0]!;
+    const out: ChildBindingReportList[number] = {
+      selector,
+      nodeId: base.nodeId,
+      status: base.status,
+      rowCount: Math.max(...all.map((c) => c.rowCount ?? 0)),
+    };
+    const named = all.find((c) => c.nodeName);
+    if (named?.nodeName) out.nodeName = named.nodeName;
+    if (base.message) out.message = base.message;
+    merged.push(out);
+  }
+  return merged;
+}
+
+type ChildBindingReportList = NonNullable<DriftReport["children"]>;
+
+/**
  * Merge per-mode DriftReports into a single report. For each unique
- * (kind, property) pair across all reports:
+ * (kind, property, childSelector) triple across all reports:
  *   - codeValue / figmaValue become {modeName: value} maps
  *   - status is the worst-of (drift > flag-only > match)
  *   - note lists which modes drifted, when applicable
@@ -309,7 +583,10 @@ function mergeReports(entries: Array<{ mode: string; report: DriftReport }>): Dr
   const groups = new Map<string, Array<{ mode: string; dim: DimensionDiff }>>();
   for (const { mode, report } of entries) {
     for (const dim of report.dimensions) {
-      const key = `${dim.kind}|${dim.property}`;
+      // `childSelector` is part of the identity: the root and a bound child both
+      // report `padding-top`, and collapsing them would merge two different
+      // elements' values into one row.
+      const key = `${dim.kind}|${dim.property}|${dim.childSelector ?? ""}`;
       const list = groups.get(key) ?? [];
       list.push({ mode, dim });
       groups.set(key, list);
@@ -345,6 +622,8 @@ function mergeReports(entries: Array<{ mode: string; report: DriftReport }>): Dr
     if (driftedModes.length > 0) {
       out.note = `Drift in: ${driftedModes.join(", ")}`;
     }
+    const childSelector = list[0]!.dim.childSelector;
+    if (childSelector !== undefined) out.childSelector = childSelector;
     merged.push(out);
   }
 
@@ -356,5 +635,7 @@ function mergeReports(entries: Array<{ mode: string; report: DriftReport }>): Dr
     generatedAt: new Date().toISOString(),
     mode: entries.map((e) => e.mode).join("+"),
   };
+  const children = mergeChildReports(entries);
+  if (children) result.children = children;
   return result;
 }

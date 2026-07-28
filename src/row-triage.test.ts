@@ -11,9 +11,12 @@ import {
   modifierClassCandidates,
   variantSetRowApplicable,
   summarizeListCell,
+  groupRowsByElement,
+  rowChildSelector,
+  unresolvedChildBindings,
   type GroupedRow,
 } from "./row-triage.js";
-import type { DimensionDiff } from "./dimensions/types.js";
+import type { ChildBindingReport, DimensionDiff } from "./dimensions/types.js";
 
 function other(diff: Partial<DimensionDiff> & Pick<DimensionDiff, "kind">): GroupedRow {
   return {
@@ -501,5 +504,163 @@ describe("explainInfo — a variant-set row that does appear stays readable", ()
     expect(msg).not.toContain("inline-flex");
     expect(msg).toMatch(/BEM modifier/);
     expect(msg).toMatch(/No auto-apply/);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * per-element grouping (declared child bindings)
+ * ------------------------------------------------------------------------- */
+
+function tokenRow(property: string, childSelector?: string): GroupedRow {
+  const base: DimensionDiff = {
+    kind: "token-value",
+    property,
+    codeValue: "8px",
+    figmaValue: "16px",
+    status: "drift",
+  };
+  return {
+    kind: "token",
+    property,
+    value: childSelector === undefined ? base : { ...base, childSelector },
+  };
+}
+
+const compared = (selector: string, nodeId: string, nodeName?: string): ChildBindingReport => ({
+  selector,
+  nodeId,
+  status: "compared",
+  ...(nodeName ? { nodeName } : {}),
+});
+
+describe("rowChildSelector — which element a row describes", () => {
+  it("returns undefined for a root row", () => {
+    expect(rowChildSelector(tokenRow("padding-top"))).toBeUndefined();
+    expect(rowChildSelector(other({ kind: "copy" }))).toBeUndefined();
+  });
+
+  it("returns the selector for a child row, from either half of a token row", () => {
+    expect(rowChildSelector(tokenRow("padding-top", "[data-slot=header]"))).toBe(
+      "[data-slot=header]",
+    );
+    const bindingOnly: GroupedRow = {
+      kind: "token",
+      property: "padding-top",
+      binding: {
+        kind: "token-binding",
+        property: "padding-top",
+        codeValue: "space-400",
+        figmaValue: "space/400",
+        status: "match",
+        childSelector: "[data-slot=body]",
+      },
+    };
+    expect(rowChildSelector(bindingOnly)).toBe("[data-slot=body]");
+  });
+});
+
+describe("groupRowsByElement — root first, then declared children in order", () => {
+  it("returns a single unlabelled root group for a story with no child bindings", () => {
+    const rows = [tokenRow("padding-top"), tokenRow("gap")];
+    const groups = groupRowsByElement(rows, undefined);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.selector).toBeUndefined();
+    expect(groups[0]!.label).toBe("Story root");
+    // Order within the root group is preserved exactly.
+    expect(groups[0]!.rows).toEqual(rows);
+  });
+
+  it("puts the root group first even when child rows came first in the list", () => {
+    const groups = groupRowsByElement(
+      [tokenRow("padding-top", "[data-slot=header]"), tokenRow("gap")],
+      [compared("[data-slot=header]", "2142:11381")],
+    );
+
+    expect(groups.map((g) => g.selector)).toEqual([undefined, "[data-slot=header]"]);
+  });
+
+  it("follows registry order for the child groups, not row order", () => {
+    const groups = groupRowsByElement(
+      [tokenRow("gap", "[data-slot=body]"), tokenRow("gap", "[data-slot=header]")],
+      [compared("[data-slot=header]", "2142:11381"), compared("[data-slot=body]", "2142:11382")],
+    );
+
+    expect(groups.map((g) => g.selector)).toEqual([
+      undefined,
+      "[data-slot=header]",
+      "[data-slot=body]",
+    ]);
+  });
+
+  it("never mixes a child's rows into the root group", () => {
+    const groups = groupRowsByElement(
+      [tokenRow("padding-top"), tokenRow("padding-top", "[data-slot=header]")],
+      [compared("[data-slot=header]", "2142:11381")],
+    );
+
+    expect(groups[0]!.rows).toHaveLength(1);
+    expect(rowChildSelector(groups[0]!.rows[0]!)).toBeUndefined();
+    expect(groups[1]!.rows).toHaveLength(1);
+    expect(rowChildSelector(groups[1]!.rows[0]!)).toBe("[data-slot=header]");
+  });
+
+  it("labels a child group with the Figma node name when it is known", () => {
+    const groups = groupRowsByElement(
+      [tokenRow("gap", "[data-slot=header]")],
+      [compared("[data-slot=header]", "2142:11381", "Card header")],
+    );
+
+    expect(groups[1]!.label).toBe("[data-slot=header] → Card header");
+    expect(groups[1]!.nodeName).toBe("Card header");
+    expect(groups[1]!.nodeId).toBe("2142:11381");
+  });
+
+  it("falls back to the bare selector when Figma gave no node name", () => {
+    const groups = groupRowsByElement(
+      [tokenRow("gap", "[data-slot=header]")],
+      [compared("[data-slot=header]", "2142:11381")],
+    );
+
+    expect(groups[1]!.label).toBe("[data-slot=header]");
+    expect(groups[1]!.nodeName).toBeUndefined();
+  });
+
+  it("keeps an empty group for a declared child that produced no rows", () => {
+    // The panel filters empty groups out of the table; the *group* still exists
+    // so the caller can tell "declared but silent" from "not declared".
+    const groups = groupRowsByElement([tokenRow("gap")], [
+      { selector: "[data-slot=header]", nodeId: "2142:11381", status: "selector-not-found", message: "…" },
+    ]);
+
+    expect(groups).toHaveLength(2);
+    expect(groups[1]!.rows).toEqual([]);
+  });
+
+  it("still shows rows whose selector has no report entry rather than dropping them", () => {
+    const groups = groupRowsByElement([tokenRow("gap", "[data-slot=orphan]")], []);
+
+    expect(groups.map((g) => g.selector)).toEqual([undefined, "[data-slot=orphan]"]);
+    expect(groups[1]!.rows).toHaveLength(1);
+  });
+});
+
+describe("unresolvedChildBindings", () => {
+  it("is empty for a legacy story and for an all-compared story", () => {
+    expect(unresolvedChildBindings(undefined)).toEqual([]);
+    expect(unresolvedChildBindings([compared("[data-slot=header]", "2142:11381")])).toEqual([]);
+  });
+
+  it("returns every binding that produced no comparison", () => {
+    const children: ChildBindingReport[] = [
+      compared("[data-slot=header]", "2142:11381"),
+      { selector: "[data-slot=body]", nodeId: "2142:11382", status: "selector-ambiguous", message: "…" },
+      { selector: "[data-slot=foot]", nodeId: "2142:11383", status: "node-unreachable", message: "…" },
+    ];
+
+    expect(unresolvedChildBindings(children).map((c) => c.selector)).toEqual([
+      "[data-slot=body]",
+      "[data-slot=foot]",
+    ]);
   });
 });

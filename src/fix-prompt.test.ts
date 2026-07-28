@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildFixPrompt, componentNameFromStoryId } from "./fix-prompt.js";
+import {
+  buildBulkFixPrompt,
+  buildFixPrompt,
+  componentNameFromStoryId,
+  type FixPromptInput,
+} from "./fix-prompt.js";
 
 const base = {
   storyId: "atoms-iconbutton--accent",
@@ -129,5 +134,305 @@ describe("buildFixPrompt — Tailwind class attribution", () => {
     const p = buildFixPrompt({ ...base, tokenName: "size/radius/200" });
     expect(p).toMatch(/set `border-top-left-radius: var\(--size-radius-200\)`/);
     expect(p).not.toMatch(/utility class/i);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * item 2 — a lone per-row prompt must carry its siblings
+ * ------------------------------------------------------------------------- */
+
+const padding = (property: string, over: Partial<FixPromptInput> = {}): FixPromptInput => ({
+  storyId: "ui-card--default",
+  kind: "token-value",
+  property,
+  codeValue: property === "padding-top" ? "6px" : "12px",
+  figmaValue: "12px (token: Space/150)",
+  tokenName: "Space/150",
+  selector: ".card",
+  ...over,
+});
+
+/**
+ * The live failure: four drifted paddings, one prompt handed over, and a
+ * component that came back 6px/12px/12px/12px. The sibling information has to
+ * travel INSIDE the prompt — it must survive being pasted into a session with no
+ * other context, so nothing may depend on a skill re-checking.
+ */
+describe("buildFixPrompt — sibling context (item 2)", () => {
+  const withSiblings = padding("padding-top", {
+    siblingProperties: ["padding-right", "padding-bottom", "padding-left"],
+  });
+
+  it("names the siblings, the shared expected value, and the 'one design change' framing", () => {
+    const p = buildFixPrompt(withSiblings);
+    expect(p).toContain(
+      "`padding-right`, `padding-bottom` and `padding-left` have also drifted to `Space/150`.",
+    );
+    expect(p).toMatch(/These are one design change — fix them together, or state why you are fixing only this one\./);
+  });
+
+  it("instructs the agent to change them in the same edit", () => {
+    const p = buildFixPrompt(withSiblings);
+    expect(p).toMatch(/Apply the same value to the sibling properties named above/);
+    expect(p).toContain("`padding-right`, `padding-bottom` and `padding-left`");
+    expect(p).toMatch(/leaves the component in a state nobody designed/);
+  });
+
+  it("says nothing about siblings when none drifted the same way", () => {
+    const p = buildFixPrompt(padding("padding-top"));
+    expect(p).not.toMatch(/sibling/i);
+    expect(p).not.toMatch(/one design change/);
+  });
+
+  it("reads correctly for a single sibling (verb agreement, not '1 sibling(s)')", () => {
+    const p = buildFixPrompt(padding("font-size", { siblingProperties: ["line-height"] }));
+    expect(p).toContain("`line-height` has also drifted to `Space/150`.");
+  });
+
+  it("falls back to the raw Figma value when no token backs the change", () => {
+    const p = buildFixPrompt(
+      padding("padding-top", {
+        tokenName: undefined,
+        figmaValue: "12px",
+        siblingProperties: ["padding-left"],
+      }),
+    );
+    expect(p).toContain("`padding-left` has also drifted to `12px`.");
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * item 4 — an unbound Figma value routes to design, never to a hardcoded value
+ * ------------------------------------------------------------------------- */
+
+describe("buildFixPrompt — unbound Figma value (item 4)", () => {
+  const unbound: FixPromptInput = {
+    ...base,
+    figmaValue: "12px",
+    tokenName: undefined,
+    finding: "unbound-figma-value",
+    nodeId: "37:30",
+    fileKey: "abc123",
+    filePaths: ["src/components/IconButton.css"],
+  };
+
+  it("says what happened: Figma's value is not bound to a variable", () => {
+    const p = buildFixPrompt(unbound);
+    expect(p).toMatch(/NOT bound to a variable/);
+    expect(p).toMatch(/a literal typed into the design/);
+    expect(p).toMatch(/no design token naming the expected value/);
+  });
+
+  it("routes the work to Figma, naming the node and file", () => {
+    const p = buildFixPrompt(unbound);
+    expect(p).toMatch(/This is a Figma fix, not a code fix\./);
+    expect(p).toMatch(/bind `border-top-left-radius` on node `37:30` \(file `abc123`\)/);
+    expect(p).toMatch(/re-run "Check drift"/);
+  });
+
+  it("forbids the two wrong fixes: hardcoding the literal and retuning a theme token", () => {
+    const p = buildFixPrompt(unbound);
+    expect(p).toMatch(/Do NOT hardcode Figma's literal `12px` in code/);
+    expect(p).toMatch(/do NOT add or change a theme token/);
+    expect(p).toMatch(/Change no code for this row/);
+  });
+
+  it("does NOT reuse the ordinary value-drift instructions", () => {
+    const p = buildFixPrompt(unbound);
+    expect(p).not.toMatch(/Prefer wiring the token/);
+    expect(p).not.toMatch(/so the code matches the Figma value above/);
+    // Code-target file guidance would contradict "change no code".
+    expect(p).not.toContain("src/components/IconButton.css");
+  });
+
+  it("is distinguishable from ordinary value drift, which still targets code", () => {
+    const ordinary = buildFixPrompt({ ...unbound, finding: "value-drift", tokenName: "radius/lg" });
+    expect(ordinary).toMatch(/Fix a design-system drift/);
+    expect(ordinary).toMatch(/Prefer wiring the token/);
+    expect(ordinary).not.toMatch(/NOT bound to a variable/);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * item 1 — one prompt for every drifted row, related properties grouped
+ * ------------------------------------------------------------------------- */
+
+const FOUR_PADDINGS: FixPromptInput[] = [
+  padding("padding-top", { siblingProperties: ["padding-right", "padding-bottom", "padding-left"] }),
+  padding("padding-right", { siblingProperties: ["padding-top", "padding-bottom", "padding-left"] }),
+  padding("padding-bottom", { siblingProperties: ["padding-top", "padding-right", "padding-left"] }),
+  padding("padding-left", { siblingProperties: ["padding-top", "padding-right", "padding-bottom"] }),
+];
+
+const bulkContext = {
+  selector: ".card",
+  filePaths: ["src/components/Card.css"],
+  fileKey: "abc123",
+  nodeId: "37:30",
+};
+
+describe("buildBulkFixPrompt — one coherent instruction for the whole story (item 1)", () => {
+  it("returns null when nothing drifted, so the button can't render", () => {
+    expect(
+      buildBulkFixPrompt({ storyId: "ui-card--default", context: bulkContext, rows: [] }),
+    ).toBeNull();
+  });
+
+  it("covers every drifted row", () => {
+    const p = buildBulkFixPrompt({
+      storyId: "ui-card--default",
+      context: bulkContext,
+      rows: [...FOUR_PADDINGS, padding("gap", { figmaValue: "8px (token: Space/100)", tokenName: "Space/100" })],
+    })!;
+    for (const property of [
+      "padding-top",
+      "padding-right",
+      "padding-bottom",
+      "padding-left",
+      "gap",
+    ]) {
+      expect(p, property).toContain(`\`${property}\``);
+    }
+    expect(p).toContain("5 drifted rows");
+  });
+
+  it("presents the four paddings as ONE change, not four prompts", () => {
+    const p = buildBulkFixPrompt({
+      storyId: "ui-card--default",
+      context: bulkContext,
+      rows: FOUR_PADDINGS,
+    })!;
+    expect(p).toContain("### padding — 4 properties, ONE design change");
+    expect(p).toMatch(
+      /- Properties: `padding-top`, `padding-right`, `padding-bottom` and `padding-left`/,
+    );
+    expect(p).toMatch(/Expected value from Figma for all 4/);
+    expect(p).toMatch(/All 4 move together/);
+    // Every property's current value is named, so the agent can see the 6/12/12/12.
+    expect(p).toContain("`padding-top` = `6px`");
+    expect(p).toContain("`padding-left` = `12px`");
+    // One heading for the family, not one per property.
+    expect(p.match(/^### /gm)).toHaveLength(1);
+    // And the header states the framing.
+    expect(p).toMatch(/Treat this as ONE change set/);
+    expect(p).toMatch(/6px\/12px\/12px\/12px/);
+  });
+
+  it("groups the four corner radii and the type pair the same way", () => {
+    const p = buildBulkFixPrompt({
+      storyId: "ui-card--default",
+      context: bulkContext,
+      rows: [
+        ...["border-top-left-radius", "border-top-right-radius"].map((property) =>
+          padding(property, { figmaValue: "6px (token: radius/lg)", tokenName: "radius/lg" }),
+        ),
+        ...["font-size", "line-height"].map((property) =>
+          padding(property, { figmaValue: "13px (token: type/13)", tokenName: "type/13" }),
+        ),
+      ],
+    })!;
+    expect(p).toContain("### border-radius — 2 properties, ONE design change");
+    expect(p).toContain("### type ramp — 2 properties, ONE design change");
+  });
+
+  it("does NOT merge same-family properties that drifted to different values", () => {
+    const p = buildBulkFixPrompt({
+      storyId: "ui-card--default",
+      context: bulkContext,
+      rows: [
+        padding("padding-top"),
+        padding("padding-left", {
+          figmaValue: "4px (token: Space/50)",
+          tokenName: "Space/50",
+        }),
+      ],
+    })!;
+    expect(p.match(/^### /gm)).toHaveLength(2);
+    expect(p).not.toMatch(/ONE design change/);
+  });
+
+  it("keeps unbound Figma values out of the code-fix section and routes them to design", () => {
+    const p = buildBulkFixPrompt({
+      storyId: "ui-card--default",
+      context: bulkContext,
+      rows: [
+        padding("padding-top"),
+        padding("border-color", {
+          figmaValue: "#ddd",
+          tokenName: undefined,
+          finding: "unbound-figma-value",
+        }),
+      ],
+    })!;
+    expect(p).toContain("## Figma-side findings — value not bound to a variable (do NOT fix in code)");
+    expect(p).toMatch(/`border-color`: Figma's value is `#ddd`, a literal with NO variable behind it/);
+    expect(p).toMatch(/Do NOT hardcode Figma's literal in code and do NOT add or change a theme token/);
+    // The mechanical section still exists, and doesn't contain the unbound row.
+    const mechanical = p.slice(
+      p.indexOf("## What to change in code"),
+      p.indexOf("## Figma-side findings"),
+    );
+    expect(mechanical).toContain("padding-top");
+    expect(mechanical).not.toContain("border-color");
+  });
+
+  it("lists judgement-call rows separately, with their advisory, and tells the agent not to guess", () => {
+    const p = buildBulkFixPrompt({
+      storyId: "ui-card--default",
+      context: bulkContext,
+      rows: [
+        padding("padding-top"),
+        {
+          storyId: "ui-card--default",
+          kind: "props",
+          property: "Size",
+          codeValue: null,
+          figmaValue: "Large",
+          finding: "judgement",
+          advisory: "Figma variant sets Size=Large, but the story args carry no matching value.",
+        },
+      ],
+    })!;
+    expect(p).toContain("## Needs a judgement call — not a mechanical fix");
+    expect(p).toContain("`Size` (props): Figma variant sets Size=Large");
+    expect(p).toMatch(/those are not code edits/);
+  });
+
+  it("shares the per-row prompt's context and closing discipline", () => {
+    const p = buildBulkFixPrompt({
+      storyId: "ui-card--default",
+      context: bulkContext,
+      rows: FOUR_PADDINGS,
+    })!;
+    expect(p).toContain("ui-card--default");
+    expect(p).toContain("src/components/Card.css");
+    expect(p).toContain("abc123");
+    expect(p).toMatch(/Keep the change minimal/);
+    expect(p).toMatch(/typecheck/);
+    expect(p).toMatch(/Do not reformat unrelated code/);
+  });
+
+  it("names the element for a child-binding row so the fix lands on the right node", () => {
+    const p = buildBulkFixPrompt({
+      storyId: "ui-card--default",
+      context: bulkContext,
+      rows: [padding("padding-top", { selector: ".card [data-slot=header]" })],
+    })!;
+    expect(p).toContain("on `.card [data-slot=header]`");
+  });
+
+  it("says so plainly when nothing in the report is a mechanical code fix", () => {
+    const p = buildBulkFixPrompt({
+      storyId: "ui-card--default",
+      context: bulkContext,
+      rows: [
+        padding("border-color", {
+          figmaValue: "#ddd",
+          tokenName: undefined,
+          finding: "unbound-figma-value",
+        }),
+      ],
+    })!;
+    expect(p).toMatch(/Nothing here is a mechanical code fix/);
   });
 });

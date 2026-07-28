@@ -61,6 +61,18 @@ export interface DesignSyncConfig {
    */
   tsxEntries: string[];
   /**
+   * Explicit map from a **Figma variable name** to **this project's token name**,
+   * for the case where the two naming schemes genuinely differ:
+   *
+   *   { "color/background/brand/default": "primary" }
+   *
+   * Consulted BEFORE the `normalizeTokenName` heuristic when comparing token
+   * bindings, and reported in the panel as the mechanism that resolved the name,
+   * so a reader knows the match is declared rather than guessed. Defaults to
+   * `{}` — the heuristic alone, exactly the pre-v0.0.38 behaviour.
+   */
+  tokenAliases: Record<string, string>;
+  /**
    * Glob patterns (relative to the consumer's cwd) where stories live.
    * Used by the CLI for discovery. Set this in monorepos where stories
    * are siblings of the Storybook host (e.g.
@@ -75,6 +87,7 @@ const DEFAULTS = {
   registryPath: ".design-sync/registry.json",
   apply: "off" as ApplyMode,
   codeTargets: [] as CodeTarget[],
+  tokenAliases: {} as Record<string, string>,
   cssEntries: ["src/**/*.css"],
   tsxEntries: ["src/**/*.tsx"],
   storyGlobs: [
@@ -160,11 +173,87 @@ export function normalizeCodeTargets(raw: unknown): CodeTarget[] {
   });
 }
 
+const TOKEN_ALIAS_SHAPE =
+  `Shape: an object whose keys are Figma variable names and whose values are the ` +
+  `matching token name in this project, e.g. ` +
+  `{ "color/background/brand/default": "primary" }.`;
+
+/**
+ * Validate and canonicalize `tokenAliases`.
+ *
+ * Loud on anything unusable, for the same reason `codeTargets` is (v0.0.37): an
+ * alias map exists to *suppress* a drift row, so a silently-ignored entry is the
+ * worst possible failure — the user believes they told the addon two names mean
+ * the same thing, the panel keeps reporting the divergence, and nothing says
+ * why. Every rejection names the offending key.
+ *
+ * The map is stored with its keys exactly as written (the panel quotes them back
+ * when suggesting an alias); *matching* is normalized at lookup time, in
+ * `token-aliases.ts`.
+ */
+export function normalizeTokenAliases(raw: unknown): Record<string, string> {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(
+      `[design-sync] Config: \`tokenAliases\` must be an object (got ${JSON.stringify(raw)}). ${TOKEN_ALIAS_SHAPE}`,
+    );
+  }
+  const out: Record<string, string> = {};
+  // Two keys that differ only in spelling (`color/x` vs `Color/X`) resolve to the
+  // same Figma variable at lookup time. If they name different code tokens, the
+  // map contradicts itself and whichever one wins would be an accident — refuse
+  // instead of picking.
+  const byCanonical = new Map<string, { key: string; value: string }>();
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const figmaName = key.trim();
+    if (figmaName === "") {
+      throw new Error(
+        `[design-sync] Config: \`tokenAliases\` has an empty key. Each key must be the Figma variable name. ${TOKEN_ALIAS_SHAPE}`,
+      );
+    }
+    if (typeof value !== "string" || value.trim() === "") {
+      throw new Error(
+        `[design-sync] Config: \`tokenAliases["${figmaName}"]\` must be a non-empty string naming this project's token (got ${JSON.stringify(value) ?? String(value)}). ${TOKEN_ALIAS_SHAPE}`,
+      );
+    }
+    const canonical = canonicalAliasKey(figmaName);
+    const clash = byCanonical.get(canonical);
+    if (clash && clash.value !== value.trim()) {
+      throw new Error(
+        `[design-sync] Config: \`tokenAliases\` maps the same Figma variable twice with different token names — ` +
+          `"${clash.key}" → "${clash.value}" and "${figmaName}" → "${value.trim()}". ` +
+          `Figma variable names are compared case- and separator-insensitively, so these are one entry. Keep one.`,
+      );
+    }
+    byCanonical.set(canonical, { key: figmaName, value: value.trim() });
+    out[figmaName] = value.trim();
+  }
+  return out;
+}
+
+/**
+ * Local copy of the lookup canonicalization used for duplicate detection. Kept
+ * here (rather than importing `normalizeTokenName`) so config validation has no
+ * dependency direction into the matcher; the two must agree, which the tests
+ * assert.
+ */
+function canonicalAliasKey(name: string): string {
+  return name
+    .replace(/^--/, "")
+    .replace(/[/.\s]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+}
+
 function normalize(raw: unknown): DesignSyncConfig {
   if (!raw || typeof raw !== "object") {
     throw new Error("[design-sync] Config must be an object.");
   }
-  const r = raw as Partial<DesignSyncConfig> & { codeTargets?: unknown };
+  const r = raw as Partial<DesignSyncConfig> & {
+    codeTargets?: unknown;
+    tokenAliases?: unknown;
+  };
   if (!r.fileKey) throw new Error("[design-sync] Config: `fileKey` is required.");
   if (r.apply !== undefined && r.apply !== "off" && r.apply !== "experimental") {
     throw new Error(
@@ -179,6 +268,7 @@ function normalize(raw: unknown): DesignSyncConfig {
     apply: r.apply ?? DEFAULTS.apply,
     codeTargets,
     codeTargetPaths: codeTargets.map((t) => t.path),
+    tokenAliases: normalizeTokenAliases(r.tokenAliases),
     cssEntries: r.cssEntries ?? [...DEFAULTS.cssEntries],
     tsxEntries: r.tsxEntries ?? [...DEFAULTS.tsxEntries],
     storyGlobs: r.storyGlobs ?? [...DEFAULTS.storyGlobs],

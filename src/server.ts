@@ -9,6 +9,7 @@ import {
   type CodeSnapshotPayload,
   type ApplyCodeRequestPayload,
   type ConfigInfoPayload,
+  type WarmCacheDonePayload,
 } from "./channels.js";
 import {
   formatChildProblem,
@@ -129,6 +130,50 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
     channel.emit(EVENTS.ChildBindingsInfo, reply);
   });
 
+  /**
+   * Warm the engine's shared caches once, before a Check-all run's per-story loop
+   * (#56). The variables fetch legitimately serves every story in the run, so it
+   * belongs to the run, not to whichever story happened to be first — that story
+   * timed out at 8016ms while the next finished in 1959ms.
+   *
+   * Always replies, and never with a rejection the manager has to handle: a
+   * warm-up that can't run (no PAT, no fileKey, engine without a `warm`) just
+   * means the old cold-start cost, which each story's own fetch still covers.
+   */
+  channel.on(EVENTS.WarmCacheRequest, async () => {
+    const startedAt = Date.now();
+    const reply = (extra: Partial<WarmCacheDonePayload>): void => {
+      channel.emit(EVENTS.WarmCacheDone, {
+        ms: Date.now() - startedAt,
+        warmed: false,
+        ...extra,
+      } satisfies WarmCacheDonePayload);
+    };
+    try {
+      const config = await loadConfig();
+      const registry = await loadRegistry(config.registryPath);
+      const fileKey = registry.fileKey || config.fileKey;
+      if (!fileKey) {
+        reply({ error: "No fileKey configured — nothing to warm." });
+        return;
+      }
+      const { resolve: resolvePath } = await import("node:path");
+      const ctx: { figmaPat?: string; cachePath?: string } = {
+        cachePath: resolvePath(process.cwd(), ".design-sync/cache.json"),
+      };
+      if (process.env.FIGMA_PAT) ctx.figmaPat = process.env.FIGMA_PAT;
+      const engine = getEngine(config.engine, fileKey, ctx);
+      if (!engine.warm) {
+        reply({ error: `Engine "${engine.name}" has nothing to pre-fetch.` });
+        return;
+      }
+      await engine.warm(fileKey);
+      reply({ warmed: true });
+    } catch (err: unknown) {
+      reply({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   channel.on(EVENTS.ApplyCodeRequest, async (payload: unknown) => {
     const { edit } = payload as ApplyCodeRequestPayload;
     try {
@@ -215,6 +260,12 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         trigger: bulk ? "bulk" : "explicit",
         checkId: `${storyId}:${Date.now()}`,
       };
+      // Explicit Figma-variable-name → project-token-name equivalences. Read per
+      // check (not held on the engine), so editing design-sync.config.json takes
+      // effect on the next check without discarding the engine's warm caches.
+      if (Object.keys(config.tokenAliases).length > 0) {
+        baseInput.tokenAliases = config.tokenAliases;
+      }
       if (snapshot) baseInput.snapshot = snapshot;
       if (mode) baseInput.mode = mode;
       if (args) baseInput.args = args;
@@ -620,9 +671,17 @@ function mergeReports(entries: Array<{ mode: string; report: DriftReport }>): Dr
       statuses.push(dim.status);
       if (dim.status === "drift") driftedModes.push(mode);
     }
+    // Worst-of, with `advisory` slotted between match and flag-only: a name-only
+    // binding divergence in one mode is still a name-only divergence for the
+    // merged row (both modes read the same two token names), and collapsing it to
+    // `flag-only` would lose the reason while collapsing it to `match` would
+    // claim the names agree.
     const status: DimensionDiff["status"] =
       statuses.includes("drift") ? "drift" :
-      statuses.every((s) => s === "match") ? "match" : "flag-only";
+      statuses.every((s) => s === "match") ? "match" :
+      statuses.includes("advisory") && statuses.every((s) => s === "advisory" || s === "match")
+        ? "advisory"
+        : "flag-only";
     const out: DimensionDiff = {
       kind: list[0]!.dim.kind,
       property: list[0]!.dim.property,
@@ -630,6 +689,14 @@ function mergeReports(entries: Array<{ mode: string; report: DriftReport }>): Dr
       figmaValue: figmaByMode,
       status,
     };
+    if (status === "advisory") {
+      // Unverified in either mode is unverified for the merged row — the weaker
+      // claim wins, never the stronger one.
+      const divergences = list.map(({ dim }) => dim.nameDivergence).filter((k) => k !== undefined);
+      out.nameDivergence = divergences.includes("unverified") ? "unverified" : "value-matched";
+      const note = list.find(({ dim }) => dim.note)?.dim.note;
+      if (note) out.note = note;
+    }
     if (driftedModes.length > 0) {
       out.note = `Drift in: ${driftedModes.join(", ")}`;
     }

@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isGlobPath, loadConfig, normalizeCodeTargets } from "./config.js";
+import { isGlobPath, loadConfig, normalizeCodeTargets, normalizeTokenAliases } from "./config.js";
+import { matchTokenNames } from "./token-aliases.js";
 import { buildFixPrompt } from "./fix-prompt.js";
 
 /**
@@ -127,5 +128,84 @@ describe("isGlobPath — a pattern is not a file the write engines can open", ()
     for (const p of ["src/Button.css", "src/components/ui/button.tsx"]) {
       expect(isGlobPath(p), p).toBe(false);
     }
+  });
+});
+
+/**
+ * `tokenAliases` (v0.0.38, issue #57) gets the same treatment `codeTargets` got in
+ * v0.0.37, and for a sharper reason: an alias exists to *suppress* a drift row. A
+ * silently-ignored entry is the worst failure mode there is — the user believes
+ * they told the addon that two names mean the same thing, the panel keeps
+ * reporting the divergence, and nothing says why. Every rejection names the key.
+ */
+describe("tokenAliases — validated loudly, never silently ignored", () => {
+  it("loads the documented shape and defaults to {}", async () => {
+    const withAliases = await writeConfig({
+      fileKey: "abc123",
+      tokenAliases: { "color/background/brand/default": "primary" },
+    });
+    expect((await loadConfig(withAliases)).tokenAliases).toEqual({
+      "color/background/brand/default": "primary",
+    });
+
+    const without = await writeConfig({ fileKey: "abc123" });
+    expect((await loadConfig(without)).tokenAliases).toEqual({});
+  });
+
+  it("rejects a non-object map, naming the field and the shape", async () => {
+    for (const bad of [[], ["color/x"], "primary", 42]) {
+      const dir = await writeConfig({ fileKey: "abc123", tokenAliases: bad });
+      await expect(loadConfig(dir), JSON.stringify(bad)).rejects.toThrow(
+        /`tokenAliases` must be an object/,
+      );
+    }
+  });
+
+  it("rejects an unusable value, naming the offending key", () => {
+    for (const bad of [null, 42, "", "   ", [], {}]) {
+      expect(
+        () => normalizeTokenAliases({ "color/background/brand/default": bad }),
+        JSON.stringify(bad),
+      ).toThrow(/`tokenAliases\["color\/background\/brand\/default"\]` must be a non-empty string/);
+    }
+  });
+
+  it("names the shape in the error so a reader doesn't have to guess", () => {
+    expect(() => normalizeTokenAliases({ "color/x": 1 })).toThrow(
+      /{ "color\/background\/brand\/default": "primary" }/,
+    );
+  });
+
+  it("rejects an empty key", () => {
+    expect(() => normalizeTokenAliases({ "": "primary" })).toThrow(/has an empty key/);
+    expect(() => normalizeTokenAliases({ "   ": "primary" })).toThrow(/has an empty key/);
+  });
+
+  it("refuses two spellings of one Figma variable that disagree, rather than picking", () => {
+    // Both keys resolve to the same variable at lookup time, so whichever won
+    // would be an accident.
+    expect(() =>
+      normalizeTokenAliases({ "color/x": "primary", "Color/X": "secondary" }),
+    ).toThrow(/maps the same Figma variable twice with different token names/);
+    // Same decision written twice is harmless.
+    expect(normalizeTokenAliases({ "color/x": "primary", "--color-x": "primary" })).toEqual({
+      "color/x": "primary",
+      "--color-x": "primary",
+    });
+  });
+
+  it("trims, and keeps keys exactly as written so the panel can quote them back", () => {
+    expect(normalizeTokenAliases({ " color/x ": " primary " })).toEqual({ "color/x": "primary" });
+    expect(normalizeTokenAliases(undefined)).toEqual({});
+    expect(normalizeTokenAliases(null)).toEqual({});
+  });
+
+  it("agrees with the matcher about which keys are the same variable", () => {
+    // Config's duplicate detection and the lookup canonicalization must not
+    // diverge: if they did, a map config accepted could still fail to resolve.
+    const aliases = normalizeTokenAliases({ "Body/Font Weight Regular": "font-weight-regular" });
+    expect(matchTokenNames("font-weight-regular", "body-font-weight-regular", aliases).via).toBe(
+      "alias",
+    );
   });
 });

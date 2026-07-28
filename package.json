@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "dependencies": {
-    "@metalab/design-sync-core": "github:mylesmetalab/design-sync-core#v0.0.3",
+    "@metalab/design-sync-core": "github:mylesmetalab/design-sync-core#v0.0.4",
     "@metalab/design-sync-pipeline": "github:mylesmetalab/design-sync-pipeline#v0.0.11",
     "ts-morph": "^28.0.0"
   },

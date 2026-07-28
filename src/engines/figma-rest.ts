@@ -11,9 +11,11 @@ import type {
   DimensionDiff,
   DriftReport,
   ModeAwareValue,
+  NameDivergenceKind,
 } from "../dimensions/types.js";
-import { normalizeTokenName } from "@metalab/design-sync-core";
 import { formatChildProblem } from "../child-bindings.js";
+import { matchTokenNames, aliasSignature, type TokenAliasMap } from "../token-aliases.js";
+import { divergenceNote, nameDivergenceStatus } from "../binding-divergence.js";
 import { variantSetRowApplicable } from "../row-triage.js";
 import { PersistentCache } from "../cache.js";
 import { isTransparentColor, normalizeColor } from "./color-normalize.js";
@@ -296,6 +298,12 @@ class FigmaRestEngine implements Engine {
     // explicit check still *writes* the cache below.
     // Loaded either way: an explicit check skips the *read* but still writes,
     // and writing without having loaded would drop every other story's entry.
+    // The alias map is part of what produced a report's verdicts, so it is part
+    // of the cache identity: adding the alias that turns 89 false drift rows into
+    // advisories must not leave a bulk run replaying the pre-alias report.
+    const aliases: TokenAliasMap = input.tokenAliases ?? {};
+    const aliasKey = aliasSignature(aliases);
+
     if (this.persistentCache) await this.persistentCache.load();
     if (this.persistentCache && !explicit) {
       const fileLastModified = await this.fetchFileLastModified(fileKey).catch(() => "");
@@ -304,6 +312,7 @@ class FigmaRestEngine implements Engine {
         fileLastModified,
         input.snapshot,
         input.children,
+        aliasKey,
       );
       if (cached) {
         return {
@@ -334,8 +343,13 @@ class FigmaRestEngine implements Engine {
     // unchanged — the panel's row order is not affected.
     const propsDiffs = this.diffProps(node, input.args);
 
-    dimensions.push(...this.diffTokenValues(node, snapshot, variables, activeMode));
-    dimensions.push(...this.diffTokenBindings(node, snapshot, variables, activeMode));
+    // Values first, and kept: the binding diff needs them to tell a name-only
+    // divergence (advisory) from a genuine defect (drift). See issue #57.
+    const valueDiffs = this.diffTokenValues(node, snapshot, variables, activeMode);
+    dimensions.push(...valueDiffs);
+    dimensions.push(
+      ...this.diffTokenBindings(node, snapshot, variables, activeMode, { aliases, valueDiffs }),
+    );
     dimensions.push(...this.diffVariantSet(node, snapshot, input.storyId, propsDiffs));
     dimensions.push(...this.diffCopy(node, snapshot));
     dimensions.push(...propsDiffs);
@@ -354,6 +368,7 @@ class FigmaRestEngine implements Engine {
         input.children,
         variables,
         activeMode,
+        aliases,
       );
       dimensions.push(...outcome.dimensions);
       childReports = outcome.reports;
@@ -390,11 +405,34 @@ class FigmaRestEngine implements Engine {
           input.snapshot,
           report,
           input.children,
+          aliasKey,
         );
       }
     }
 
     return report;
+  }
+
+  /**
+   * Pre-fetch everything a **Check all** run shares: the file's `lastModified`
+   * (one tiny request, and the invalidator every story's cache lookup consults)
+   * and the file's local variables (the big one — every resolved token value in
+   * every story comes out of it).
+   *
+   * Issue #56: on a cold run this work happened inside the *first story's* 8s
+   * budget. Live numbers: `ui-button--primary` 8016ms ✗ timed out, then
+   * `ui-button--primary-small` 1959ms ✓, `ui-button--primary-disabled` 1130ms ✓.
+   * The first story wasn't slow — it was paying for the other nine. Hoisted here,
+   * it is charged to the run, and each story's budget covers only its own work.
+   *
+   * Never throws. A warm-up that fails (no PAT, 403, network) leaves the caches
+   * cold and the per-story path fetches exactly as it did before; the run is
+   * slower, not wrong.
+   */
+  async warm(fileKey: string): Promise<void> {
+    if (!this.pat) return;
+    await this.dropCachesIfFileChanged(fileKey).catch(() => undefined);
+    await this.fetchLocalVariables(fileKey).catch(() => null);
   }
 
   /* ---- cache freshness ---------------------------------------------------- *
@@ -597,6 +635,7 @@ class FigmaRestEngine implements Engine {
     children: readonly ChildTarget[],
     variables: FigmaLocalVariablesResponse | null,
     activeMode: string | undefined,
+    aliases: TokenAliasMap,
   ): Promise<{ dimensions: DimensionDiff[]; reports: ChildBindingReport[] }> {
     const { fileKey } = ctx;
     const dimensions: DimensionDiff[] = [];
@@ -651,9 +690,15 @@ class FigmaRestEngine implements Engine {
         continue;
       }
 
+      // Per element, exactly as for the root: this child's own value diffs are
+      // what its binding rows are triaged against.
+      const childValueDiffs = this.diffTokenValues(node, child.snapshot, variables, activeMode);
       const rows = [
-        ...this.diffTokenValues(node, child.snapshot, variables, activeMode),
-        ...this.diffTokenBindings(node, child.snapshot, variables, activeMode),
+        ...childValueDiffs,
+        ...this.diffTokenBindings(node, child.snapshot, variables, activeMode, {
+          aliases,
+          valueDiffs: childValueDiffs,
+        }),
         ...this.diffCopy(node, child.snapshot),
       ];
       for (const row of rows) row.childSelector = child.selector;
@@ -1212,11 +1257,24 @@ class FigmaRestEngine implements Engine {
     return out;
   }
 
+  /**
+   * The `token-binding` dimension: does the code bind the same design token the
+   * Figma node does?
+   *
+   * `valueDiffs` is the `token-value` output for the SAME element, computed just
+   * before this call. It is what lets a name divergence be triaged honestly
+   * instead of being reported as drift on the strength of a name comparison
+   * alone — see `nameDivergenceStatus` below and issue #57.
+   */
   private diffTokenBindings(
     node: FigmaNode,
     snapshot: CodeSnapshot | undefined,
     variables: FigmaLocalVariablesResponse | null,
-    activeMode?: string,
+    activeMode: string | undefined,
+    opts: { aliases: TokenAliasMap; valueDiffs: readonly DimensionDiff[] } = {
+      aliases: {},
+      valueDiffs: [],
+    },
   ): DimensionDiff[] {
     const out: DimensionDiff[] = [];
     const bindings = snapshot?.bindings ?? {};
@@ -1231,6 +1289,8 @@ class FigmaRestEngine implements Engine {
       // engine can't see. Mark as flag-only rather than crying wolf.
       let status: DimensionDiff["status"];
       let note: string | undefined;
+      let nameDivergence: NameDivergenceKind | undefined;
+      let nameResolvedBy: "alias" | "heuristic" | undefined;
       if (!codeValue && !figma) continue;
       if (!codeValue) {
         status = "flag-only";
@@ -1239,16 +1299,45 @@ class FigmaRestEngine implements Engine {
         status = "flag-only";
         note = "Figma node has no bound variable for this property.";
       } else {
-        // Naming-convention difference is NOT drift. Figma stores tokens as
-        // `radius/xl` (group/name); CSS custom properties can't contain
-        // slashes so codebases typically use `radius-xl` or `--radius-xl`.
-        // Normalize both sides (strip leading dashes, collapse all separators
-        // to "-", lowercase) before comparing — anything that resolves to
-        // the same conceptual token is a match.
-        const sameToken = normalizeTokenName(codeValue) === normalizeTokenName(figma.tokenName);
-        status = sameToken ? "match" : "drift";
-        if (sameToken && codeValue !== figma.tokenName) {
-          note = `Same token, different naming convention (${codeValue} vs ${figma.tokenName}).`;
+        // Two mechanisms, alias first. `tokenAliases` is the project stating that
+        // two names are one decision; the heuristic collapses spellings
+        // (`radius/xl` ≡ `radius-xl` ≡ `--radius-xl`) and can do no more than
+        // that. Which one answered is recorded on the row.
+        const match = matchTokenNames(codeValue, figma.tokenName, opts.aliases);
+        if (match.same) {
+          status = "match";
+          nameResolvedBy = match.via;
+          if (codeValue !== figma.tokenName) {
+            note =
+              match.via === "alias"
+                ? `Same token by \`tokenAliases\` (${codeValue} ⇄ ${figma.tokenName}).`
+                : `Same token, different naming convention (${codeValue} vs ${figma.tokenName}).`;
+          }
+        } else {
+          // The names diverge. Whether that is a DEFECT depends entirely on the
+          // value comparison, which is the whole of issue #57: a Tailwind
+          // consumer binding `primary` against a library naming the same
+          // decision `color/background/brand/default` produced ~10 "drift" rows
+          // per story whose values matched exactly.
+          const verdict = nameDivergenceStatus(key, opts.valueDiffs);
+          if (verdict === "drift") {
+            status = "drift";
+            note = divergenceNote({
+              codeValue,
+              figmaName: figma.tokenName,
+              kind: "drift",
+              aliasExpected: match.aliasExpected,
+            });
+          } else {
+            status = "advisory";
+            nameDivergence = verdict;
+            note = divergenceNote({
+              codeValue,
+              figmaName: figma.tokenName,
+              kind: verdict,
+              aliasExpected: match.aliasExpected,
+            });
+          }
         }
       }
       const diff: DimensionDiff = {
@@ -1259,6 +1348,8 @@ class FigmaRestEngine implements Engine {
         status,
       };
       if (note) diff.note = note;
+      if (nameDivergence) diff.nameDivergence = nameDivergence;
+      if (nameResolvedBy) diff.nameResolvedBy = nameResolvedBy;
       if (figma?.modes) diff.modes = figma.modes;
       out.push(diff);
     }

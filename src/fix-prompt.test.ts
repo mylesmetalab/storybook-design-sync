@@ -436,3 +436,174 @@ describe("buildBulkFixPrompt — one coherent instruction for the whole story (i
     expect(p).toMatch(/Nothing here is a mechanical code fix/);
   });
 });
+
+/* ------------------------------------------------------------------------- *
+ * v0.0.38 — the prompt states the LAYER instead of inventing an edit
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Found live: a prompt asked an agent to swap `bg-primary` for "the utility class
+ * whose theme variable resolves to `--background-brand-default`". That is the
+ * FIGMA variable's name, converted to a CSS custom property — no such utility or
+ * theme variable exists in the consumer, and none should. The prompt invented an
+ * impossible code-side target for something that was not a code-side change at
+ * all: the component bound the right token and the token's value had moved.
+ *
+ * The panel already holds everything needed to classify this (whether Figma's
+ * value is bound, whether the code binds a token, whether the names reconciled),
+ * so the prompt's job is to name the layer, not to guess at an edit.
+ */
+describe("buildFixPrompt — token-layer drift (the code is already right)", () => {
+  const tokenLayer: FixPromptInput = {
+    storyId: "ui-button--primary",
+    kind: "token-value",
+    property: "background-color",
+    codeValue: "rgb(44, 44, 44)",
+    figmaValue: "rgb(255, 0, 0)",
+    tokenName: "color/background/brand/default",
+    codeTokenName: "primary",
+    codeClassName: "bg-primary",
+    layer: "token",
+    selector: ".button",
+    nodeId: "37:30",
+    fileKey: "abc123",
+    filePaths: ["src/components/ui/button.tsx"],
+  };
+
+  it("states the layer, in those words", () => {
+    const p = buildFixPrompt(tokenLayer);
+    expect(p).toMatch(/token-layer change, not a component change/i);
+    expect(p).toMatch(/it is the TOKEN'S VALUE that no longer matches Figma/);
+  });
+
+  it("names both sides: the theme token and the design variable", () => {
+    const p = buildFixPrompt(tokenLayer);
+    expect(p).toContain("`primary`");
+    expect(p).toContain("var(--primary)");
+    expect(p).toContain("`color/background/brand/default`");
+  });
+
+  it("says a token change needs design-system sign-off", () => {
+    const p = buildFixPrompt(tokenLayer);
+    expect(p).toMatch(/design-token PR/);
+    expect(p).toMatch(/design-system sign-off/);
+    expect(p).toMatch(/affects every consumer/);
+  });
+
+  it("proposes NO class swap, no arbitrary value, no literal", () => {
+    const p = buildFixPrompt(tokenLayer);
+    expect(p).not.toMatch(/swap `bg-primary`/);
+    expect(p).not.toMatch(/utility class whose theme variable resolves to/);
+    expect(p).not.toMatch(/\[rgb\(255, 0, 0\)\]/);
+    expect(p).toMatch(/Change no code on the "button" component/);
+  });
+
+  it("NEVER presents Figma's variable name as a code-side target", () => {
+    const p = buildFixPrompt(tokenLayer);
+    // The Figma-derived custom property is the impossible target. It may not
+    // appear at all: the code-side name is `--primary`.
+    expect(p).not.toContain("--color-background-brand-default");
+  });
+
+  it("leaves room for the opposite conclusion (Figma moved by mistake)", () => {
+    const p = buildFixPrompt(tokenLayer);
+    expect(p).toMatch(/If you believe the CODE token is right/);
+  });
+
+  it("falls back to the ordinary prompt when there is no code-side token name", () => {
+    // `layer: "token"` can only be trusted with a code-side name to talk about.
+    const { codeTokenName: _drop, ...noCodeToken } = tokenLayer;
+    const p = buildFixPrompt(noCodeToken);
+    expect(p).toMatch(/Fix a design-system drift/);
+  });
+});
+
+describe("buildFixPrompt — component-layer drift with an unreconciled token name", () => {
+  const unreconciled: FixPromptInput = {
+    storyId: "ui-button--primary",
+    kind: "token-value",
+    property: "background-color",
+    codeValue: "rgb(44, 44, 44)",
+    figmaValue: "rgb(255, 0, 0)",
+    tokenName: "color/background/brand/default",
+    codeTokenName: "primary",
+    codeClassName: "bg-primary",
+    layer: "component",
+  };
+
+  it("refuses to name a code-side target it cannot know", () => {
+    const p = buildFixPrompt(unreconciled);
+    expect(p).toMatch(/could NOT reconcile it with Figma's variable|could NOT reconcile with Figma's variable/);
+    expect(p).toMatch(/treat `--color-background-brand-default` as Figma's spelling only/);
+    expect(p).toMatch(/do NOT assume a utility class, theme variable or CSS custom property of that name exists/);
+    // The impossible instruction, gone.
+    expect(p).not.toMatch(/swap `bg-primary` for the utility class whose theme variable resolves to/);
+  });
+
+  it("offers the two real possibilities, including the alias fix", () => {
+    const p = buildFixPrompt(unreconciled);
+    expect(p).toContain(`"color/background/brand/default": "primary"`);
+    expect(p).toContain("tokenAliases");
+    expect(p).toMatch(/find the token in THIS codebase whose value is `rgb\(255, 0, 0\)`/);
+    expect(p).toMatch(/If you cannot tell which, say so and stop rather than guessing/);
+  });
+
+  it("still names Figma's spelling as a caveat when the code binds no token", () => {
+    const { codeTokenName: _drop, ...literal } = unreconciled;
+    const p = buildFixPrompt(literal);
+    // Pre-existing guidance survives for the literal case…
+    expect(p).toMatch(/swap `bg-primary` for the utility class whose theme variable resolves to/);
+    // …with the confidence it was missing.
+    expect(p).toMatch(/is Figma's token name converted by convention/);
+    expect(p).toMatch(/cannot confirm this project spells it that way/);
+  });
+});
+
+describe("buildBulkFixPrompt — token-layer rows are not code edits", () => {
+  const rows: FixPromptInput[] = [
+    {
+      storyId: "ui-button--primary",
+      kind: "token-value",
+      property: "padding-top",
+      codeValue: "6px",
+      figmaValue: "12px",
+      tokenName: "space/150",
+      selector: ".button",
+    },
+    {
+      storyId: "ui-button--primary",
+      kind: "token-value",
+      property: "background-color",
+      codeValue: "rgb(44, 44, 44)",
+      figmaValue: "rgb(255, 0, 0)",
+      tokenName: "color/background/brand/default",
+      codeTokenName: "primary",
+      codeClassName: "bg-primary",
+      layer: "token",
+      selector: ".button",
+    },
+  ];
+
+  const bulk = buildBulkFixPrompt({
+    storyId: "ui-button--primary",
+    context: { selector: ".button", filePaths: ["src/components/ui/button.tsx"], fileKey: "abc123", nodeId: "37:30" },
+    rows,
+  })!;
+
+  it("puts the token-layer row in its own section, out of the code section", () => {
+    expect(bulk).toContain("## Token-layer findings — the token's value moved (do NOT edit this component)");
+    const code = bulk.slice(
+      bulk.indexOf("## What to change in code"),
+      bulk.indexOf("## Token-layer findings"),
+    );
+    expect(code).toContain("padding-top");
+    expect(code).not.toContain("background-color");
+  });
+
+  it("describes it as a token PR, with no class swap anywhere in the prompt", () => {
+    expect(bulk).toMatch(/design-token PR needing design-system sign-off/);
+    expect(bulk).not.toMatch(/swap `bg-primary`/);
+    expect(bulk).not.toContain("--color-background-brand-default");
+    expect(bulk).toMatch(/Do not act on the "Token-layer findings" section by editing this component/);
+  });
+});

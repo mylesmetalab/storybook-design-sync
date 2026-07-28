@@ -41,13 +41,22 @@ const SNAPSHOT_PROPERTIES = [
   "font-size",
   "font-weight",
   "font-family",
+  "font-style",
   "line-height",
   "letter-spacing",
   "text-decoration-line",
   "text-transform",
   "text-align",
+  // Not compared against Figma — collected because `text-align` needs it.
+  // Computed `text-align` reports the initial value `start` on any element that
+  // never sets the property, and resolving `start`/`end` to left/right without
+  // knowing the writing direction would be a guess.
+  "direction",
   // Effects
   "box-shadow",
+  // `opacity` has no Figma counterpart wired up yet (Figma's `node.opacity` is
+  // directly comparable — see the README's coverage list). Kept in the payload
+  // so adding the comparison needs no preview-bundle change in consumers.
   "opacity",
 ] as const;
 

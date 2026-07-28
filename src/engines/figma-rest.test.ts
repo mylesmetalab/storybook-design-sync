@@ -389,3 +389,139 @@ describe("token-value: FLOAT variables that alias another variable", () => {
     expect(paddingTop.status).toBe("match");
   });
 });
+
+/**
+ * The `variant-set` row is a CSS-era comparison: it matches Figma's variant
+ * values against BEM `--` suffixes and adjacent modifier classes. On a
+ * shadcn/cva component that premise is structurally false — variants are cva
+ * keys selected by props — and reported anyway the row swept all 25 utility
+ * classes into its "code variants" cell, claimed the Figma variants were
+ * missing from code, and advised adding a BEM modifier rule.
+ *
+ * These pin the row's applicability end-to-end, through the report the panel
+ * and the CLI both read.
+ */
+const CVA_BUTTON_CLASSES = [
+  "inline-flex", "items-center", "justify-center", "gap-2", "whitespace-nowrap",
+  "rounded-md", "text-sm", "font-medium", "transition-all",
+  "disabled:pointer-events-none", "disabled:opacity-50",
+  "[&_svg]:pointer-events-none", "shrink-0", "outline-none",
+  "focus-visible:border-ring", "focus-visible:ring-ring/50", "bg-primary",
+  "text-primary-foreground", "shadow-xs", "hover:bg-primary/90", "h-9", "px-4",
+];
+
+async function variantCheck(opts: {
+  variantName: string;
+  rootClasses: string[];
+  variantClasses?: string[];
+  args?: Record<string, unknown>;
+  storyId?: string;
+}): Promise<DimensionDiff[]> {
+  installFetchStub({
+    node: nodeResponse({ name: opts.variantName, type: "COMPONENT" }),
+  });
+  const engine = createFigmaRestEngine({ figmaPat: "test-pat" });
+  const report = await engine.checkDrift({
+    storyId: opts.storyId ?? "components-button--default",
+    nodeRef: { fileKey: FILE_KEY, nodeId: NODE_ID },
+    snapshot: {
+      styles: MATCHING_STYLES,
+      rootClasses: opts.rootClasses,
+      variantClasses: opts.variantClasses ?? [],
+    },
+    args: opts.args ?? {},
+  });
+  return report.dimensions;
+}
+
+function variantSetRow(dimensions: DimensionDiff[]): DimensionDiff | undefined {
+  return dimensions.find((d) => d.kind === "variant-set");
+}
+
+describe("variant-set: only reported when modifier classes are the actual mechanism", () => {
+  it("emits no row for a cva/Tailwind component (props select the variant, not classes)", async () => {
+    const dimensions = await variantCheck({
+      variantName: "Variant=Primary, Size=Medium",
+      rootClasses: CVA_BUTTON_CLASSES,
+      variantClasses: CVA_BUTTON_CLASSES.slice(1),
+      args: { variant: "primary", size: "medium" },
+    });
+
+    expect(variantSetRow(dimensions)).toBeUndefined();
+    // …and the check that DOES apply to this architecture still runs.
+    const props = dimensions.filter((d) => d.kind === "props");
+    expect(props.map((d) => d.property).sort()).toEqual(["Size", "Variant"]);
+    expect(props.every((d) => d.status === "match")).toBe(true);
+  });
+
+  it("stays suppressed on a cva component even when the props rows drift", async () => {
+    // The class-list evidence rule has to carry this on its own: with props
+    // disagreeing there is no redundancy argument, and the row would still be
+    // reporting a modifier convention the component doesn't use.
+    const dimensions = await variantCheck({
+      variantName: "Variant=Primary, Size=Medium",
+      rootClasses: CVA_BUTTON_CLASSES,
+      variantClasses: CVA_BUTTON_CLASSES.slice(1),
+      args: { variant: "ghost", size: "large" },
+    });
+
+    expect(variantSetRow(dimensions)).toBeUndefined();
+    expect(dimensions.filter((d) => d.kind === "props" && d.status === "drift")).toHaveLength(2);
+  });
+
+  it("still reports a BEM component's genuinely missing modifier, message unchanged", async () => {
+    const dimensions = await variantCheck({
+      variantName: "Variant=Accent, State=Hover",
+      rootClasses: ["icon-button", "icon-button--accent"],
+      variantClasses: ["accent"],
+      args: { variant: "accent" },
+      storyId: "components-iconbutton--accent",
+    });
+
+    const row = variantSetRow(dimensions);
+    expect(row?.property).toBe("active-variant");
+    expect(row?.status).toBe("drift");
+    expect(row?.note).toBe("Figma variants not present in code: [State=Hover]");
+  });
+
+  it("still reports `match` for a BEM component whose modifiers are all present", async () => {
+    const dimensions = await variantCheck({
+      variantName: "Variant=Accent",
+      rootClasses: ["icon-button", "icon-button--accent"],
+      variantClasses: ["accent"],
+      storyId: "components-iconbutton--accent",
+    });
+
+    expect(variantSetRow(dimensions)?.status).toBe("match");
+  });
+
+  it("drops the row once matching props rows cover every Figma axis", async () => {
+    const dimensions = await variantCheck({
+      variantName: "Variant=Accent",
+      rootClasses: ["icon-button", "icon-button--accent"],
+      variantClasses: ["accent"],
+      args: { variant: "accent" },
+      storyId: "components-iconbutton--accent",
+    });
+
+    expect(variantSetRow(dimensions)).toBeUndefined();
+    expect(dimensions.find((d) => d.kind === "props" && d.property === "Variant")?.status).toBe(
+      "match",
+    );
+  });
+
+  it("keeps the row when the snapshot predates rootClasses (evidence unknown)", async () => {
+    installFetchStub({
+      node: nodeResponse({ name: "Variant=Accent, State=Hover", type: "COMPONENT" }),
+    });
+    const engine = createFigmaRestEngine({ figmaPat: "test-pat" });
+    const report = await engine.checkDrift({
+      storyId: "components-iconbutton--accent",
+      nodeRef: { fileKey: FILE_KEY, nodeId: NODE_ID },
+      snapshot: { styles: MATCHING_STYLES, variantClasses: ["accent"] },
+      args: { variant: "accent" },
+    });
+
+    expect(variantSetRow(report.dimensions)?.status).toBe("drift");
+  });
+});

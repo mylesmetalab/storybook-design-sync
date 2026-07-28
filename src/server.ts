@@ -60,7 +60,12 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       const payload: ConfigInfoPayload = {
         apply: config.apply,
         fileKey: config.fileKey,
-        codeTargetPaths: config.codeTargets.map((t) => t.path),
+        // Read the normalized paths off the config; do NOT re-derive them here.
+        // `config.codeTargets.map((t) => t.path)` used to live at this line and
+        // produced `[undefined]` for every consumer using the documented
+        // glob-string shorthand, which then shipped into fix prompts as a file
+        // named `undefined`. See `config.ts`.
+        codeTargetPaths: config.codeTargetPaths,
       };
       channel.emit(EVENTS.ConfigInfo, payload);
     } catch (err: unknown) {

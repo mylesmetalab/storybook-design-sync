@@ -103,3 +103,36 @@ describe("applyCodeEdit — in-process CSS write (no pipeline binary)", () => {
     expect(after).toContain('var(--button-text)');
   });
 });
+
+/**
+ * `codeTargets` accepts glob strings (the documented shorthand — see config.ts),
+ * but the write engines resolve `path` literally: extension filter, then read.
+ * A glob sails past the extension filter and dies on an ENOENT deep inside an
+ * engine. Refuse it here instead, by name.
+ */
+describe("applyCodeEdit — glob-shaped codeTargets can't be written to", () => {
+  it("rejects with a message naming the globs when every target is a pattern", async () => {
+    await setup(`.text-button { color: var(--label-text); }`);
+    const result = await applyCodeEdit(codeEdit(), dir, [
+      { path: "src/**/*.css" },
+      { path: "src/**/*.tsx" },
+    ]);
+    expect(result.status).toBe("rejected");
+    expect(result.message).toMatch(/glob pattern/);
+    expect(result.message).toContain('"src/**/*.css"');
+    expect(result.message).toMatch(/need concrete file paths/);
+    // Says why the config isn't simply wrong: globs are valid, just not writable.
+    expect(result.message).toMatch(/fine for fix prompts/);
+  });
+
+  it("still applies through the concrete entries of a mixed list", async () => {
+    await setup(`.text-button { color: var(--label-text); }`);
+    const result = await applyCodeEdit(codeEdit(), dir, [
+      { path: "src/**/*.css" },
+      { path: "style.css" },
+    ]);
+    expect(result.status).toBe("applied");
+    const after = await readFile(join(dir, "style.css"), "utf8");
+    expect(after).toContain("var(--button-text)");
+  });
+});

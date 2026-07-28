@@ -302,6 +302,115 @@ describe("resolveComponentBindings — refuses rather than guesses", () => {
     expect(r.kind).toBe("ambiguous");
     if (r.kind !== "ambiguous") return;
     expect(r.files).toEqual(["/a/button.tsx", "/b/button.tsx"]);
+    // Two files, so `tsxEntries` narrowing / renaming is real advice.
+    expect(r.sameFile).toBe(false);
+  });
+
+  /**
+   * F2 — the live Card. `card.tsx` held three `cva()` calls, so three scans each
+   * listed the file basename `"card"` among their identities, `"card"` matched
+   * three times, and the component's Tailwind bindings were withheld wholesale:
+   * token-attributed rows went 26 → 12, signalled only by an advisory that
+   * printed the same path three times and said "rename one".
+   *
+   * `cardVariants` is named for the component; `cardHeaderVariants` and
+   * `cardTitleVariants` answer only because they share the filename. The code
+   * said which is which.
+   */
+  describe("several cva() class lists in one file", () => {
+    const cardRoot: TailwindComponentScan = {
+      components: ["card"],
+      variableName: "cardVariants",
+      file: "/src/components/ui/card.tsx",
+      base: "bg-primary text-foreground rounded-md",
+      axes: [],
+      defaultVariants: {},
+      compoundVariants: [],
+    };
+    const cardHeader: TailwindComponentScan = {
+      ...cardRoot,
+      components: ["card", "cardheader"],
+      variableName: "cardHeaderVariants",
+      base: "bg-secondary",
+    };
+    const cardTitle: TailwindComponentScan = {
+      ...cardRoot,
+      components: ["card", "cardtitle"],
+      variableName: "cardTitleVariants",
+      base: "bg-disabled",
+    };
+    const all = [cardRoot, cardHeader, cardTitle];
+
+    it("derives from the class list named for the component", () => {
+      const r = resolveComponentBindings(all, "card", {}, themeVars);
+      expect(r.kind).toBe("resolved");
+      expect(r.kind === "resolved" && r.bindings["background-color"]).toBe("primary");
+      expect(r.kind === "resolved" && r.file).toBe("/src/components/ui/card.tsx");
+    });
+
+    it("still resolves the other class lists by their own names", () => {
+      const header = resolveComponentBindings(all, "cardheader", {}, themeVars);
+      expect(header.kind === "resolved" && header.bindings["background-color"]).toBe("secondary");
+      const title = resolveComponentBindings(all, "cardtitle", {}, themeVars);
+      expect(title.kind === "resolved" && title.bindings["background-color"]).toBe("disabled");
+    });
+
+    /**
+     * Nothing in the file is named for the component, so all three match on the
+     * filename alone and there is still no way to tell which styles the root.
+     * Attributing `cardTitleVariants`' classes to the card root would be a coin
+     * flip wearing a token name — so the verdict stays "refuse", and what changes
+     * is that the advice is now followable: it names the identifiers, and it does
+     * not tell the reader to rename one of three identical paths.
+     */
+    it("reports a same-file collision, deduped, when none is named for it", () => {
+      const r = resolveComponentBindings([cardHeader, cardTitle], "card", {}, themeVars);
+      expect(r.kind).toBe("ambiguous");
+      if (r.kind !== "ambiguous") return;
+      expect(r.sameFile).toBe(true);
+      expect(r.files).toEqual(["/src/components/ui/card.tsx"]);
+      expect(r.names).toEqual(["cardHeaderVariants", "cardTitleVariants"]);
+    });
+
+    it("names an unassigned cva() call rather than omitting it", () => {
+      const { variableName: _unnamed, ...inline } = cardHeader;
+      const r = resolveComponentBindings([inline, cardTitle], "card", {}, themeVars);
+      expect(r.kind === "ambiguous" && r.names).toEqual([
+        "(unnamed cva call)",
+        "cardTitleVariants",
+      ]);
+    });
+
+    /**
+     * The specificity tie-break only fires when exactly one candidate claims the
+     * name. Two identifiers reducing to the same identity is a genuine tie.
+     */
+    it("refuses when two class lists are both named for the component", () => {
+      const twin: TailwindComponentScan = { ...cardRoot, variableName: "cardClasses" };
+      const r = resolveComponentBindings([cardRoot, twin], "card", {}, themeVars);
+      expect(r.kind).toBe("ambiguous");
+    });
+  });
+
+  it("scanTsx records the identifier each cva() call was assigned to", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "design-sync-tw-name-"));
+    await writeFile(
+      join(dir, "card.tsx"),
+      `const cardVariants = cva("bg-primary")\n` +
+        `const cardTitleVariants = cva("bg-disabled")\n`,
+      "utf8",
+    );
+    const tsx = await scanTsx(dir, ["*.tsx"], themeVars);
+    await rm(dir, { recursive: true, force: true });
+
+    expect(tsx.components.map((c) => c.variableName)).toEqual([
+      "cardVariants",
+      "cardTitleVariants",
+    ]);
+    // Both answer to the filename; only one is named for `card`, and that is
+    // the one derived from.
+    const r = resolveComponentBindings(tsx.components, "card", {}, themeVars);
+    expect(r.kind === "resolved" && r.bindings["background-color"]).toBe("primary");
   });
 
   it("drops properties an indeterminate axis could have overridden", () => {

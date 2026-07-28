@@ -35,8 +35,15 @@ import type { ChildTarget, CodeSnapshot } from "./engines/types.js";
  *    comparisons. A v0.0.38 entry has neither, so a Card whose Figma direction
  *    is Vertical while the code lays out in a row would keep reporting clean off
  *    the cache — exactly the silent false-clean this release exists to remove.
+ *  - **4** (v0.0.40): three changes to which rows exist at all. Typography,
+ *    `color` and `copy` are no longer compared on an element that owns no text; a
+ *    TEXT node no longer gets a `background-color` row; and a fill delivered by a
+ *    shared paint style carries a `sourceAdvisory` (and, when its paint is
+ *    unreadable, `unresolved`). A v0.0.39 entry replays twelve fabricated rows per
+ *    Card story and a guaranteed-drift `background-color` on every bound TEXT
+ *    node, which is the report this release exists to stop producing.
  */
-export const CACHE_VERSION = 3;
+export const CACHE_VERSION = 4;
 
 export interface CacheFile {
   version: typeof CACHE_VERSION;

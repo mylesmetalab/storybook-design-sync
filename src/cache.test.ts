@@ -214,13 +214,14 @@ describe("CACHE_VERSION — verdicts written by older rules are discarded", () =
     const dir = await mkdtemp(join(tmpdir(), "design-sync-cache-"));
     dirs.push(dir);
     const path = join(dir, "cache.json");
-    // A v2 file, as written by v0.0.38 — it has no `structure` and no `opacity`
-    // rows, so serving it would report clean on a component whose Figma
-    // auto-layout direction disagrees with the code.
+    // A v3 file, as written by v0.0.39. Its rows predate the text-ownership,
+    // TEXT-background and paint-style rules, so serving it would replay twelve
+    // fabricated typography/colour/copy rows per Card story and a
+    // guaranteed-drift `background-color` on every bound TEXT node.
     await writeFile(
       path,
       JSON.stringify({
-        version: 2,
+        version: 3,
         fileLastModified: LAST_MODIFIED,
         stories: { [STORY]: { snapshotHash: "whatever", report: report() } },
       }),
@@ -229,6 +230,6 @@ describe("CACHE_VERSION — verdicts written by older rules are discarded", () =
     const cache = new PersistentCache(path);
     await cache.load();
     expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot)).toBeNull();
-    expect(CACHE_VERSION).toBe(3);
+    expect(CACHE_VERSION).toBe(4);
   });
 });

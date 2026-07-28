@@ -193,6 +193,19 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
     ),
   );
 
+  // The element's OWN text — direct child text nodes only, deliberately not the
+  // subtree. This is what tells a `<h3>Title</h3>` (whose type the design
+  // specifies) from a `<div data-slot="body">` wrapper (whose type is inherited
+  // and specifies nothing). `Node.TEXT_NODE` is 3; the numeric literal avoids
+  // depending on the `Node` global being present.
+  //
+  // Concatenated untrimmed and trimmed later, so a wrapper's whitespace-only
+  // text nodes (the newlines between JSX children) read as "no own text".
+  const ownText = Array.from(el.childNodes)
+    .filter((n) => n.nodeType === 3)
+    .map((n) => n.textContent ?? "")
+    .join("");
+
   // Variant signals — collect both styles consumers actually use:
   //  - BEM modifiers:    ".icon-button--accent"  → suffix "accent"
   //  - Adjacent classes: ".file-item.active"     → "active" (any class
@@ -214,7 +227,17 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
   // The raw list too: expanding to candidates loses which convention (if any)
   // produced them, and the engine needs that to decide whether the variant-set
   // comparison applies to this component at all.
-  return { styles, bindings, variantClasses, rootClasses: allClasses, texts };
+  const inputType = el.getAttribute?.("type");
+  return {
+    styles,
+    bindings,
+    variantClasses,
+    rootClasses: allClasses,
+    texts,
+    ownText,
+    tagName: el.tagName,
+    ...(inputType ? { inputType } : {}),
+  };
 }
 
 const channel = addons.getChannel();

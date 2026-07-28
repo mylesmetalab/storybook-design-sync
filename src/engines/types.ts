@@ -38,6 +38,21 @@ export interface CodeSnapshot {
    * check that Figma TEXT-node strings appear in the rendered story.
    */
   texts?: string[];
+  /**
+   * The element's **own** text — its direct child text nodes, concatenated and
+   * untrimmed. Distinct from `texts`, which is the whole subtree: this is what
+   * decides whether a typography/`color`/`copy` verdict about this element is
+   * about anything at all. See `applicability.ts`.
+   *
+   * Absent on any snapshot captured before v0.0.40 (or replayed from a cache
+   * written by one), which the predicate treats as "not probed" — never as
+   * "no text".
+   */
+  ownText?: string;
+  /** Tag name of the snapshot target. Lets a form control count as text-bearing. */
+  tagName?: string;
+  /** The `type` attribute when the target is an `<input>`. */
+  inputType?: string;
 }
 
 /**

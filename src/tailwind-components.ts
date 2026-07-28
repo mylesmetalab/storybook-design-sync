@@ -50,6 +50,19 @@ export interface TailwindComponentScan {
   components: string[];
   /** Absolute path the classes were read from — used in ambiguity messages. */
   file: string;
+  /**
+   * The identifier the `cva()` call was assigned to (`"cardHeaderVariants"`),
+   * when it was assigned to one.
+   *
+   * Load-bearing, not decoration. `components` conflates two identities of very
+   * different strength: the **file basename**, which every `cva()` in
+   * `card.tsx` answers to, and the **variable name**, which names one specific
+   * class list. Without the distinction, a file with `cardVariants`,
+   * `cardHeaderVariants` and `cardTitleVariants` presents three equally-strong
+   * candidates for `"card"` and resolution is refused — see
+   * {@link resolveComponentBindings}.
+   */
+  variableName?: string;
   /** Always-applied class list. */
   base: string;
   /** Variant axes in `variants` declaration order. Order is load-bearing. */
@@ -83,11 +96,23 @@ export type ComponentResolution =
   | ResolvedComponentBindings
   | { kind: "none" }
   /**
-   * Two or more scanned components answer to the same name. Picking one would
-   * be a coin flip whose result looks authoritative, so we resolve nothing and
-   * let the caller say so.
+   * Two or more scanned class lists answer to the same name and none of them
+   * claims it specifically. Picking one would be a coin flip whose result looks
+   * authoritative, so we resolve nothing and let the caller say so.
+   *
+   * `files` is **deduplicated**. It used to be one entry per candidate, which on
+   * the live Card printed the same path three times and advised "rename one" —
+   * advice for a cross-file collision, given for a single file, where it cannot
+   * be followed. `sameFile` says which situation this actually is, and `names`
+   * carries the identifiers so the message can point at something real.
    */
-  | { kind: "ambiguous"; component: string; files: string[] };
+  | {
+      kind: "ambiguous";
+      component: string;
+      files: string[];
+      sameFile: boolean;
+      names: string[];
+    };
 
 /** `Variants` / `Styles` / `Classes` suffix stripping for the identity guess. */
 export function componentIdentityFromVariableName(name: string): string {
@@ -184,7 +209,8 @@ export function countTailwindScopes(
  * as the panel already sends them.
  *
  * Honesty rules, in order:
- *  - two scans claiming the same name → `ambiguous`, nothing resolved;
+ *  - several scans claiming the same name, none of them specifically →
+ *    `ambiguous`, nothing resolved (see {@link pickScan});
  *  - an axis whose applied value can't be determined → every property any of
  *    that axis's slots could set is dropped, because one of them may have
  *    overridden the base;
@@ -202,11 +228,18 @@ export function resolveComponentBindings(
   const name = componentName.toLowerCase();
   const matches = scans.filter((s) => s.components.includes(name));
   if (matches.length === 0) return { kind: "none" };
-  if (matches.length > 1) {
-    return { kind: "ambiguous", component: name, files: matches.map((m) => m.file) };
-  }
 
-  const scan = matches[0]!;
+  const scan = pickScan(matches, name);
+  if (!scan) {
+    const files = [...new Set(matches.map((m) => m.file))];
+    return {
+      kind: "ambiguous",
+      component: name,
+      files,
+      sameFile: files.length === 1,
+      names: matches.map((m) => m.variableName ?? "(unnamed cva call)"),
+    };
+  }
   const { selection, indeterminate } = selectVariants(scan, args);
 
   // Overlays in `variants` declaration order — cva concatenates the slots in
@@ -267,6 +300,47 @@ export function resolveComponentBindings(
     selection,
     state,
   };
+}
+
+/**
+ * Choose the one scan that answers to `name`, or `null` when the candidates are
+ * genuinely indistinguishable.
+ *
+ * The bug this replaces: a `card.tsx` holding three `cva()` calls contributed
+ * three scans, and every one of them listed the file basename `"card"` among its
+ * identities. So `"card"` matched three times, resolution was refused, and the
+ * component's Tailwind bindings were withheld wholesale — token-attributed rows
+ * on the live Card went from 26 to 12 with no signal beyond one advisory line
+ * that named the same file three times and said "rename one". The failure only
+ * appears on components complex enough to want more than one class list, which
+ * is exactly where the attribution matters.
+ *
+ * The ladder:
+ *
+ *  1. **One candidate.** Nothing to disambiguate.
+ *  2. **Exactly one candidate is *named* for it** — its `cva()` was assigned to
+ *     an identifier that reduces to `name` (`cardVariants` → `card`). Every other
+ *     candidate matched only because it shares the filename. This is not a
+ *     tie-break by fiat: `cardVariants` is the card's class list and
+ *     `cardTitleVariants` is not, and the code said so.
+ *  3. **Otherwise, refuse.** Including when all candidates sit in one file. The
+ *     three `cva()` calls in `card.tsx` style three different elements, so
+ *     "derive from that file" still has to choose between them, and choosing
+ *     `cardTitleVariants`' `text-2xl` as the card root's font size would be a
+ *     coin flip wearing a token name. What changes for this case is the message,
+ *     not the verdict — the caller words a same-file collision as the fixable
+ *     thing it is (name one of them for the component) instead of telling the
+ *     reader to rename one of three identical paths.
+ */
+function pickScan(
+  matches: readonly TailwindComponentScan[],
+  name: string,
+): TailwindComponentScan | null {
+  if (matches.length === 1) return matches[0]!;
+  const named = matches.filter(
+    (m) => m.variableName && componentIdentityFromVariableName(m.variableName) === name,
+  );
+  return named.length === 1 ? named[0]! : null;
 }
 
 function evaluateCompound(

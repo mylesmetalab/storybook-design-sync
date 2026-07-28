@@ -23,8 +23,18 @@ import type { ChildTarget, CodeSnapshot } from "./engines/types.js";
  * Both must match for a cache hit.
  */
 
+/**
+ * Schema version. Bumped to 2 in v0.0.38: a cached report carries *verdicts*,
+ * and the rules that produce them changed — a name-only binding divergence is now
+ * an `advisory`, not `drift` (issue #57). Entries written by the old rules would
+ * otherwise keep reporting 89 drift on a clean component until the Figma file's
+ * `lastModified` happened to move. A version bump discards them once, on upgrade,
+ * which is cheaper than being wrong.
+ */
+export const CACHE_VERSION = 2;
+
 export interface CacheFile {
-  version: 1;
+  version: typeof CACHE_VERSION;
   fileLastModified: string;
   stories: Record<string, CacheEntry>;
 }
@@ -35,7 +45,7 @@ export interface CacheEntry {
 }
 
 const EMPTY_CACHE: CacheFile = {
-  version: 1,
+  version: CACHE_VERSION,
   fileLastModified: "",
   stories: {},
 };
@@ -54,7 +64,7 @@ export class PersistentCache {
     try {
       const raw = await readFile(this.cachePath, "utf8");
       const parsed = JSON.parse(raw) as Partial<CacheFile>;
-      if (parsed.version === 1 && typeof parsed.fileLastModified === "string" && parsed.stories) {
+      if (parsed.version === CACHE_VERSION && typeof parsed.fileLastModified === "string" && parsed.stories) {
         this.cache = parsed as CacheFile;
       }
     } catch {
@@ -75,12 +85,13 @@ export class PersistentCache {
     fileLastModified: string,
     snapshot: CodeSnapshot | undefined,
     children?: readonly ChildTarget[] | undefined,
+    configSignature?: string | undefined,
   ): DriftReport | null {
     if (!this.loaded) return null;
     if (!fileLastModified || this.cache.fileLastModified !== fileLastModified) return null;
     const entry = this.cache.stories[storyId];
     if (!entry) return null;
-    const currentHash = hashSnapshot(snapshot, children);
+    const currentHash = hashSnapshot(snapshot, children, configSignature);
     if (entry.snapshotHash !== currentHash) return null;
     return entry.report;
   }
@@ -96,12 +107,13 @@ export class PersistentCache {
     snapshot: CodeSnapshot | undefined,
     report: DriftReport,
     children?: readonly ChildTarget[] | undefined,
+    configSignature?: string | undefined,
   ): void {
     if (this.cache.fileLastModified !== fileLastModified) {
-      this.cache = { version: 1, fileLastModified, stories: {} };
+      this.cache = { version: CACHE_VERSION, fileLastModified, stories: {} };
     }
     this.cache.stories[storyId] = {
-      snapshotHash: hashSnapshot(snapshot, children),
+      snapshotHash: hashSnapshot(snapshot, children, configSignature),
       report,
     };
     this.dirty = true;
@@ -139,14 +151,27 @@ export class PersistentCache {
  * the cached report — otherwise a re-check would replay a report that describes
  * a component that no longer exists.
  *
- * When there are no children the hash is computed over the bare snapshot exactly
- * as before, so legacy entries keep hitting their existing cache instead of all
- * missing once on upgrade.
+ * `configSignature` covers config that changes a report's *verdicts* rather than
+ * its inputs — today only `tokenAliases` (v0.0.38). Neither the Figma file's
+ * `lastModified` nor the DOM snapshot moves when someone edits
+ * `design-sync.config.json`, so without it a bulk run would keep replaying the
+ * pre-alias report and calling a reconciled name divergence drift.
+ *
+ * When there are no children and no config signature the hash is computed over
+ * the bare snapshot exactly as before, so legacy entries keep hitting their
+ * existing cache instead of all missing once on upgrade.
  */
 function hashSnapshot(
   snapshot: CodeSnapshot | undefined,
   children?: readonly ChildTarget[] | undefined,
+  configSignature?: string | undefined,
 ): string {
+  const config = configSignature ?? "";
+  if (config !== "") {
+    return sha1(
+      stableStringify({ snapshot: snapshot ?? null, children: children ?? null, config }),
+    );
+  }
   if (children && children.length > 0) {
     return sha1(stableStringify({ snapshot: snapshot ?? null, children }));
   }

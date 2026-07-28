@@ -25,7 +25,12 @@ for binding writes, REST for variable values).
 - Adds a **Sync** panel to every story.
 - **Check drift** runs the engine for the current story.
 - **Check all** runs every registered story sequentially with a summary
-  table (match / drift / flag-only counts, perf stats, click to drill in).
+  table (match / drift / advisory / flag-only counts, perf stats, click to
+  drill in). The header says how many stories were actually **checked** —
+  a story that timed out is reported as timed out, never counted as
+  checked. The run's shared Figma fetch (variables + file metadata) happens
+  once, before the first story, so the first story is not charged for
+  warming the cache every other story reads.
 - One row per property with a **Value** status pill — does Figma resolve
   to the same px / color as the rendered CSS? The panel reports current
   state only. (The former **Wiring** column — declared-token vs
@@ -67,9 +72,24 @@ for binding writes, REST for variable values).
   matched several things, isn't valid CSS, or names an unreachable Figma node —
   is reported by name with zero rows, so a clean table never implies coverage it
   doesn't have. See [Child bindings](#child-bindings--checking-the-whole-component-not-just-its-root).
-- **Token-name normalization.** `radius/xl` ≡ `radius-xl` ≡ `--radius-xl`.
+- **Token-name normalization.** `radius/xl` ≡ `radius-xl` ≡ `--radius-xl`
+  (and `Body/Font Weight Regular` ≡ `body-font-weight-regular`).
   Token-binding comparison doesn't false-flag drift on a naming
   convention difference.
+- **`advisory` — a name divergence is not drift.** When the code and the
+  Figma library name the same decision differently in a way normalization
+  can't collapse (`primary` vs `color/background/brand/default`) and the
+  **values match**, the row is an advisory: visible, carrying both names and
+  the exact `tokenAliases` entry that would settle it, but never red, never
+  counted as drift, never offered a fix prompt. A divergence with no value
+  comparison behind it is reported as `unverified` — not a match either.
+  See [`tokenAliases`](#tokenaliases--when-figma-and-your-theme-name-the-same-token-differently).
+- **Fix prompts state the layer.** A drifted row where the code already
+  binds the token Figma binds and only its *value* moved is a **token-layer**
+  finding: the prompt names the theme token and the design variable, says a
+  token PR needs design-system sign-off, and proposes no class swap or
+  literal. A prompt never names a Figma-side variable as if it were a
+  code-side target.
 - **Copy fix prompt** on every drift row (in both apply modes): copies a
   self-contained prompt — story, file paths or selector, property, current
   vs expected value, token name and `var(--token)` form, Figma refs, and
@@ -247,6 +267,41 @@ doesn't have:
 `GET /files/:key/nodes?ids=…` request — a 3-child component adds exactly one
 HTTP call, and none at all when the node cache is warm during a **Check all**
 run (see below).
+
+### `tokenAliases` — when Figma and your theme name the same token differently
+
+A design system and a codebase often name the same decision differently: Figma
+calls it `color/background/brand/default`, the theme calls it `primary`.
+`normalizeTokenName` collapses separators and case, but it cannot bridge
+genuinely different vocabularies — so the binding comparison reports a
+divergence that is not a defect.
+
+Declare the equivalence and the addon stops guessing:
+
+```json
+{
+  "tokenAliases": {
+    "color/background/brand/default": "primary",
+    "color/border/brand/default": "border-brand"
+  }
+}
+```
+
+Keys are **Figma variable names**, values are **your project's token names**.
+The map is consulted *before* the heuristic, and the panel reports which
+mechanism resolved a name — `alias` (you declared it) or `heuristic` (we
+guessed) — so a reader knows how much to trust the match.
+
+Defaults to `{}`, which is the heuristic alone. An unusable entry is rejected
+loudly and by name: an alias map exists to *suppress* a row, so a silently
+ignored entry is the worst possible failure — you would believe you had told
+the addon two names mean the same thing, the panel would keep reporting the
+divergence, and nothing would explain why.
+
+A divergence you have not aliased is reported as an **advisory**, not drift:
+visible, carrying both names and the exact `tokenAliases` entry that would
+settle it, but never red and never counted as drift when the two sides' values
+agree.
 
 ### Caching, and why Check drift ignores it
 
@@ -636,6 +691,70 @@ each row's **Copy fix prompt** hands over just that row, naming its
 siblings); with
 `apply: "experimental"`, **Use token** rewrites the CSS literal to
 `var(--radius-lg)` in one click without leaving Storybook.
+
+## Coverage and limits
+
+What this addon does and does not detect, stated plainly. **If a change alters
+anything in this section, the same PR updates it** — a limits list that drifts
+from the code is worse than none, because it converts an honest gap into a
+false promise.
+
+**Compared today.** Background colour · all four paddings · all four corner
+radii · all four border widths and colours · `gap` · text colour · font-size ·
+font-weight · font-family · line-height · letter-spacing · text-align ·
+text-transform · text-decoration · font-style · box-shadow · copy (text
+content) · Figma variant axes · Figma component properties (BOOLEAN, TEXT).
+
+**Compared only where you declare it.**
+
+- **Comparison is root-only until child bindings exist.** A drift check
+  compares the story's root element against its Figma node. A Card whose
+  *header* padding drifts reports clean unless that header is bound — see
+  [child bindings](#child-bindings--checking-the-whole-component-not-just-its-root). This is the single easiest way to get a
+  clean report that means less than it appears to.
+- **Portalled components need an explicit target.** Radix and Base UI render
+  Dialog, Popover, Tooltip, Select and Dropdown outside `#storybook-root`. The
+  addon finds portalled content, but when both a trigger and a popup are
+  plausible it reports the ambiguity rather than guessing. Set
+  `parameters.designSync.target`.
+
+**Not detected at all.**
+
+- **Interaction states.** Hover, focus and active are never checked: a story
+  cannot take a pseudo-state as an argument, so there is nothing to compare a
+  Figma `State=Hover` variant against. Disabled *is* checked, because it is a
+  real prop. This is a missing mechanism, not an oversight.
+- **Layout and motion.** The `structure` (auto-layout direction, alignment,
+  wrap) and `motion` dimensions exist in the engine but are hidden, because
+  they are not yet honest enough to show.
+- **Breakpoints.** Figma breakpoint variants versus CSS media queries: no
+  mechanism.
+- **Anything Figma does not express as a bound variable on a supported
+  property.** `strokeAlign`, hug/fill sizing, blend modes, gradient and image
+  fills, second and subsequent fills, `textAlignVertical`, paragraph spacing,
+  `INSTANCE_SWAP` properties. Only `fills[0]` is read, and only when SOLID —
+  so an image-backed variant is uncheckable on that property.
+- **Accessibility.** Contrast is not a drift concern: both sides can agree
+  perfectly on a pairing that fails WCAG. The sibling
+  `storybook-design-inspector` addon grades contrast per element and across
+  token pairings.
+
+**Known fragilities.**
+
+- **Token-name matching is heuristic** unless
+  [`tokenAliases`](#tokenaliases--when-figma-and-your-theme-name-the-same-token-differently)
+  is configured. A name divergence whose value matches is reported as an
+  advisory rather than drift, so the heuristic's misses are visible rather
+  than alarming.
+- **No headless check.** Drift checking runs in the panel over the Storybook
+  channel. `design-sync audit` gates the *registry* in CI; CI cannot yet gate
+  on drift itself.
+- **Storybook 10 only.** The preset uses SB10 APIs; 8 and 9 are unsupported.
+- **Tailwind bindings need Tailwind v4's CSS-first `@theme`.** A v3
+  `tailwind.config.js` scale is not evaluated. Utilities resolving against
+  Tailwind's built-in defaults, and numeric spacing under the `--spacing`
+  multiplier (`p-3`, `gap-2`), yield no binding by design — the addon will not
+  name a token it cannot verify.
 
 ## What this addon is NOT
 

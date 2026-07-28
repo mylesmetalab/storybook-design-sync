@@ -3,6 +3,7 @@ import type {
   ChildBindingReport,
   DimensionDiff,
   DimensionStatus,
+  NameDivergenceKind,
 } from "./dimensions/types.js";
 
 /**
@@ -29,6 +30,41 @@ import type {
 export type GroupedRow =
   | { kind: "token"; property: string; value?: DimensionDiff; binding?: DimensionDiff }
   | { kind: "other"; diff: DimensionDiff };
+
+/**
+ * Pair each property's `token-value` and `token-binding` diffs into one row;
+ * everything else becomes its own row, in engine order.
+ *
+ * Keyed by element AND property: the story root and a bound child both report
+ * `padding-top`, and pairing the root's value with the child's binding would
+ * fabricate a row describing neither.
+ *
+ * Lives here (moved out of `manager.tsx` in v0.0.38) because the panel is no
+ * longer the only consumer — the bulk tallies group the same way, and a count
+ * that disagreed with the table it summarizes is precisely the inconsistency
+ * issue #57 was about.
+ */
+export function groupDimensions(diffs: readonly DimensionDiff[]): GroupedRow[] {
+  const indexByProp = new Map<string, number>();
+  const rows: GroupedRow[] = [];
+  for (const d of diffs) {
+    if (d.kind === "token-value" || d.kind === "token-binding") {
+      const key = `${d.childSelector ?? ""}|${d.property}`;
+      let idx = indexByProp.get(key);
+      if (idx === undefined) {
+        idx = rows.length;
+        indexByProp.set(key, idx);
+        rows.push({ kind: "token", property: d.property });
+      }
+      const row = rows[idx] as Extract<GroupedRow, { kind: "token" }>;
+      if (d.kind === "token-value") row.value = d;
+      else row.binding = d;
+    } else {
+      rows.push({ kind: "other", diff: d });
+    }
+  }
+  return rows;
+}
 
 /** Write-gating mode from `design-sync.config.json` (`apply` field). */
 export type ApplyMode = "off" | "experimental";
@@ -114,6 +150,12 @@ export function bindingScanEmpty(rows: GroupedRow[]): boolean {
  * differences stay visible in the row and its advisory; they just don't get a
  * button. When the value genuinely drifts, the fix prompt carries the binding
  * detail with it.
+ *
+ * v0.0.38 made the rest of the panel agree with this function: those rows now
+ * carry `status: "advisory"` from the engine, so the status pill, the bulk
+ * tallies and the Check-all columns stopped calling them drift too. Half-fixed
+ * was worse than either extreme — a designer saw 89 problems and zero offered
+ * fixes.
  */
 export function rowHasDrift(row: GroupedRow): boolean {
   if (row.kind === "token") {
@@ -122,6 +164,150 @@ export function rowHasDrift(row: GroupedRow): boolean {
     return false;
   }
   return row.diff.status === "drift";
+}
+
+/* ------------------------------------------------------------------------- *
+ * name-only binding divergence — advisory, not drift (issue #57)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The advisory a token row carries when the two sides bind **differently named**
+ * tokens and that difference is not (or not yet) evidence of a defect. Null for
+ * every other row.
+ *
+ * `status: "advisory"` is set by the engine (`diffTokenBindings`), which is the
+ * only place that can see both the two names and the paired value comparison.
+ * The panel reads it here so the row's verdict, the tallies and the table order
+ * all say the same thing — the specific inconsistency issue #57 reported was a
+ * row whose status said drift while its (absent) fix button said otherwise.
+ */
+export interface BindingAdvisory {
+  /** `"value-matched"` — values agree, spelling differs. `"unverified"` — no value comparison. */
+  kind: NameDivergenceKind;
+  /** Short verdict for the status cell. */
+  label: string;
+  /** The engine's full sentence: both names, and the `tokenAliases` entry to add. */
+  detail: string;
+  codeName: string;
+  figmaName: string;
+}
+
+export function bindingAdvisory(row: GroupedRow): BindingAdvisory | null {
+  const diff = row.kind === "token" ? row.binding : row.diff;
+  if (!diff || diff.status !== "advisory") return null;
+  const kind: NameDivergenceKind = diff.nameDivergence ?? "unverified";
+  return {
+    kind,
+    label: kind === "value-matched" ? "name differs" : "name differs · unverified",
+    detail: diff.note ?? "The two sides bind differently named tokens.",
+    codeName: typeof diff.codeValue === "string" ? diff.codeValue : String(diff.codeValue ?? "—"),
+    figmaName: typeof diff.figmaValue === "string" ? diff.figmaValue : String(diff.figmaValue ?? "—"),
+  };
+}
+
+/** Per-status tallies for a report. */
+export interface StatusCounts {
+  match: number;
+  drift: number;
+  /** Name-only divergence whose value matched — real information, not a defect. */
+  advisory: number;
+  /** Name divergence with no value comparison behind it. Not a match. */
+  unverified: number;
+  flagOnly: number;
+  unresolved: number;
+}
+
+export const EMPTY_STATUS_COUNTS: StatusCounts = {
+  match: 0,
+  drift: 0,
+  advisory: 0,
+  unverified: 0,
+  flagOnly: 0,
+  unresolved: 0,
+};
+
+/**
+ * Tally a report's comparisons by what they actually found.
+ *
+ * The single source of the panel's `149 match · 89 drift · 75 flag-only` line and
+ * of the per-story Check-all columns. `advisory` and `unverified` are broken out
+ * rather than folded anywhere: folding them into `drift` is the bug (89 problems
+ * where a human sees one), and folding them into `match` would claim agreement
+ * the addon hasn't got.
+ */
+export function countStatuses(diffs: readonly DimensionDiff[]): StatusCounts {
+  const counts: StatusCounts = { ...EMPTY_STATUS_COUNTS };
+  for (const d of diffs) {
+    switch (d.status) {
+      case "match":
+        counts.match++;
+        break;
+      case "drift":
+        counts.drift++;
+        break;
+      case "advisory":
+        // Missing `nameDivergence` counts as unverified: the weaker claim wins,
+        // never the stronger one (an older cached report, or a future advisory
+        // that hasn't said which it is, must not be tallied as "values agree").
+        if (d.nameDivergence === "value-matched") counts.advisory++;
+        else counts.unverified++;
+        break;
+      case "flag-only":
+        counts.flagOnly++;
+        break;
+      case "unresolved":
+        counts.unresolved++;
+        break;
+    }
+  }
+  return counts;
+}
+
+/* ------------------------------------------------------------------------- *
+ * which layer a fix belongs in
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Which layer of the system a drifted row's fix belongs to.
+ *
+ *  - `"design"` — Figma's value is a literal with no variable behind it. The
+ *    design names no token; the work is in Figma. (Same population as the
+ *    `unbound-figma-value` finding.)
+ *  - `"token"` — the code correctly binds the token Figma binds (reconciled by
+ *    `tokenAliases` or by spelling), and only the **value** disagrees. The
+ *    component is right; the token's value moved. Fixing this in the component
+ *    would paper over a token-layer change, so the prompt must say so and must
+ *    NOT propose a class swap or a literal.
+ *  - `"component"` — the code binds a different token, or no token at all
+ *    (a literal). This is the ordinary component fix.
+ *
+ * This exists because of a prompt found live that asked an agent to swap
+ * `bg-primary` for "the utility class whose theme variable resolves to
+ * `--background-brand-default`" — a *Figma* variable name presented as a
+ * code-side target. No such utility exists, and the change wasn't a code change
+ * at all. The panel already holds everything needed to classify the row; the
+ * prompt's job is to state the layer, not to invent an edit.
+ */
+export type FixLayer = "design" | "token" | "component";
+
+export function fixLayer(row: GroupedRow): FixLayer {
+  if (row.kind !== "token") return "component";
+  const value = row.value;
+  if (!value || value.status !== "drift") return "component";
+  const hasFigmaToken =
+    value.tokenName !== undefined && value.tokenName !== null && value.tokenName !== "";
+  // Figma HAS a value but nothing named behind it — detached from its variable.
+  if (!hasFigmaToken) return hasCellValue(value.figmaValue) ? "design" : "component";
+  // The binding comparison is the evidence for "the code already points at the
+  // right token": only a `match` says the two sides name the same decision.
+  return row.binding?.status === "match" ? "token" : "component";
+}
+
+/** The code-side token name a row binds, when the scanner found one. */
+export function codeTokenName(row: GroupedRow): string | undefined {
+  if (row.kind !== "token") return undefined;
+  const code = row.binding?.codeValue;
+  return typeof code === "string" && code !== "" ? code : undefined;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -424,17 +610,21 @@ export function classifyRow(row: GroupedRow): RowFinding {
  *   0  unbound Figma value — a detached token, the most significant finding
  *   1  value drift — mechanical, one prompt away from fixed
  *   2  needs a judgement call — structural disagreement, no mechanical fix
- *   3  no drift, but something is unset or unreadable (`flag-only` /
- *      `unresolved`) — worth seeing before a wall of matches
+ *   3  no drift, but something wants attention: a name-only binding divergence
+ *      (`advisory`), or something unset or unreadable (`flag-only` /
+ *      `unresolved`) — all worth seeing before a wall of matches
  *   4  no drift, everything agreed
  *
- * Drift at the top, matches at the bottom, and nothing hidden.
+ * Drift at the top, matches at the bottom, and nothing hidden. An advisory shares
+ * rank 3 rather than getting one of its own: it is genuinely "no drift, but read
+ * me", the same class of finding as an unset property.
  */
 export function rowRank(row: GroupedRow): number {
   const finding = classifyRow(row);
   if (finding === "unbound-figma-value") return 0;
   if (finding === "value-drift") return 1;
   if (finding === "judgement") return 2;
+  if (bindingAdvisory(row)) return 3;
   const statuses =
     row.kind === "token"
       ? [row.value?.status, row.binding?.status]

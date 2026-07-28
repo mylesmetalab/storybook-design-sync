@@ -8,6 +8,7 @@ import {
   explainInfo,
   applyControlsEnabled,
   rowHasDrift,
+  tokenRowFixability,
   stagedEditsVisible,
   rowHasAnyValue,
   bindingScanEmpty,
@@ -18,6 +19,12 @@ import {
   groupRowsByElement,
   rowChildSelector,
   unresolvedChildBindings,
+  bindingAdvisory,
+  countStatuses,
+  groupDimensions,
+  fixLayer,
+  codeTokenName,
+  EMPTY_STATUS_COUNTS,
   type GroupedRow,
 } from "./row-triage.js";
 import type { ChildBindingReport, DimensionDiff } from "./dimensions/types.js";
@@ -913,5 +920,317 @@ describe("unresolvedChildBindings", () => {
       "[data-slot=body]",
       "[data-slot=foot]",
     ]);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * issue #57 — a name-only binding divergence is an advisory, not drift
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The live report: one real difference on the component, `89 drift` in the panel,
+ * and no fix offered on any of the 89. v0.0.33 had already made `rowHasDrift`
+ * value-only, so the button was right and everything else — the row's status, the
+ * bulk tally, the per-story column — still said drift. Half-fixed was worse than
+ * either extreme.
+ *
+ * These assertions pin the whole verdict chain for the four shapes a binding row
+ * can take, so status, count and rank can never drift apart again.
+ */
+describe("name-only binding divergence — status, counts and rank agree", () => {
+  const valueOf = (status: DimensionDiff["status"]): DimensionDiff => ({
+    kind: "token-value",
+    property: "background-color",
+    codeValue: "rgb(44, 44, 44)",
+    figmaValue: "rgb(44, 44, 44)",
+    status,
+    tokenName: "color/background/brand/default",
+  });
+
+  const bindingOf = (
+    status: DimensionDiff["status"],
+    nameDivergence?: "value-matched" | "unverified",
+  ): DimensionDiff => ({
+    kind: "token-binding",
+    property: "background-color",
+    codeValue: "primary",
+    figmaValue: "color/background/brand/default",
+    status,
+    ...(nameDivergence ? { nameDivergence } : {}),
+    note: "Name-only divergence …",
+  });
+
+  const table: Array<{
+    what: string;
+    row: GroupedRow;
+    drift: boolean;
+    finding: string;
+    rank: number;
+    advisoryLabel: string | null;
+  }> = [
+    {
+      what: "names differ, value matches → advisory, never drift",
+      row: {
+        kind: "token",
+        property: "background-color",
+        value: valueOf("match"),
+        binding: bindingOf("advisory", "value-matched"),
+      },
+      drift: false,
+      finding: "no-drift",
+      rank: 3,
+      advisoryLabel: "name differs",
+    },
+    {
+      what: "names differ with NO value comparison → advisory, marked unverified",
+      row: {
+        kind: "token",
+        property: "background-color",
+        binding: bindingOf("advisory", "unverified"),
+      },
+      drift: false,
+      finding: "no-drift",
+      rank: 3,
+      advisoryLabel: "name differs · unverified",
+    },
+    {
+      what: "names differ AND value drifts → still drift, and no advisory pill",
+      row: {
+        kind: "token",
+        property: "background-color",
+        value: valueOf("drift"),
+        binding: bindingOf("drift"),
+      },
+      drift: true,
+      finding: "value-drift",
+      rank: 1,
+      advisoryLabel: null,
+    },
+    {
+      what: "names agree → an ordinary match",
+      row: {
+        kind: "token",
+        property: "background-color",
+        value: valueOf("match"),
+        binding: { ...bindingOf("match"), nameResolvedBy: "alias" },
+      },
+      drift: false,
+      finding: "no-drift",
+      rank: 4,
+      advisoryLabel: null,
+    },
+  ];
+
+  for (const c of table) {
+    it(c.what, () => {
+      expect(rowHasDrift(c.row), "rowHasDrift").toBe(c.drift);
+      expect(classifyRow(c.row), "classifyRow").toBe(c.finding);
+      expect(rowRank(c.row), "rowRank").toBe(c.rank);
+      expect(bindingAdvisory(c.row)?.label ?? null, "advisory label").toBe(c.advisoryLabel);
+    });
+  }
+
+  it("keeps the divergence visible: both names and the alias suggestion travel with the row", () => {
+    const row: GroupedRow = {
+      kind: "token",
+      property: "background-color",
+      value: valueOf("match"),
+      binding: {
+        ...bindingOf("advisory", "value-matched"),
+        note: 'Name-only divergence: … Add "color/background/brand/default": "primary" to `tokenAliases` …',
+      },
+    };
+    const advisory = bindingAdvisory(row)!;
+    expect(advisory.codeName).toBe("primary");
+    expect(advisory.figmaName).toBe("color/background/brand/default");
+    expect(advisory.detail).toContain("tokenAliases");
+    expect(advisory.kind).toBe("value-matched");
+  });
+
+  it("sorts advisories above matches and below everything that needs doing", () => {
+    const drift = tokenRowOf(valueDiff({ property: "padding-top" }));
+    const advisory: GroupedRow = {
+      kind: "token",
+      property: "background-color",
+      value: valueOf("match"),
+      binding: bindingOf("advisory", "value-matched"),
+    };
+    const unset = tokenRowOf(valueDiff({ property: "gap", status: "flag-only" }));
+    const match = tokenRowOf(valueDiff({ property: "font-size", status: "match" }));
+    // Advisory and "unset" share rank 3 (both are "no drift, but read me"), so
+    // within that rank the engine's order is preserved exactly.
+    expect(sortRowsByFinding([match, advisory, unset, drift])).toEqual([
+      drift,
+      advisory,
+      unset,
+      match,
+    ]);
+  });
+
+  it("an `advisory` row never grows a write path either", () => {
+    const row: GroupedRow = {
+      kind: "token",
+      property: "background-color",
+      value: valueOf("match"),
+      binding: bindingOf("advisory", "value-matched"),
+    };
+    // `applyEngineCanAct` answers true only because there is nothing to refuse —
+    // the row is not drift. What matters is that no Apply target is derived.
+    expect(tokenRowFixability(row.kind === "token" ? row.value : undefined, row.kind === "token" ? row.binding : undefined)).toEqual({
+      bindingFixable: false,
+      valueFixable: false,
+    });
+  });
+});
+
+describe("countStatuses — the tallies the panel prints", () => {
+  const diff = (
+    over: Partial<DimensionDiff> & Pick<DimensionDiff, "status">,
+  ): DimensionDiff => ({
+    kind: "token-value",
+    property: "p",
+    codeValue: null,
+    figmaValue: null,
+    ...over,
+  });
+
+  it("counts each status once, splitting advisory from unverified", () => {
+    expect(
+      countStatuses([
+        diff({ status: "match" }),
+        diff({ status: "match" }),
+        diff({ status: "drift" }),
+        diff({ kind: "token-binding", status: "advisory", nameDivergence: "value-matched" }),
+        diff({ kind: "token-binding", status: "advisory", nameDivergence: "value-matched" }),
+        diff({ kind: "token-binding", status: "advisory", nameDivergence: "unverified" }),
+        diff({ status: "flag-only" }),
+        diff({ status: "unresolved" }),
+      ]),
+    ).toEqual({ match: 2, drift: 1, advisory: 2, unverified: 1, flagOnly: 1, unresolved: 1 });
+  });
+
+  it("does not fold a name-only divergence into drift OR match — the 89-vs-1 report", () => {
+    // Ten binding rows whose values all matched, plus the one genuine difference.
+    const rows = [
+      ...Array.from({ length: 10 }, () =>
+        diff({ kind: "token-binding", status: "advisory", nameDivergence: "value-matched" }),
+      ),
+      diff({ kind: "copy", status: "drift" }),
+    ];
+    const counts = countStatuses(rows);
+    expect(counts.drift).toBe(1);
+    expect(counts.advisory).toBe(10);
+    expect(counts.match).toBe(0);
+  });
+
+  it("treats an advisory with no `nameDivergence` field as unverified — the weaker claim", () => {
+    expect(countStatuses([diff({ status: "advisory" })]).unverified).toBe(1);
+  });
+
+  it("is empty for an empty report", () => {
+    expect(countStatuses([])).toEqual(EMPTY_STATUS_COUNTS);
+  });
+});
+
+describe("groupDimensions — value and binding for one property become one row", () => {
+  const d = (over: Partial<DimensionDiff> & Pick<DimensionDiff, "kind">): DimensionDiff => ({
+    property: "padding-top",
+    codeValue: null,
+    figmaValue: null,
+    status: "match",
+    ...over,
+  });
+
+  it("pairs by property", () => {
+    const rows = groupDimensions([d({ kind: "token-value" }), d({ kind: "token-binding" })]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.kind).toBe("token");
+  });
+
+  it("never pairs the root's value with a child's binding", () => {
+    const rows = groupDimensions([
+      d({ kind: "token-value" }),
+      d({ kind: "token-binding", childSelector: "[data-slot=header]" }),
+    ]);
+    expect(rows).toHaveLength(2);
+  });
+
+  it("leaves every other kind as its own row, in engine order", () => {
+    const rows = groupDimensions([d({ kind: "copy", property: "text" }), d({ kind: "props", property: "Size" })]);
+    expect(rows.map((r) => (r.kind === "other" ? r.diff.property : r.property))).toEqual([
+      "text",
+      "Size",
+    ]);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * which layer a fix belongs in (the impossible-instruction fix)
+ * ------------------------------------------------------------------------- */
+
+describe("fixLayer — the panel already knows which layer this is", () => {
+  const value = (over: DiffOverride = {}): DimensionDiff =>
+    valueDiff({ property: "background-color", codeValue: "rgb(0,0,0)", figmaValue: "rgb(255,0,0)", tokenName: "color/background/brand/default", ...over });
+
+  const binding = (status: DimensionDiff["status"]): DimensionDiff => ({
+    kind: "token-binding",
+    property: "background-color",
+    codeValue: "primary",
+    figmaValue: "color/background/brand/default",
+    status,
+  });
+
+  it("is `token` when the code binds the same token and only the value moved", () => {
+    const row: GroupedRow = {
+      kind: "token",
+      property: "background-color",
+      value: value(),
+      binding: binding("match"),
+    };
+    expect(fixLayer(row)).toBe("token");
+    expect(codeTokenName(row)).toBe("primary");
+  });
+
+  it("is `component` when the two token names were never reconciled", () => {
+    // This is the live case that produced the impossible prompt: we do NOT know
+    // the code-side name for Figma's variable, so nothing may be derived from it.
+    for (const status of ["advisory", "drift", "flag-only"] as const) {
+      expect(
+        fixLayer({
+          kind: "token",
+          property: "background-color",
+          value: value(),
+          binding: binding(status),
+        }),
+        status,
+      ).toBe("component");
+    }
+  });
+
+  it("is `component` when the code binds no token at all (a literal)", () => {
+    expect(fixLayer({ kind: "token", property: "background-color", value: value() })).toBe(
+      "component",
+    );
+    expect(codeTokenName({ kind: "token", property: "background-color", value: value() })).toBeUndefined();
+  });
+
+  it("is `design` when Figma's value is not bound to a variable", () => {
+    expect(
+      fixLayer(
+        tokenRowOf(valueDiff({ property: "border-color", figmaValue: "#ddd", tokenName: undefined })),
+      ),
+    ).toBe("design");
+  });
+
+  it("is `component` for a row that isn't drifted, and for non-token rows", () => {
+    expect(
+      fixLayer({
+        kind: "token",
+        property: "background-color",
+        value: value({ status: "match" }),
+        binding: binding("match"),
+      }),
+    ).toBe("component");
+    expect(fixLayer(other({ kind: "copy", property: "text" }))).toBe("component");
   });
 });

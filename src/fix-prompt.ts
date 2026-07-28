@@ -1,5 +1,5 @@
 import { tokenNameToCssVar } from "@metalab/design-sync-core";
-import type { RowFinding } from "./row-triage.js";
+import type { FixLayer, RowFinding } from "./row-triage.js";
 import { expectedIdentity, propertyFamily, type PropertyFamily } from "./property-families.js";
 
 /**
@@ -73,6 +73,29 @@ export interface FixPromptInput {
    * mechanical fix isn't available, instead of an agent inventing one.
    */
   advisory?: string | undefined;
+  /**
+   * Which layer this row's fix belongs to (`row-triage.ts`'s `fixLayer`).
+   * Absent behaves like `"component"`, so every pre-v0.0.38 call site is
+   * unchanged.
+   *
+   * `"token"` is the one that changes the prompt's *shape*: the code already
+   * binds the token Figma binds and only its value moved, so there is no
+   * component edit to make and proposing one would hide a token change inside a
+   * single component.
+   */
+  layer?: FixLayer | undefined;
+  /**
+   * The **code-side** token name the property is bound to (`"primary"`), from the
+   * `token-binding` comparison. Distinct from `tokenName`, which is Figma's name
+   * for the same slot (`"color/background/brand/default"`).
+   *
+   * Both names exist here because conflating them shipped an impossible
+   * instruction: a prompt told an agent to swap `bg-primary` for "the utility
+   * class whose theme variable resolves to `--background-brand-default`" — a
+   * CSS variable derived from the *Figma* name, which no theme defines and none
+   * should. A Figma variable name must never be presented as a code-side target.
+   */
+  codeTokenName?: string | undefined;
   /**
    * Sibling properties in the same family that drifted to the SAME expected
    * value on the same element (`driftedSiblings` in `property-families.ts`).
@@ -176,9 +199,22 @@ function siblingSentence(input: FixPromptInput): string | null {
 }
 
 /**
- * The `## The drift` bullets for a single row. Byte-identical to the wording
- * this prompt has always used; the sibling and advisory bullets are additive and
- * only appear when the data is there.
+ * The `## The drift` bullets for a single row.
+ *
+ * The token branch **triages the layer** rather than guessing at an edit
+ * (v0.0.38). Three shapes, and which one you get is decided by data the panel
+ * already holds — whether Figma's value is bound, whether the code binds a token,
+ * and whether the two names were reconciled:
+ *
+ *  - `layer: "token"` — the code binds the same token Figma does and only its
+ *    *value* moved. States that plainly, names both sides, and says a token PR
+ *    needs sign-off. Emits NO class-swap and NO literal.
+ *  - `layer: "component"` with an unreconciled code binding — says the addon could
+ *    not reconcile the two names and therefore cannot name a code-side target.
+ *    Never derives one from Figma's variable name.
+ *  - no code binding at all — the pre-existing wording (a literal in CSS or a
+ *    class with no token behind it), plus a caveat that the token name quoted is
+ *    Figma's spelling.
  */
 function driftBullets(input: FixPromptInput, opts: { includeSiblings: boolean }): string[] {
   const lines: string[] = [];
@@ -190,18 +226,7 @@ function driftBullets(input: FixPromptInput, opts: { includeSiblings: boolean })
     lines.push(
       `- Expected value from Figma: \`${figma}\`, backed by the design token \`${input.tokenName}\` (CSS custom property: \`var(${cssVar})\`)`,
     );
-    if (input.codeClassName) {
-      // Telling a Tailwind codebase to write `background-color: var(--x)` is
-      // advice it cannot take — the whole point of the class is that there is
-      // no declaration to edit.
-      lines.push(
-        `- Prefer wiring the token: swap \`${input.codeClassName}\` for the utility class whose theme variable resolves to \`${cssVar}\`, rather than hardcoding \`${figma}\` or adding an arbitrary value like \`[${figma}]\`. If no utility maps to that token, the gap is in the theme — add the variable to \`@theme\` rather than inlining the value.`,
-      );
-    } else {
-      lines.push(
-        `- Prefer wiring the token: set \`${input.property}: var(${cssVar})\` rather than hardcoding \`${figma}\`, so the code follows future token changes.`,
-      );
-    }
+    lines.push(...wiringBullets(input, figma, cssVar));
   } else {
     lines.push(`- Expected value from Figma: \`${figma}\``);
   }
@@ -218,8 +243,75 @@ function driftBullets(input: FixPromptInput, opts: { includeSiblings: boolean })
   return lines;
 }
 
+/**
+ * Whether this row is a token-layer finding: the code points at the right design
+ * decision and the decision's value moved. `fixLayer` decides it; the prompt only
+ * needs a code-side token name to talk about.
+ */
+function isTokenLayer(input: FixPromptInput): boolean {
+  return input.layer === "token" && !!input.codeTokenName;
+}
+
+/**
+ * The "how to wire this" bullets — the part that used to invent a code-side
+ * target. Every branch obeys one rule: **never name a Figma-side variable as if
+ * it were a code-side token, class or CSS custom property.**
+ */
+function wiringBullets(input: FixPromptInput, figma: string, cssVar: string): string[] {
+  const lines: string[] = [];
+  const via = input.codeClassName ? ` (via the utility class \`${input.codeClassName}\`)` : "";
+
+  if (isTokenLayer(input)) {
+    const codeToken = input.codeTokenName!;
+    const codeVar = tokenNameToCssVar(codeToken);
+    lines.push(
+      `- **This is a token-layer change, not a component change.** The code already binds \`${input.property}\` to the design token \`${codeToken}\`${via}, and the addon reconciled that with Figma's variable \`${input.tokenName}\` — the same decision, spelled differently. What moved is the decision's VALUE.`,
+    );
+    lines.push(
+      `- The change belongs on the token: the value of \`${codeToken}\` (CSS custom property \`var(${codeVar})\`) needs to become \`${figma}\`. Do NOT swap ${input.codeClassName ? `\`${input.codeClassName}\` for another utility class` : `the declaration for another token`}, do NOT add an arbitrary value${input.codeClassName ? ` like \`[${figma}]\`` : ""}, and do NOT hardcode \`${figma}\` on this component — each of those hides a token-layer change inside one component while every other consumer of \`${codeToken}\` stays wrong.`,
+    );
+    lines.push(
+      `- A token value affects every consumer of \`${codeToken}\`, so this is a design-token PR and needs design-system sign-off. If you were asked to fix this component, report back that the fix is at the token layer instead of editing the component.`,
+    );
+    return lines;
+  }
+
+  if (input.codeTokenName) {
+    // The code binds a token, but its name and Figma's did NOT reconcile. We do
+    // not know this project's name for Figma's token, so we must not name one:
+    // the live failure was exactly this — a prompt asking for "the utility class
+    // whose theme variable resolves to `--background-brand-default`", which is
+    // Figma's variable name and matches nothing in any theme.
+    lines.push(
+      `- The code binds \`${input.property}\` to the design token \`${input.codeTokenName}\`${via}, which the addon could NOT reconcile with Figma's variable \`${input.tokenName}\`. So treat \`${cssVar}\` as Figma's spelling only — do NOT assume a utility class, theme variable or CSS custom property of that name exists in this project, and do not create one from the Figma name.`,
+    );
+    lines.push(
+      `- Two possibilities, and they have different fixes. (a) \`${input.codeTokenName}\` and \`${input.tokenName}\` are the SAME decision under two names: then this is a naming mismatch, not a value fix — add \`"${input.tokenName}": "${input.codeTokenName}"\` to \`tokenAliases\` in \`design-sync.config.json\`, re-run the check, and fix whatever remains. (b) They are different decisions: then find the token in THIS codebase whose value is \`${figma}\` and bind \`${input.property}\` to that${input.codeClassName ? ` by changing \`${input.codeClassName}\`` : ""}. If you cannot tell which, say so and stop rather than guessing.`,
+    );
+    return lines;
+  }
+
+  if (input.codeClassName) {
+    // Telling a Tailwind codebase to write `background-color: var(--x)` is
+    // advice it cannot take — the whole point of the class is that there is
+    // no declaration to edit.
+    lines.push(
+      `- Prefer wiring the token: swap \`${input.codeClassName}\` for the utility class whose theme variable resolves to \`${cssVar}\`, rather than hardcoding \`${figma}\` or adding an arbitrary value like \`[${figma}]\`. If no utility maps to that token, the gap is in the theme — add the variable to \`@theme\` rather than inlining the value.`,
+    );
+  } else {
+    lines.push(
+      `- Prefer wiring the token: set \`${input.property}: var(${cssVar})\` rather than hardcoding \`${figma}\`, so the code follows future token changes.`,
+    );
+  }
+  lines.push(
+    `- \`${cssVar}\` is Figma's token name converted by convention; the addon found no token binding on the code side, so it cannot confirm this project spells it that way. If your theme names the same token differently, use the project's name.`,
+  );
+  return lines;
+}
+
 export function buildFixPrompt(input: FixPromptInput): string {
   if (input.finding === "unbound-figma-value") return buildUnboundFigmaValuePrompt(input);
+  if (isTokenLayer(input)) return buildTokenLayerPrompt(input);
 
   const component = componentNameFromStoryId(input.storyId);
   const lines: string[] = [];
@@ -252,6 +344,62 @@ export function buildFixPrompt(input: FixPromptInput): string {
     `Run the project's typecheck and test commands and make sure both pass before finishing.`,
   );
   steps.forEach((step, i) => lines.push(`${i + 1}. ${step}`));
+
+  return lines.join("\n");
+}
+
+/**
+ * The token-layer prompt: the component is already wired to the right design
+ * decision, and the decision's **value** moved.
+ *
+ * Deliberately not a component-fix prompt. The live failure this replaces asked
+ * an agent to swap `bg-primary` for "the utility class whose theme variable
+ * resolves to `--background-brand-default`" — a Figma variable name presented as
+ * a code-side target. No such utility exists or should: the component was
+ * correct, and the only honest instruction is "the token's value has to move, and
+ * that needs sign-off".
+ */
+function buildTokenLayerPrompt(input: FixPromptInput): string {
+  const component = componentNameFromStoryId(input.storyId);
+  const codeToken = input.codeTokenName!;
+  const codeVar = tokenNameToCssVar(codeToken);
+  const figma = stringify(input.figmaValue);
+  const lines: string[] = [];
+
+  lines.push(
+    `Route a token-layer change found by storybook-design-sync: the "${component}" component correctly binds \`${input.property}\` to the design token \`${codeToken}\`, and it is the TOKEN'S VALUE that no longer matches Figma. This is a token-layer change, not a component change — do not edit the component.`,
+  );
+  lines.push("");
+  lines.push(...contextLines(input, component, { includeCodeTargets: false, includeKind: true }));
+  lines.push("");
+  lines.push(`## What was found`);
+  lines.push(`- Property: \`${input.property}\``);
+  lines.push(
+    `- Code binds the design token \`${codeToken}\` (CSS custom property \`var(${codeVar})\`)${input.codeClassName ? `, applied via the utility class \`${input.codeClassName}\`` : ""}, which currently resolves to \`${stringify(input.codeValue)}\`.`,
+  );
+  lines.push(
+    `- Figma binds the same decision as the variable \`${input.tokenName}\`, which resolves to \`${figma}\`.`,
+  );
+  lines.push(
+    `- The two sides name the same token (reconciled by the addon), so the component's wiring is correct. Only the value differs.`,
+  );
+  const siblings = siblingSentence(input);
+  if (siblings) lines.push(`- Sibling properties in the same state: ${siblings}`);
+  if (input.note) lines.push(`- Note from the drift engine: ${input.note}`);
+  lines.push("");
+  lines.push(`## What to do`);
+  lines.push(
+    `1. Change no code on the "${component}" component. Its class/declaration for \`${input.property}\` is already pointing at the right token; swapping it for another utility, adding an arbitrary value, or hardcoding \`${figma}\` would hide this change inside one component while every other consumer of \`${codeToken}\` stayed wrong.`,
+  );
+  lines.push(
+    `2. Locate where this project *defines* \`${codeToken}\` — a Tailwind \`@theme\` block, a token CSS file, or a design-token source — and identify the change needed: \`var(${codeVar})\` must resolve to \`${figma}\`.`,
+  );
+  lines.push(
+    `3. Do not land that change as part of a component fix. A token value affects every consumer, so it goes up as its own design-token PR with design-system sign-off. Report the required change (token, current value, new value) back to whoever asked for this fix.`,
+  );
+  lines.push(
+    `4. If you believe the CODE token is right and Figma's variable \`${input.tokenName}\` is the side that moved by mistake, say so explicitly — that is a Figma fix, and re-tuning the code token to match would be wrong.`,
+  );
 
   return lines.join("\n");
 }
@@ -430,8 +578,15 @@ export function buildBulkFixPrompt(input: BulkFixPromptInput): string | null {
 
   const unbound = input.rows.filter((r) => r.finding === "unbound-figma-value");
   const judgement = input.rows.filter((r) => r.finding === "judgement");
+  // Token-layer rows are NOT code fixes: the component already binds the right
+  // token and its value moved. Left in the mechanical section they would each
+  // attract a class swap — the exact impossible edit v0.0.38 removed.
+  const tokenLayer = input.rows.filter(
+    (r) => r.finding !== "unbound-figma-value" && r.finding !== "judgement" && isTokenLayer(r),
+  );
   const mechanical = input.rows.filter(
-    (r) => r.finding !== "unbound-figma-value" && r.finding !== "judgement",
+    (r) =>
+      r.finding !== "unbound-figma-value" && r.finding !== "judgement" && !isTokenLayer(r),
   );
 
   const lines: string[] = [];
@@ -467,6 +622,22 @@ export function buildBulkFixPrompt(input: BulkFixPromptInput): string | null {
       } else {
         lines.push(...multiPropertyBullets(group));
       }
+    }
+  }
+
+  if (tokenLayer.length > 0) {
+    lines.push("");
+    lines.push(
+      `## Token-layer findings — the token's value moved (do NOT edit this component)`,
+    );
+    lines.push("");
+    for (const row of tokenLayer) {
+      const where =
+        row.selector !== undefined && row.selector !== rootSelector ? ` on \`${row.selector}\`` : "";
+      const codeToken = row.codeTokenName!;
+      lines.push(
+        `- \`${row.property}\`${where}: the code already binds the design token \`${codeToken}\` (\`var(${tokenNameToCssVar(codeToken)})\`)${row.codeClassName ? ` via \`${row.codeClassName}\`` : ""}, which the addon reconciled with Figma's variable \`${row.tokenName}\`. The wiring is correct; the token's VALUE has to move from \`${stringify(row.codeValue)}\` to \`${stringify(row.figmaValue)}\`. That affects every consumer of \`${codeToken}\`, so it is a design-token PR needing design-system sign-off — not a class swap, not an arbitrary value, and not a hardcoded literal on this component.`,
+      );
     }
   }
 
@@ -507,6 +678,9 @@ export function buildBulkFixPrompt(input: BulkFixPromptInput): string | null {
   steps.push(
     `Keep the change minimal — touch only the declarations (or utility classes) responsible for these properties on this component/variant. Do not reformat unrelated code or rename anything.`,
   );
+  // Wording for the pre-existing sections is byte-identical to what it has always
+  // been; the token-layer sentence is additive and only appears when such a row
+  // exists.
   if (unbound.length > 0 || judgement.length > 0) {
     steps.push(
       `Do not act on the ${[
@@ -515,6 +689,11 @@ export function buildBulkFixPrompt(input: BulkFixPromptInput): string | null {
       ]
         .filter(Boolean)
         .join(" or ")} section${unbound.length > 0 && judgement.length > 0 ? "s" : ""}: those are not code edits. List them back to whoever asked for this fix so a human can route them.`,
+    );
+  }
+  if (tokenLayer.length > 0) {
+    steps.push(
+      `Do not act on the "Token-layer findings" section by editing this component: its wiring is already correct. Report the token value change each row names, and route it as a design-token PR with design-system sign-off.`,
     );
   }
   steps.push(

@@ -104,6 +104,16 @@ export interface CheckDriftInput {
    */
   trigger?: "explicit" | "bulk";
   /**
+   * `config.tokenAliases` — explicit Figma-variable-name → project-token-name
+   * equivalences, consulted before the `normalizeTokenName` heuristic when
+   * comparing token bindings. Absent/empty = heuristic only.
+   *
+   * Passed per check rather than held on the engine so editing
+   * `design-sync.config.json` takes effect on the next check, without minting a
+   * new engine instance (and throwing away its warm Figma caches).
+   */
+  tokenAliases?: Record<string, string>;
+  /**
    * Identifier for the user action this check belongs to. A dual-mode check runs
    * the engine twice for one press of Check drift; both calls carry the same
    * `checkId`, so an explicit check revalidates Figma **once** per press instead
@@ -115,6 +125,20 @@ export interface CheckDriftInput {
 export interface Engine {
   readonly name: string;
   checkDrift(input: CheckDriftInput): Promise<DriftReport>;
+  /**
+   * Optional: pre-fetch whatever this engine shares across an entire **Check
+   * all** run (for `figma-rest`: the file's variables and its `lastModified`).
+   *
+   * Exists because of a real, reproducible unfairness (issue #56): the first
+   * story of a cold bulk run paid the shared variables + metadata fetch *inside*
+   * its own per-story budget and timed out at 8016ms, while every story after it
+   * finished in ~1s off the warm cache. The work isn't the first story's — so it
+   * is hoisted out of the first story's budget and run once, before the loop.
+   *
+   * Must never throw: a failed warm-up is a slow run, not a broken one — the
+   * per-story path fetches what it needs regardless.
+   */
+  warm?(fileKey: string): Promise<void>;
 }
 
 export interface EngineContext {

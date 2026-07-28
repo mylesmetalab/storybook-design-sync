@@ -54,6 +54,14 @@ export const EVENTS = {
   ChildBindingsRequest: "design-sync:childBindingsRequest",
   /** Server → preview: reply to ChildBindingsRequest. */
   ChildBindingsInfo: "design-sync:childBindingsInfo",
+  /**
+   * Manager → server: pre-fetch the artefacts a **Check all** run shares (Figma
+   * variables + file metadata) BEFORE the per-story loop starts, so the first
+   * story isn't charged for warming the cache every other story reads (#56).
+   */
+  WarmCacheRequest: "design-sync:warmCacheRequest",
+  /** Server → manager: warm-up finished (or declined). Never an error path. */
+  WarmCacheDone: "design-sync:warmCacheDone",
 } as const;
 
 export interface CheckDriftRequestPayload {
@@ -163,6 +171,19 @@ export interface CodeSnapshotPayload {
    * and set `CheckDriftInput.trigger` accordingly. Absent = explicit.
    */
   bulk?: boolean;
+}
+
+/**
+ * Outcome of the pre-loop shared fetch. `ms` is what the run paid for it — the
+ * cost that used to land on the first story's 8s budget. `error` is present when
+ * the warm-up couldn't run or failed; the run continues either way (each story
+ * still fetches what it needs), so the panel reports it rather than aborting.
+ */
+export interface WarmCacheDonePayload {
+  ms: number;
+  /** True when an engine actually pre-fetched something. */
+  warmed: boolean;
+  error?: string;
 }
 
 export interface DriftReportPayload {

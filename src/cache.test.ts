@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PersistentCache } from "./cache.js";
+import { CACHE_VERSION, PersistentCache } from "./cache.js";
 import type { ChildTarget, CodeSnapshot } from "./engines/types.js";
 import type { DriftReport } from "./dimensions/types.js";
 
@@ -167,5 +167,67 @@ describe("PersistentCache — declared child bindings participate in the hash", 
 
     expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot)).toBeNull();
     expect(cache.get(STORY, LAST_MODIFIED, withClasses)).not.toBeNull();
+  });
+});
+
+/**
+ * `tokenAliases` changes a report's *verdicts* without changing any of its inputs
+ * (v0.0.38). Neither the Figma file's `lastModified` nor the DOM snapshot moves
+ * when someone edits `design-sync.config.json`, so without the config signature in
+ * the hash, adding the alias that turns 80 false drift rows into advisories would
+ * leave a bulk run replaying the pre-alias report — and still calling them drift.
+ */
+describe("PersistentCache — config that changes verdicts is part of the identity", () => {
+  const aliasSig = "color-background-brand-default=primary";
+
+  it("misses when the alias signature changes", async () => {
+    const cache = await freshCache();
+    cache.set(STORY, LAST_MODIFIED, rootSnapshot, report(), undefined, aliasSig);
+
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot, undefined, aliasSig)).not.toBeNull();
+    // Alias removed…
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot, undefined, "")).toBeNull();
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot)).toBeNull();
+    // …or changed.
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot, undefined, "space-150=spacing-lg")).toBeNull();
+  });
+
+  it("leaves the hash byte-identical for consumers with no aliases", async () => {
+    // No signature must mean no change to existing cache behaviour: an upgraded
+    // addon should not miss on every story just for having the capability.
+    const cache = await freshCache();
+    cache.set(STORY, LAST_MODIFIED, rootSnapshot, report());
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot, undefined, "")).not.toBeNull();
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot, undefined, undefined)).not.toBeNull();
+  });
+
+  it("still covers children alongside the signature", async () => {
+    const cache = await freshCache();
+    cache.set(STORY, LAST_MODIFIED, rootSnapshot, report(), [child("16px")], aliasSig);
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot, [child("16px")], aliasSig)).not.toBeNull();
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot, [child("4px")], aliasSig)).toBeNull();
+  });
+});
+
+describe("CACHE_VERSION — verdicts written by older rules are discarded", () => {
+  it("ignores a cache file from a previous schema version", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "design-sync-cache-"));
+    dirs.push(dir);
+    const path = join(dir, "cache.json");
+    // A v1 file, as written by v0.0.37 — its binding rows called a name-only
+    // divergence `drift`, which this release no longer does.
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        fileLastModified: LAST_MODIFIED,
+        stories: { [STORY]: { snapshotHash: "whatever", report: report() } },
+      }),
+      "utf8",
+    );
+    const cache = new PersistentCache(path);
+    await cache.load();
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot)).toBeNull();
+    expect(CACHE_VERSION).toBe(2);
   });
 });

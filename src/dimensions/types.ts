@@ -24,6 +24,17 @@ export type DimensionKind =
  *   status may render red, offer a fix prompt, or feed an Apply.
  * - `flag-only` — one side has no opinion (no declared binding, no value).
  *   Surfaced for awareness; not an accusation.
+ * - `advisory` — real information, no accusation. Currently produced by exactly
+ *   one comparison: a `token-binding` row whose two sides name the token
+ *   differently and where that difference is **not** evidence of a defect
+ *   (v0.0.38, issue #57). Code binds `primary`, the Figma library calls the same
+ *   decision `color/background/brand/default`, and the resolved values match —
+ *   the component renders what the design specifies, the two systems just spell
+ *   the token differently. Counted and styled separately from drift: a first run
+ *   reporting 89 problems where a human sees one is a run nobody repeats. The
+ *   row stays visible, carries the two names, and suggests the `tokenAliases`
+ *   entry that would state the equivalence outright. Never red, never offers a
+ *   fix prompt, never feeds an Apply.
  * - `unresolved` — the addon could not produce a comparable value for the
  *   Figma side at all (e.g. a variable whose alias chain dead-ends), so **no
  *   comparison happened**. Distinct from `flag-only` because Figma *does* have
@@ -37,7 +48,23 @@ export type DimensionKind =
  * reading a `.design-sync/cache.json` written by an older addon simply never
  * see `unresolved`.
  */
-export type DimensionStatus = "match" | "drift" | "flag-only" | "unresolved";
+export type DimensionStatus = "match" | "drift" | "advisory" | "flag-only" | "unresolved";
+
+/**
+ * Why a `token-binding` row is an `advisory` rather than drift or a match.
+ *
+ *  - `"value-matched"` — the paired `token-value` comparison for the same
+ *    property (and the same element) reported `match`. The names differ, the
+ *    rendered value is right. Not a defect.
+ *  - `"unverified"` — the names differ and there was **no value comparison** to
+ *    fall back on (no `token-value` row for this property, or one that was
+ *    itself `flag-only`/`unresolved`). We cannot say the render is right, so this
+ *    is explicitly NOT a match; we also cannot say it is wrong, since token-name
+ *    matching is heuristic unless `tokenAliases` says otherwise. It is reported,
+ *    tallied under its own count, and labelled "unverified" in the panel —
+ *    never folded into match, never dropped.
+ */
+export type NameDivergenceKind = "value-matched" | "unverified";
 
 export interface DimensionDiff {
   kind: DimensionKind;
@@ -55,6 +82,20 @@ export interface DimensionDiff {
    * drift Apply path to construct a `var(--token)` rewrite in code.
    */
   tokenName?: string;
+  /**
+   * Present on a `token-binding` row whose two sides name the token differently.
+   * Says how much the divergence is worth (see {@link NameDivergenceKind}).
+   * Always accompanies `status: "advisory"`.
+   */
+  nameDivergence?: NameDivergenceKind;
+  /**
+   * On a `token-binding` row whose names **were** reconciled: which mechanism did
+   * it. `"alias"` = an explicit `tokenAliases` entry (declared by the project, so
+   * trustworthy); `"heuristic"` = the two spellings collapse to the same
+   * canonical form via `normalizeTokenName` (a guess, and a good one, but still a
+   * guess). Surfaced in the panel so a reader knows which they are looking at.
+   */
+  nameResolvedBy?: "alias" | "heuristic";
   /**
    * The utility class the code-side binding came from (`"bg-primary"`), when
    * the scanner derived this property from Tailwind rather than from a

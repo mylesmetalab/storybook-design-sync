@@ -12,6 +12,7 @@ import {
   type RegisteredStoryEntry,
   type ApplyCodeResultPayload,
   type ConfigInfoPayload,
+  type WarmCacheDonePayload,
 } from "./channels.js";
 import type { DriftReport, DimensionDiff } from "./dimensions/types.js";
 import {
@@ -29,13 +30,24 @@ import {
   rowHasAnyValue,
   summarizeListCell,
   groupRowsByElement,
+  groupDimensions,
   rowChildSelector,
   unresolvedChildBindings,
+  bindingAdvisory,
+  countStatuses,
+  fixLayer,
+  codeTokenName,
+  EMPTY_STATUS_COUNTS,
+  type BindingAdvisory,
   type ElementGroup,
+  type FixLayer,
   type RowFinding,
+  type StatusCounts,
 } from "./row-triage.js";
 import { buildFixPrompt, buildBulkFixPrompt, type FixPromptInput } from "./fix-prompt.js";
 import { driftedSiblings } from "./property-families.js";
+import { runBulkCheck, type WarmOutcome } from "./bulk-run.js";
+import { coverageLabel, summarizeBulk, type BulkSummaryRow } from "./bulk-summary.js";
 
 const STORY_RENDERED_EVENT = "storyRendered";
 
@@ -52,14 +64,14 @@ interface PanelState {
   errorSeverity?: "error" | "info";
 }
 
-interface BulkRow {
+/**
+ * One story's line in the Check-all summary. Carries the full per-status tally
+ * (`StatusCounts`) rather than the old match/drift/flag-only triple, so a
+ * name-only binding divergence is counted as the advisory it is instead of
+ * inflating the drift column — the 89-vs-1 report of issue #57.
+ */
+interface BulkRow extends BulkSummaryRow {
   storyId: string;
-  status: "pending" | "running" | "done" | "error";
-  match: number;
-  drift: number;
-  flagOnly: number;
-  durationMs: number;
-  error?: string;
   /** Full drift report from the engine — kept so the bulk Export action
    *  can build a per-property markdown / JSON dump without re-running. */
   report?: DriftReport;
@@ -70,6 +82,11 @@ interface BulkState {
   startedAt: number;
   finishedAt?: number;
   rows: BulkRow[];
+  /**
+   * What the run's shared Figma fetch cost, hoisted out of the first story's
+   * budget (#56). Reported so the time is visible as the run's, not missing.
+   */
+  warmup?: WarmOutcome;
   apply?: BulkApplyState;
 }
 
@@ -107,6 +124,14 @@ interface ApplyResult {
 }
 
 const PIPELINE_DEFAULT_URL = "http://127.0.0.1:7099";
+
+/**
+ * Budget for the run's shared Figma fetch (#56). Generous on purpose: this is the
+ * multi-second `/variables/local` call on a large library, and the entire point of
+ * hoisting it is that its cost belongs to the run instead of to whichever story
+ * happened to be first.
+ */
+const WARM_BUDGET_MS = 30000;
 
 /**
  * One-time-per-story deprecation warning for the legacy
@@ -315,6 +340,9 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   // Code-scope applies are async channel round-trips to the addon server
   // (P1.4); correlate each reply to its request by edit id.
   const pendingApplyRef = useRef<Map<string, (r: ApplyResult) => void>>(new Map());
+  // In-flight pre-loop warm-up for a Check-all run (one at a time by construction
+  // — the run is sequential).
+  const pendingWarmRef = useRef<((payload: WarmCacheDonePayload) => void) | null>(null);
 
   const emit = useChannel({
     [EVENTS.DriftReport]: (payload: DriftReportPayload) => {
@@ -356,6 +384,9 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     },
     [EVENTS.ConfigInfo]: (payload: ConfigInfoPayload) => {
       setConfigInfo(payload);
+    },
+    [EVENTS.WarmCacheDone]: (payload: WarmCacheDonePayload) => {
+      pendingWarmRef.current?.(payload);
     },
     [EVENTS.RegisteredStories]: (payload: RegisteredStoriesPayload) => {
       if (payload.error) {
@@ -434,12 +465,45 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   }, [emit, storyId, designSync.target, designSync.tokens, designSync.modeAttribute, args, dualMode]);
 
   /**
-   * Bulk Check drift — iterates every registered story, navigates Storybook
-   * to each, waits for STORY_RENDERED, fires the existing single-story
-   * Check drift, aggregates results into a summary table.
+   * Ask the server to pre-fetch what the whole run shares (Figma variables + file
+   * metadata) and resolve with what it cost. Resolves — never rejects — because a
+   * warm-up that can't run means a slower run, not a broken one (#56).
    *
-   * Per-story timeout: 8s (gives slow stories room without hanging the loop).
-   * Errors don't abort — they just mark that row as `error` and continue.
+   * Its own budget, deliberately generous: this is the request that takes seconds
+   * on a large file, which is exactly why it must not sit inside a story's 8s.
+   */
+  const warmSharedCaches = useCallback((): Promise<WarmOutcome> => {
+    const startedAt = Date.now();
+    return new Promise<WarmOutcome>((resolve) => {
+      const finish = (outcome: WarmOutcome): void => {
+        if (pendingWarmRef.current === settle) pendingWarmRef.current = null;
+        resolve(outcome);
+      };
+      const timer = setTimeout(() => {
+        finish({
+          ms: Date.now() - startedAt,
+          error: `Shared Figma fetch did not finish within ${WARM_BUDGET_MS / 1000}s — stories may time out while it completes.`,
+        });
+      }, WARM_BUDGET_MS);
+      const settle = (payload: WarmCacheDonePayload): void => {
+        clearTimeout(timer);
+        finish(payload.error === undefined ? { ms: payload.ms } : { ms: payload.ms, error: payload.error });
+      };
+      pendingWarmRef.current = settle;
+      emit(EVENTS.WarmCacheRequest);
+    });
+  }, [emit]);
+
+  /**
+   * Bulk Check drift — warms the run's shared Figma fetch once, then iterates
+   * every registered story: navigate, wait for STORY_RENDERED, fire the existing
+   * single-story Check drift, aggregate into the summary table.
+   *
+   * Sequencing and the per-story budget live in `bulk-run.ts` (pure, tested).
+   * That is where the #56 fix is: the shared fetch completes before the first
+   * story's timer starts, so the first story is no longer charged for warming the
+   * cache the other nine read. A story that runs out of budget is recorded as
+   * `timedOut` and is NOT counted as checked.
    */
   const runBulk = useCallback(async (stories: RegisteredStoryEntry[]) => {
     if (stories.length === 0) {
@@ -451,56 +515,65 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       running: true,
       startedAt,
       rows: stories.map((s) => ({
+        ...EMPTY_STATUS_COUNTS,
         storyId: s.storyId,
         status: "pending",
-        match: 0,
-        drift: 0,
-        flagOnly: 0,
         durationMs: 0,
       })),
     });
 
-    for (let i = 0; i < stories.length; i++) {
-      const entry = stories[i]!;
-      setBulk((prev) =>
-        prev ? { ...prev, rows: prev.rows.map((r, j) => (j === i ? { ...r, status: "running" } : r)) } : prev,
-      );
-
-      const t0 = Date.now();
-      try {
-        const report = await checkOneStory(entry.storyId, sbApi, emit, pendingResolversRef, { dualMode });
-        const counts = countRows(report);
-        const durationMs = Date.now() - t0;
+    await runBulkCheck<DriftReport>({
+      storyIds: stories.map((s) => s.storyId),
+      warm: warmSharedCaches,
+      check: (storyId) => checkOneStory(storyId, sbApi, emit, pendingResolversRef, { dualMode }),
+      // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
+      budgetMs: dualMode ? 16000 : 8000,
+      onBudgetExpired: () => {
+        // Drop the resolver for the abandoned check so a late report can't be
+        // mistaken for the next story's.
+        pendingResolversRef.current = null;
+      },
+      onWarmed: (outcome) => {
+        setBulk((prev) => (prev ? { ...prev, warmup: outcome } : prev));
+      },
+      onStoryStart: (i) => {
         setBulk((prev) =>
           prev
-            ? {
-                ...prev,
-                rows: prev.rows.map((r, j) =>
-                  j === i
-                    ? { ...r, status: "done", durationMs, match: counts.match, drift: counts.drift, flagOnly: counts.flagOnly, report }
-                    : r,
-                ),
-              }
+            ? { ...prev, rows: prev.rows.map((r, j) => (j === i ? { ...r, status: "running" } : r)) }
             : prev,
         );
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        const durationMs = Date.now() - t0;
-        setBulk((prev) =>
-          prev
-            ? {
-                ...prev,
-                rows: prev.rows.map((r, j) =>
-                  j === i ? { ...r, status: "error", durationMs, error: message } : r,
-                ),
+      },
+      onStoryDone: (i, outcome) => {
+        setBulk((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            rows: prev.rows.map((r, j) => {
+              if (j !== i) return r;
+              if (outcome.report) {
+                return {
+                  ...r,
+                  status: "done",
+                  durationMs: outcome.durationMs,
+                  ...countRows(outcome.report),
+                  report: outcome.report,
+                };
               }
-            : prev,
-        );
-      }
-    }
+              return {
+                ...r,
+                status: "error",
+                durationMs: outcome.durationMs,
+                error: outcome.error,
+                ...(outcome.timedOut ? { timedOut: true } : {}),
+              };
+            }),
+          };
+        });
+      },
+    });
 
     setBulk((prev) => (prev ? { ...prev, running: false, finishedAt: Date.now() } : prev));
-  }, [emit, sbApi, dualMode]);
+  }, [emit, sbApi, dualMode, warmSharedCaches]);
 
   const onCheckAll = useCallback(() => {
     setBulk(null);
@@ -825,7 +898,7 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
   // element.
   const promptInputFor = (
     d: DimensionDiff,
-    extras?: { finding?: RowFinding; advisory?: string },
+    extras?: PromptExtras,
   ): FixPromptInput => {
     const child = d.childSelector
       ? report.children?.find((c) => c.selector === d.childSelector)
@@ -857,11 +930,17 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
       note: d.note,
       ...(extras?.finding ? { finding: extras.finding } : {}),
       ...(extras?.advisory ? { advisory: extras.advisory } : {}),
+      // Which layer the fix belongs to, plus the code side's own token name. The
+      // prompt must be able to talk about the code without borrowing Figma's
+      // spelling: a prompt naming `--background-brand-default` (a Figma variable)
+      // as a code-side target asked for an edit nobody can make.
+      ...(extras?.layer ? { layer: extras.layer } : {}),
+      ...(extras?.codeTokenName ? { codeTokenName: extras.codeTokenName } : {}),
       ...(siblings.length > 0 ? { siblingProperties: siblings } : {}),
     };
   };
 
-  const promptFor = (d: DimensionDiff, extras?: { finding?: RowFinding; advisory?: string }): string =>
+  const promptFor = (d: DimensionDiff, extras?: PromptExtras): string =>
     buildFixPrompt(promptInputFor(d, extras));
 
   /** The drifted diff a row's prompt describes (value side wins — it carries the token). */
@@ -880,10 +959,13 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
     if (finding === "no-drift") return [];
     const d = rowDiff(row);
     if (!d) return [];
+    const code = codeTokenName(row);
     return [
       promptInputFor(d, {
         finding,
         ...(rowHasAdvisory(row) ? { advisory: explainInfo(row) } : {}),
+        layer: fixLayer(row),
+        ...(code ? { codeTokenName: code } : {}),
       }),
     ];
   });
@@ -908,6 +990,14 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
     // Write capability gates Apply buttons ONLY (and only under
     // apply:"experimental"); it never decides where a row appears.
     const fixable = applyEngineCanAct(row);
+    const nameAdvisory = bindingAdvisory(row);
+    // Every prompt this row can produce is told which layer the fix belongs to and
+    // what the code calls its token — the two facts that keep it from inventing a
+    // code-side target out of a Figma variable name.
+    const layer = fixLayer(row);
+    const code = codeTokenName(row);
+    const promptForRow = (d: DimensionDiff, extras?: PromptExtras): string =>
+      promptFor(d, { layer, ...(code ? { codeTokenName: code } : {}), ...extras });
     if (row.kind === "token") {
       const key = `token-${element}-${row.property}-${i}`;
       return (
@@ -920,7 +1010,8 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
           applyEnabled={applyEnabled}
           finding={finding}
           {...(advisory ? { advisory } : {})}
-          promptFor={promptFor}
+          {...(nameAdvisory ? { nameAdvisory } : {})}
+          promptFor={promptForRow}
           applyResults={applyResults}
           onApply={onApply}
           onUndo={onUndo}
@@ -937,7 +1028,7 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
         applyEnabled={applyEnabled}
         finding={finding}
         {...(advisory ? { advisory } : {})}
-        promptFor={promptFor}
+        promptFor={promptForRow}
         codeResult={applyResults[`${key}:code`]}
         figmaResult={applyResults[`${key}:figma`]}
         onApply={(scope) => onApply(d, key, scope)}
@@ -1098,34 +1189,14 @@ function renderGroups(
   );
 }
 
-function groupDimensions(diffs: DimensionDiff[]): GroupedRow[] {
-  const indexByProp = new Map<string, number>();
-  const rows: GroupedRow[] = [];
-  for (const d of diffs) {
-    if (d.kind === "token-value" || d.kind === "token-binding") {
-      // Keyed by element as well as property: the root and a bound child both
-      // report `padding-top`, and pairing the root's value with the child's
-      // binding would fabricate a row describing neither.
-      const key = `${d.childSelector ?? ""}|${d.property}`;
-      let idx = indexByProp.get(key);
-      if (idx === undefined) {
-        idx = rows.length;
-        indexByProp.set(key, idx);
-        rows.push({ kind: "token", property: d.property });
-      }
-      const row = rows[idx] as Extract<GroupedRow, { kind: "token" }>;
-      if (d.kind === "token-value") row.value = d;
-      else row.binding = d;
-    } else {
-      rows.push({ kind: "other", diff: d });
-    }
-  }
-  return rows;
-}
+// `groupDimensions` moved to row-triage.ts in v0.0.38 — the bulk tallies group
+// the same way, and a count that disagreed with the table it summarizes is what
+// issue #57 reported.
 
 const STATUS_LABEL: Record<DimensionDiff["status"], string> = {
   match: "match",
   drift: "drift",
+  advisory: "advisory",
   "flag-only": "needs setup",
   unresolved: "unresolved",
 };
@@ -1178,13 +1249,30 @@ interface TokenRowProps {
   finding: RowFinding;
   /** Advisory for a judgement-call / unbound-Figma-value row. */
   advisory?: string;
-  promptFor: (d: DimensionDiff, extras?: { finding?: RowFinding; advisory?: string }) => string;
+  /**
+   * Name-only binding divergence (issue #57). Rendered as its own labelled pill
+   * under the value verdict and spelled out in the notes cell: the divergence is
+   * real information — which is why it stays visible — but it is not drift, so it
+   * is never red and never grows a fix button.
+   */
+  nameAdvisory?: BindingAdvisory;
+  promptFor: (d: DimensionDiff, extras?: PromptExtras) => string;
   applyResults: Record<string, ApplyResult>;
   onApply: (d: DimensionDiff, key: string, scope: ApplyScope) => void;
   onUndo: (key: string, scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, applyEnabled, finding, advisory, promptFor, applyResults, onApply, onUndo }) => {
+/** Row context a prompt needs beyond the diff itself. */
+interface PromptExtras {
+  finding?: RowFinding;
+  advisory?: string;
+  /** Which layer the fix belongs to — see `fixLayer`. */
+  layer?: FixLayer;
+  /** The code-side token name, so a prompt never has to reach for Figma's. */
+  codeTokenName?: string;
+}
+
+const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, applyEnabled, finding, advisory, nameAdvisory, promptFor, applyResults, onApply, onUndo }) => {
   // Prefer value diff for the Code/Figma cells (concrete px/rgb is more
   // useful than a token name); fall back to binding if value is absent.
   const display = value ?? binding;
@@ -1219,6 +1307,14 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
       </td>
       <td style={styles.td}>
         <FindingPill status={value?.status} title={valueTitle} finding={finding} />
+        {nameAdvisory && (
+          <div
+            style={{ ...styles.pill, ...statusStyle("advisory"), ...styles.advisoryPill }}
+            title={nameAdvisory.detail}
+          >
+            {nameAdvisory.label}
+          </div>
+        )}
       </td>
       <td style={styles.td}>
         {applyEnabled && bindingFixable && binding ? (
@@ -1257,6 +1353,11 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
             {advisory}
           </div>
         )}
+        {/* The divergence spelled out, with the `tokenAliases` entry that would
+            settle it. Shown in full rather than as a tooltip: "add this line to
+            your config" is the actual next step, and hiding it behind a hover is
+            how a 89-row report stays unexplained. */}
+        {nameAdvisory && <div style={styles.muted}>{nameAdvisory.detail}</div>}
         {rowHasDrift({ kind: "token", property, ...(value !== undefined ? { value } : {}), ...(binding !== undefined ? { binding } : {}) }) ? (
           // Prefer the drifted value diff (it carries tokenName); fall back
           // to the binding diff. `display` is never undefined here — drift
@@ -1298,7 +1399,7 @@ interface OtherRowProps {
    * Present exactly on judgement-call / unbound-Figma-value rows.
    */
   advisory?: string;
-  promptFor: (d: DimensionDiff, extras?: { finding?: RowFinding; advisory?: string }) => string;
+  promptFor: (d: DimensionDiff, extras?: PromptExtras) => string;
   codeResult: ApplyResult | undefined;
   figmaResult: ApplyResult | undefined;
   onApply: (scope: ApplyScope) => void;
@@ -1556,9 +1657,14 @@ function normalizeInspectorPayload(raw: unknown, storyId: string | undefined): P
 }
 
 /**
- * Navigate Storybook to a story, wait for it to render, then fire a
- * single Check drift and resolve when the report comes back. Used by
- * the bulk-check loop. 8-second timeout per story.
+ * Navigate Storybook to a story, wait for it to render, then fire a single Check
+ * drift and resolve when the report comes back. Used by the bulk-check loop.
+ *
+ * Holds no timer of its own: the per-story budget is enforced once, by
+ * `runBulkCheck` (`bulk-run.ts`), *after* the run's shared Figma fetch has
+ * completed. That ordering is the #56 fix — with the timer in here, the first
+ * story of a cold run was timed while it paid for the whole run's variables
+ * fetch, and it was the only story that ever failed.
  */
 function checkOneStory(
   storyId: string,
@@ -1576,25 +1682,7 @@ function checkOneStory(
       reject("Storybook API unavailable");
       return;
     }
-    // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
-    // Bump the per-story timeout so bulk dual-mode runs don't false-time-out.
-    const timeoutMs = opts.dualMode ? 16000 : 8000;
-    const timeout = setTimeout(() => {
-      pendingRef.current = null;
-      reject(`Timed out (>${Math.round(timeoutMs / 1000)}s) on ${storyId}`);
-    }, timeoutMs);
-
-    pendingRef.current = {
-      storyId,
-      resolve: (r) => {
-        clearTimeout(timeout);
-        resolve(r);
-      },
-      reject: (e) => {
-        clearTimeout(timeout);
-        reject(e);
-      },
-    };
+    pendingRef.current = { storyId, resolve, reject };
 
     // Storybook will fire STORY_RENDERED once the new story is up. We
     // listen via the addons channel.
@@ -1620,14 +1708,14 @@ function checkOneStory(
   });
 }
 
-function countRows(report: DriftReport): { match: number; drift: number; flagOnly: number } {
-  const counts = { match: 0, drift: 0, flagOnly: 0 };
-  for (const d of visibleDimensions(report)) {
-    if (d.status === "match") counts.match++;
-    else if (d.status === "drift") counts.drift++;
-    else if (d.status === "flag-only") counts.flagOnly++;
-  }
-  return counts;
+/**
+ * Per-status tallies for one story, over the dimensions the panel actually shows.
+ * Delegates to `countStatuses` so the summary line, the per-story columns and the
+ * table's own row states can't disagree — they did (issue #57): the table offered
+ * no fix on a name-only divergence while these counts called it drift.
+ */
+function countRows(report: DriftReport): StatusCounts {
+  return countStatuses(visibleDimensions(report));
 }
 
 const ValueCell: React.FC<{ value: unknown }> = ({ value }) => {
@@ -1789,18 +1877,11 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
   onPreviewAll,
   onApplyAllForReal,
 }) => {
-  const total = bulk.rows.reduce(
-    (acc, r) => ({
-      match: acc.match + r.match,
-      drift: acc.drift + r.drift,
-      flagOnly: acc.flagOnly + r.flagOnly,
-      totalEngineMs: acc.totalEngineMs + r.durationMs,
-    }),
-    { match: 0, drift: 0, flagOnly: 0, totalEngineMs: 0 },
-  );
-  const completed = bulk.rows.filter((r) => r.status === "done").length;
-  const avgMs = completed > 0 ? Math.round(total.totalEngineMs / completed) : 0;
-  const done = bulk.rows.filter((r) => r.status === "done" || r.status === "error").length;
+  // One arithmetic source (`bulk-summary.ts`) for what the run covered and what it
+  // found. It counts a timed-out story as timed out, not as checked — the old
+  // header said `10/10 stories` over a run where one story produced no rows at
+  // all (#56) — and it keeps name-only divergence out of the drift total (#57).
+  const total = summarizeBulk(bulk.rows);
   const elapsed = (bulk.finishedAt ?? Date.now()) - bulk.startedAt;
   const exportable = bulk.rows.some((r) => r.report);
   const exportDisabled = bulk.running || !exportable;
@@ -1835,11 +1916,44 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
       <h3 style={styles.h3}>
         Bulk check{" "}
         <span style={styles.muted}>
-          — {done}/{bulk.rows.length} stories · {(elapsed / 1000).toFixed(1)}s
-          {avgMs > 0 ? ` · avg ${avgMs}ms/story` : ""} ·{" "}
+          — {coverageLabel(total)} · {(elapsed / 1000).toFixed(1)}s
+          {total.avgMs > 0 ? ` · avg ${total.avgMs}ms/story` : ""} ·{" "}
           <span style={{ color: "#0a7d3e" }}>{total.match} match</span>{" "}
           · <span style={{ color: "#b91c1c" }}>{total.drift} drift</span>{" "}
+          {total.advisory > 0 && (
+            <>
+              ·{" "}
+              <span
+                style={statusStyle("advisory")}
+                title="Name-only token divergence: the two sides spell one token differently and the values match. Not drift — configure `tokenAliases` to state the equivalence."
+              >
+                {total.advisory} name-only
+              </span>{" "}
+            </>
+          )}
+          {total.unverified > 0 && (
+            <>
+              ·{" "}
+              <span
+                style={statusStyle("advisory")}
+                title="Token names differ and no value comparison was available, so the divergence is unverified. Not counted as a match."
+              >
+                {total.unverified} unverified
+              </span>{" "}
+            </>
+          )}
           · {total.flagOnly} flag-only
+          {/* The run's shared Figma fetch, hoisted out of the first story's budget
+              (#56). Shown so the seconds are accounted for as the run's cost. */}
+          {bulk.warmup && (
+            <>
+              {" · "}
+              <span title={bulk.warmup.error ?? "Shared Figma fetch (variables + file metadata), done once for the whole run."}>
+                shared fetch {(bulk.warmup.ms / 1000).toFixed(1)}s
+                {bulk.warmup.error ? " (failed)" : ""}
+              </span>
+            </>
+          )}
         </span>
         <span style={{ marginLeft: 12, display: "inline-flex", gap: 6 }}>
           <button
@@ -1922,6 +2036,9 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
             <th style={styles.th}>Story</th>
             <th style={styles.th}>Match</th>
             <th style={styles.th}>Drift</th>
+            <th style={styles.th} title="Name-only token divergence (values match), plus any whose value could not be compared — reported, never counted as drift or as match.">
+              Advisory
+            </th>
             <th style={styles.th}>Flag-only</th>
             <th style={styles.th}>Time</th>
             <th style={styles.th}>Status</th>
@@ -1946,6 +2063,18 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
               <td style={{ ...styles.td, color: r.drift > 0 ? "#b91c1c" : "#7a7a7a", fontWeight: r.drift > 0 ? 600 : 400 }}>
                 {r.drift || "—"}
               </td>
+              <td style={{ ...styles.td, ...statusStyle("advisory") }}>
+                {r.advisory || r.unverified ? (
+                  <>
+                    {r.advisory || 0}
+                    {r.unverified > 0 && (
+                      <span style={styles.muted}> +{r.unverified} unverified</span>
+                    )}
+                  </>
+                ) : (
+                  "—"
+                )}
+              </td>
               <td style={{ ...styles.td, color: "#7a7a7a" }}>{r.flagOnly || "—"}</td>
               <td style={styles.td}>{r.durationMs ? `${r.durationMs}ms` : "—"}</td>
               <td style={styles.td}>
@@ -1968,7 +2097,14 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
                       </span>
                     );
                   })()}
-                {r.status === "error" && (
+                {r.status === "error" && r.timedOut && (
+                  // Said plainly, because the summary no longer counts it as
+                  // checked: this story contributed nothing to the numbers.
+                  <span style={{ color: "#92610a", fontWeight: 600 }} title={r.error}>
+                    ⏱ timed out — not checked
+                  </span>
+                )}
+                {r.status === "error" && !r.timedOut && (
                   <span style={{ color: "#b91c1c" }} title={r.error}>
                     ✕ {r.error?.slice(0, 40)}
                   </span>
@@ -1992,23 +2128,21 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
 function buildMarkdownReport(bulk: BulkState): string {
   const lines: string[] = [];
   const generated = new Date(bulk.startedAt).toISOString();
-  const totals = bulk.rows.reduce(
-    (acc, r) => ({
-      match: acc.match + r.match,
-      drift: acc.drift + r.drift,
-      flagOnly: acc.flagOnly + r.flagOnly,
-    }),
-    { match: 0, drift: 0, flagOnly: 0 },
-  );
+  const totals = summarizeBulk(bulk.rows);
   lines.push(`# Design-sync drift report`);
   lines.push("");
   lines.push(`Generated: ${generated}`);
+  // Coverage first, and honest about it: a report that opens with "10 stories"
+  // when one timed out overstates what was checked before a reader reaches the
+  // tables.
+  lines.push(`Coverage: ${coverageLabel(totals)}`);
   lines.push(
-    `Stories: ${bulk.rows.length} · Drift: ${totals.drift} · Flag-only: ${totals.flagOnly} · Match: ${totals.match}`,
+    `Drift: ${totals.drift} · Advisory (name-only): ${totals.advisory} · Unverified: ${totals.unverified} · Flag-only: ${totals.flagOnly} · Match: ${totals.match}`,
   );
   lines.push("");
 
   const driftedStories = bulk.rows.filter((r) => r.drift > 0);
+  const advisoryStories = bulk.rows.filter((r) => r.drift === 0 && r.advisory + r.unverified > 0);
   const flaggedStories = bulk.rows.filter((r) => r.drift === 0 && r.flagOnly > 0);
   const errorStories = bulk.rows.filter((r) => r.status === "error");
   // Declared child bindings that produced no comparison. They carry no drift
@@ -2020,6 +2154,7 @@ function buildMarkdownReport(bulk: BulkState): string {
 
   if (
     driftedStories.length === 0 &&
+    advisoryStories.length === 0 &&
     flaggedStories.length === 0 &&
     errorStories.length === 0 &&
     skippedChildren.length === 0
@@ -2033,6 +2168,19 @@ function buildMarkdownReport(bulk: BulkState): string {
     lines.push("");
     for (const row of driftedStories) {
       renderStorySection(lines, row, ["drift"]);
+    }
+  }
+  if (advisoryStories.length > 0) {
+    lines.push(`## Advisory — token names differ, values do not (not drift)`);
+    lines.push("");
+    lines.push(
+      `The code and the Figma library spell the same token differently. Each row's note carries the ` +
+        `\`tokenAliases\` entry that would state the equivalence in \`design-sync.config.json\`. Rows ` +
+        `marked unverified had no value comparison available, so they are not claimed as matches either.`,
+    );
+    lines.push("");
+    for (const row of advisoryStories) {
+      renderStorySection(lines, row, ["advisory"]);
     }
   }
   if (flaggedStories.length > 0) {
@@ -2111,12 +2259,29 @@ function buildJsonReport(bulk: BulkState): string {
     {
       generatedAt: new Date(bulk.startedAt).toISOString(),
       finishedAt: bulk.finishedAt ? new Date(bulk.finishedAt).toISOString() : null,
+      // Coverage is part of the artifact: a consumer counting `stories.length` as
+      // "checked" would repeat the claim this release removed.
+      coverage: (() => {
+        const s = summarizeBulk(bulk.rows);
+        return {
+          stories: s.stories,
+          checked: s.checked,
+          timedOut: s.timedOut,
+          errored: s.errored,
+          pending: s.pending,
+        };
+      })(),
+      sharedFetchMs: bulk.warmup?.ms ?? null,
       stories: bulk.rows.map((r) => ({
         storyId: r.storyId,
         status: r.status,
+        timedOut: r.timedOut ?? false,
         match: r.match,
         drift: r.drift,
+        advisory: r.advisory,
+        unverified: r.unverified,
         flagOnly: r.flagOnly,
+        unresolved: r.unresolved,
         durationMs: r.durationMs,
         error: r.error ?? null,
         report: r.report ?? null,
@@ -2133,6 +2298,10 @@ function statusStyle(status: DimensionDiff["status"]): React.CSSProperties {
       return { color: "#0a7d3e", fontWeight: 600 };
     case "drift":
       return { color: "#b91c1c", fontWeight: 600 };
+    // Information, not an accusation: the two sides spell one token differently.
+    // Slate-blue, never red — nothing here says the component is wrong.
+    case "advisory":
+      return { color: "#3f5b8c", fontWeight: 600 };
     case "flag-only":
       return { color: "#7a7a7a" };
     // Not a verdict: the Figma side couldn't be read, so no comparison
@@ -2304,6 +2473,14 @@ const styles: Record<string, React.CSSProperties> = {
   // violation, so it gets its own label rather than a generic red "drift" pill.
   // Amber-on-red: wrong, but wrong in Figma — the code isn't the thing to fix.
   pillUnbound: { color: "#9a3412", background: "#fff7ed", fontWeight: 700 },
+  // Name-only binding divergence. Sits under the value verdict, so it reads as an
+  // additional fact about the row rather than as the row's verdict.
+  advisoryPill: {
+    marginTop: 4,
+    background: "#f2f6fd",
+    fontWeight: 600,
+    whiteSpace: "nowrap" as const,
+  },
   // Bulk fix-prompt bar, above the table: the default path out of a multi-row
   // drift report.
   bulkPromptBar: {

@@ -1,16 +1,19 @@
 import type {
   CheckDriftInput,
+  ChildTarget,
   CodeSnapshot,
   Engine,
   EngineContext,
   EngineFactory,
 } from "./types.js";
 import type {
+  ChildBindingReport,
   DimensionDiff,
   DriftReport,
   ModeAwareValue,
 } from "../dimensions/types.js";
 import { normalizeTokenName } from "@metalab/design-sync-core";
+import { formatChildProblem } from "../child-bindings.js";
 import { variantSetRowApplicable } from "../row-triage.js";
 import { PersistentCache } from "../cache.js";
 import { isTransparentColor, normalizeColor } from "./color-normalize.js";
@@ -245,7 +248,12 @@ class FigmaRestEngine implements Engine {
     if (this.persistentCache) {
       await this.persistentCache.load();
       const fileLastModified = await this.fetchFileLastModified(fileKey).catch(() => "");
-      const cached = this.persistentCache.get(input.storyId, fileLastModified, input.snapshot);
+      const cached = this.persistentCache.get(
+        input.storyId,
+        fileLastModified,
+        input.snapshot,
+        input.children,
+      );
       if (cached) {
         return {
           ...cached,
@@ -281,6 +289,25 @@ class FigmaRestEngine implements Engine {
     dimensions.push(...this.diffCopy(node, snapshot));
     dimensions.push(...propsDiffs);
 
+    // Declared child bindings. Nothing runs — and no `children` field appears on
+    // the report — when the registry entry has no `children` key, which is what
+    // keeps legacy entries byte-identical.
+    let childReports: ChildBindingReport[] | undefined;
+    if (input.children && input.children.length > 0) {
+      const outcome = await this.diffChildren(
+        {
+          fileKey,
+          storyId: input.storyId,
+          registryPath: input.registryPath ?? ".design-sync/registry.json",
+        },
+        input.children,
+        variables,
+        activeMode,
+      );
+      dimensions.push(...outcome.dimensions);
+      childReports = outcome.reports;
+    }
+
     // Reserved kinds — engine fills as flag-only placeholders.
     dimensions.push(
       this.placeholder("structure", "story.structure"),
@@ -300,12 +327,19 @@ class FigmaRestEngine implements Engine {
       },
     };
     if (activeMode) report.mode = activeMode;
+    if (childReports) report.children = childReports;
 
     // Stash for future short-circuits.
     if (this.persistentCache) {
       const fileLastModified = await this.fetchFileLastModified(fileKey).catch(() => "");
       if (fileLastModified) {
-        this.persistentCache.set(input.storyId, fileLastModified, input.snapshot, report);
+        this.persistentCache.set(
+          input.storyId,
+          fileLastModified,
+          input.snapshot,
+          report,
+          input.children,
+        );
       }
     }
 
@@ -373,6 +407,156 @@ class FigmaRestEngine implements Engine {
     }
     this.nodeCache.set(cacheKey, entry.document);
     return entry.document;
+  }
+
+  /**
+   * Fetch several nodes in **one** request. `GET /files/:key/nodes` takes a
+   * comma-separated `ids` list, so a 3-child component costs exactly one HTTP
+   * call, not three — and zero calls when the 30s node cache already holds them
+   * (a bulk run re-checking the same story). Goes through `throttledFetch` like
+   * every other call, so the concurrency gate and 429 backoff apply unchanged.
+   *
+   * Ids the response doesn't contain are reported back as unreachable rather
+   * than thrown: one bad child binding must not abort the whole report, and it
+   * must not vanish either.
+   */
+  private async fetchNodesBatch(
+    fileKey: string,
+    nodeIds: readonly string[],
+  ): Promise<{ nodes: Map<string, FigmaNode>; unreachable: Map<string, string> }> {
+    const nodes = new Map<string, FigmaNode>();
+    const unreachable = new Map<string, string>();
+    const misses: string[] = [];
+    for (const id of new Set(nodeIds)) {
+      const cached = this.nodeCache.get(`${fileKey}:${id}`);
+      if (cached) nodes.set(id, cached);
+      else misses.push(id);
+    }
+    if (misses.length === 0) return { nodes, unreachable };
+
+    const ids = misses.map((id) => encodeURIComponent(id)).join(",");
+    const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/nodes?ids=${ids}`;
+    let res: Response;
+    try {
+      res = await throttledFetch(url, { headers: this.headers() });
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : String(err);
+      for (const id of misses) unreachable.set(id, detail);
+      return { nodes, unreachable };
+    }
+    if (!res.ok) {
+      for (const id of misses) unreachable.set(id, `Figma REST ${res.status}`);
+      return { nodes, unreachable };
+    }
+    const data = (await res.json()) as FigmaNodesResponse;
+    for (const id of misses) {
+      const entry = data.nodes?.[id];
+      if (entry?.document) {
+        this.nodeCache.set(`${fileKey}:${id}`, entry.document);
+        nodes.set(id, entry.document);
+      } else {
+        unreachable.set(id, `no node with that id in file ${fileKey}`);
+      }
+    }
+    return { nodes, unreachable };
+  }
+
+  /**
+   * Compare each declared child element against its own Figma node, through the
+   * same diff methods the root uses — so every CSS property the root supports
+   * (padding, radii, borders, gap, the full typography set, shadows, colours)
+   * works for a child with no per-property wiring.
+   *
+   * Two root-only dimensions are deliberately **not** run for children:
+   *
+   *  - `variant-set` compares Figma variant values against modifier classes.
+   *    A child element is not a variant of anything; the check's premise is
+   *    structurally false there, and on a child with any class at all it would
+   *    emit "code variants not declared in Figma" — a confident signal that
+   *    doesn't apply.
+   *  - `props` compares Figma component properties against the **story's** args.
+   *    Those args describe the component, not its header; matching them against
+   *    a child node's (usually absent) properties can only produce noise.
+   *
+   * Both are reported once, for the root, where they mean something.
+   */
+  private async diffChildren(
+    ctx: { fileKey: string; storyId: string; registryPath: string },
+    children: readonly ChildTarget[],
+    variables: FigmaLocalVariablesResponse | null,
+    activeMode: string | undefined,
+  ): Promise<{ dimensions: DimensionDiff[]; reports: ChildBindingReport[] }> {
+    const { fileKey } = ctx;
+    const dimensions: DimensionDiff[] = [];
+    const reports: ChildBindingReport[] = [];
+
+    const comparable = children.filter((c) => !c.problem && c.snapshot && c.nodeId);
+    const { nodes, unreachable } =
+      comparable.length > 0
+        ? await this.fetchNodesBatch(
+            fileKey,
+            comparable.map((c) => c.nodeId),
+          )
+        : { nodes: new Map<string, FigmaNode>(), unreachable: new Map<string, string>() };
+
+    for (const child of children) {
+      // Resolution already failed upstream (bad selector, no/ambiguous match,
+      // malformed registry value). Pass the reason through untouched.
+      if (child.problem || !child.snapshot || !child.nodeId) {
+        reports.push({
+          selector: child.selector,
+          nodeId: child.nodeId,
+          status: child.problem?.status ?? "snapshot-missing",
+          message: child.problem?.message ?? "",
+          rowCount: 0,
+        });
+        continue;
+      }
+      let node = nodes.get(child.nodeId);
+      // A child bound to a nested COMPONENT (an instance of another library
+      // component) gets the same COMPONENT_SET inheritance merge the root does,
+      // so bindings declared on the parent set don't read as "Figma declares
+      // nothing". Costs no extra node request: the batch already warmed the
+      // cache `fetchNode` reads from.
+      if (node?.type === "COMPONENT") {
+        node = await this.fetchNodeWithInheritedBindings(fileKey, child.nodeId).catch(() => node!);
+      }
+      if (!node) {
+        reports.push({
+          selector: child.selector,
+          nodeId: child.nodeId,
+          status: "node-unreachable",
+          message: formatChildProblem({
+            status: "node-unreachable",
+            selector: child.selector,
+            storyId: ctx.storyId,
+            registryPath: ctx.registryPath,
+            nodeId: child.nodeId,
+            detail: unreachable.get(child.nodeId),
+          }),
+          rowCount: 0,
+        });
+        continue;
+      }
+
+      const rows = [
+        ...this.diffTokenValues(node, child.snapshot, variables, activeMode),
+        ...this.diffTokenBindings(node, child.snapshot, variables, activeMode),
+        ...this.diffCopy(node, child.snapshot),
+      ];
+      for (const row of rows) row.childSelector = child.selector;
+      dimensions.push(...rows);
+      const report: ChildBindingReport = {
+        selector: child.selector,
+        nodeId: child.nodeId,
+        status: "compared",
+        rowCount: rows.length,
+      };
+      if (node.name) report.nodeName = node.name;
+      reports.push(report);
+    }
+
+    return { dimensions, reports };
   }
 
   /**

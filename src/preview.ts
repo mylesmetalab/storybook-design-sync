@@ -2,6 +2,8 @@ import { addons } from "storybook/preview-api";
 import {
   EVENTS,
   type CheckDriftRequestPayload,
+  type ChildBindingsInfoPayload,
+  type ChildSnapshotEntry,
   type CodeSnapshotPayload,
 } from "./channels.js";
 import type { CodeSnapshot } from "./engines/types.js";
@@ -10,6 +12,11 @@ import {
   compositeBorderTokens,
 } from "./binding-shape.js";
 import { resolveStoryRoot } from "./story-root.js";
+import {
+  resolveChildElements,
+  type ChildBindingDeclaration,
+  type ChildElementResolution,
+} from "./child-bindings.js";
 
 const SNAPSHOT_PROPERTIES = [
   // Box / background
@@ -257,6 +264,100 @@ function waitForStyleFlush(): Promise<void> {
   });
 }
 
+/**
+ * Ask the server which child elements the registry binds for this story. The
+ * registry is a file on the Node side, so the preview cannot read it; asking
+ * *before* snapshotting is what lets the children be captured in the same pass
+ * (and, in a dual-mode run, in the same two mode passes) as the root.
+ *
+ * On timeout we resolve to `[]` and snapshot the root only. That is not a silent
+ * loss: the server compares the declarations it knows about against the
+ * `childSnapshots` it receives and reports every absent one as
+ * `snapshot-missing`.
+ */
+const CHILD_BINDINGS_TIMEOUT_MS = 2000;
+
+function requestChildBindings(storyId: string): Promise<ChildBindingDeclaration[]> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value: ChildBindingDeclaration[]): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      channel.off(EVENTS.ChildBindingsInfo, onInfo);
+      resolve(value);
+    };
+    const onInfo = (info: ChildBindingsInfoPayload): void => {
+      if (!info || info.storyId !== storyId) return;
+      done(Array.isArray(info.children) ? info.children : []);
+    };
+    const timer = setTimeout(() => done([]), CHILD_BINDINGS_TIMEOUT_MS);
+    channel.on(EVENTS.ChildBindingsInfo, onInfo);
+    channel.emit(EVENTS.ChildBindingsRequest, { storyId });
+  });
+}
+
+/**
+ * Snapshot every resolved child with the *same* `snapshotElement` the root uses,
+ * so every property that works for the root works for a child. Unresolved
+ * declarations still produce an entry — carrying their resolution kind, so the
+ * server can word the failure — because a dropped entry is exactly the silence
+ * this feature exists to prevent.
+ *
+ * `parameters.designSync.tokens` is deliberately NOT merged in: those bindings are
+ * declared for the story's root element, so copying them onto a child would put
+ * an authoritative-looking token name on an element they don't describe. A child's
+ * bindings come from its own `data-token-*` attributes, its own inline styles, and
+ * the CSS scanner's entry for its own selector (merged server-side).
+ */
+function snapshotChildren(
+  resolutions: readonly ChildElementResolution[],
+): ChildSnapshotEntry[] {
+  return resolutions.map((r): ChildSnapshotEntry => {
+    if (r.kind === "found") {
+      return {
+        selector: r.selector,
+        nodeId: r.nodeId,
+        kind: "found",
+        snapshot: snapshotElement(r.element),
+      };
+    }
+    if (r.kind === "ambiguous") {
+      return {
+        selector: r.selector,
+        nodeId: r.nodeId,
+        kind: "ambiguous",
+        candidates: r.candidates,
+      };
+    }
+    if (r.kind === "invalid") {
+      return { selector: r.selector, nodeId: r.nodeId, kind: "invalid", detail: r.detail };
+    }
+    return {
+      selector: r.selector,
+      nodeId: r.nodeId,
+      kind: "not-found",
+      rootMatches: r.rootMatches,
+    };
+  });
+}
+
+/** Attach a second-mode snapshot to the matching child entry, by selector. */
+function attachChildMode(
+  entries: ChildSnapshotEntry[],
+  extra: ChildSnapshotEntry[],
+  mode: string,
+): void {
+  const bySelector = new Map(extra.map((e) => [e.selector, e]));
+  for (const entry of entries) {
+    if (entry.kind !== "found") continue;
+    const other = bySelector.get(entry.selector);
+    if (other?.kind === "found" && other.snapshot) {
+      entry.additionalSnapshots = [{ mode, snapshot: other.snapshot }];
+    }
+  }
+}
+
 channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) => {
   const resolution = resolveStoryRoot({
     doc: document,
@@ -280,6 +381,13 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
 
   const modeAttribute = payload.modeAttribute ?? "data-theme";
 
+  // Declared child bindings, resolved once against the settled DOM. Resolution
+  // is mode-independent (a theme toggle doesn't change which elements match), so
+  // it happens here rather than inside each mode pass.
+  const declarations = await requestChildBindings(payload.storyId);
+  const childResolutions =
+    declarations.length > 0 ? resolveChildElements(target, declarations) : [];
+
   if (payload.dualMode) {
     const [modeA, modeB] = payload.dualModes ?? ["light", "dark"];
     const root = document.documentElement;
@@ -291,17 +399,21 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     await waitForStyleFlush();
     const snapA = snapshotElement(target);
     if (payload.tokens) snapA.bindings = { ...(snapA.bindings ?? {}), ...payload.tokens };
+    const childrenA = snapshotChildren(childResolutions);
 
     // Pass B
     root.setAttribute(modeAttribute, modeB);
     await waitForStyleFlush();
     const snapB = snapshotElement(target);
     if (payload.tokens) snapB.bindings = { ...(snapB.bindings ?? {}), ...payload.tokens };
+    const childrenB = snapshotChildren(childResolutions);
 
     // Restore
     if (original === null) root.removeAttribute(modeAttribute);
     else root.setAttribute(modeAttribute, original);
     restoreTransitions();
+
+    attachChildMode(childrenA, childrenB, modeB);
 
     const out: CodeSnapshotPayload = {
       storyId: payload.storyId,
@@ -311,6 +423,7 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     };
     if (payload.args) out.args = payload.args;
     if (payload.target) out.target = payload.target;
+    if (childrenA.length > 0) out.childSnapshots = childrenA;
     channel.emit(EVENTS.CodeSnapshot, out);
     return;
   }
@@ -319,10 +432,12 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
   if (payload.tokens) {
     snapshot.bindings = { ...(snapshot.bindings ?? {}), ...payload.tokens };
   }
+  const childSnapshots = snapshotChildren(childResolutions);
   const mode = readActiveMode(modeAttribute);
   const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot };
   if (mode) out.mode = mode;
   if (payload.args) out.args = payload.args;
   if (payload.target) out.target = payload.target;
+  if (childSnapshots.length > 0) out.childSnapshots = childSnapshots;
   channel.emit(EVENTS.CodeSnapshot, out);
 });

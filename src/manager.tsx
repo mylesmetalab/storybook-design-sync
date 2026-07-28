@@ -24,6 +24,7 @@ import {
   rowHasDrift,
   stagedEditsVisible,
   rowHasAnyValue,
+  summarizeListCell,
 } from "./row-triage.js";
 import { buildFixPrompt } from "./fix-prompt.js";
 
@@ -33,6 +34,13 @@ interface PanelState {
   loading: boolean;
   report: DriftReport | null;
   error: string | null;
+  /**
+   * Whether `error` describes a failure or an expected, correct state that
+   * simply has no report to show (currently: a `pending` registry stub whose
+   * Figma binding hasn't been assigned yet). Informational notices are styled
+   * neutrally — nothing is broken, so nothing should read as broken.
+   */
+  errorSeverity?: "error" | "info";
 }
 
 interface BulkRow {
@@ -316,7 +324,12 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         pendingResolversRef.current = null;
         return;
       }
-      setState({ loading: false, report: null, error: payload.message });
+      setState({
+        loading: false,
+        report: null,
+        error: payload.message,
+        errorSeverity: payload.severity ?? "error",
+      });
     },
     [EVENTS.ApplyCodeResult]: (payload: ApplyCodeResultPayload) => {
       const { result } = payload;
@@ -630,7 +643,11 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         />
       )}
 
-      {state.error && <div style={styles.error}>{state.error}</div>}
+      {state.error && (
+        <div style={state.errorSeverity === "info" ? styles.notice : styles.error}>
+          {state.error}
+        </div>
+      )}
 
       {state.report && (
         <DiffTable
@@ -1069,7 +1086,7 @@ const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, applyEnabled, infoNote,
         <div style={styles.muted}>{d.kind}</div>
       </td>
       <td style={styles.td}>
-        <ValueCell value={d.codeValue} />
+        <ListCell value={d.codeValue} noun={d.kind === "variant-set" ? "class" : "item"} />
       </td>
       <td style={styles.td}>
         <ValueCell value={d.figmaValue} />
@@ -1364,6 +1381,29 @@ const ValueCell: React.FC<{ value: unknown }> = ({ value }) => {
   if (value === null || value === undefined) return <span style={styles.muted}>—</span>;
   if (typeof value === "string") return <code>{value}</code>;
   return <code>{JSON.stringify(value)}</code>;
+};
+
+const pluralize = (noun: string): string => (/(s|x|z|ch|sh)$/.test(noun) ? `${noun}es` : `${noun}s`);
+
+/**
+ * A cell whose value may be a long list. The `variant-set` row's code side is
+ * every candidate modifier class on the element — on a utility-class component
+ * that legitimately reaches the table it can be dozens of entries, which turned
+ * the cell (and the advisory that quoted it) into an unreadable dump. Long
+ * lists collapse to a count with the entries behind a disclosure; short ones
+ * render exactly as before.
+ */
+const ListCell: React.FC<{ value: unknown; noun: string }> = ({ value, noun }) => {
+  const long = summarizeListCell(value);
+  if (!long) return <ValueCell value={value} />;
+  return (
+    <details style={styles.cellDetails}>
+      <summary style={styles.cellSummary}>
+        {long.count} {long.count === 1 ? noun : pluralize(noun)}
+      </summary>
+      <code style={styles.cellDetailBody}>{long.items.join(" ")}</code>
+    </details>
+  );
 };
 
 interface StagedEditsProps {
@@ -1922,6 +1962,19 @@ const styles: Record<string, React.CSSProperties> = {
     marginBottom: 12,
     whiteSpace: "pre-wrap",
   },
+  // Expected-state notice (currently: a `pending` registry stub). Same shape as
+  // the error banner so layout is unchanged, neutral colours because nothing
+  // failed — a story whose Figma binding hasn't been assigned yet is the
+  // registry working as intended, not a defect.
+  notice: {
+    padding: 8,
+    borderRadius: 4,
+    background: "#f4f6f8",
+    border: "1px solid #dfe4ea",
+    color: "#41505f",
+    marginBottom: 12,
+    whiteSpace: "pre-wrap",
+  },
   section: { marginTop: 16 },
   h3: { fontSize: 13, margin: "0 0 8px", fontWeight: 600 },
   table: { width: "100%", borderCollapse: "collapse" },
@@ -1934,6 +1987,16 @@ const styles: Record<string, React.CSSProperties> = {
   },
   td: { padding: "6px 8px", borderBottom: "1px solid #f0f0f0", verticalAlign: "top" },
   muted: { color: "#7a7a7a", fontSize: 12 },
+  cellDetails: { maxWidth: 260 },
+  cellSummary: { cursor: "pointer", color: "#525252", fontSize: 12, userSelect: "none" as const },
+  cellDetailBody: {
+    display: "block",
+    marginTop: 4,
+    fontSize: 11,
+    lineHeight: 1.5,
+    color: "#525252",
+    wordBreak: "break-word" as const,
+  },
   modes: { color: "#7a7a7a", fontSize: 11, marginTop: 2 },
   infoDetails: {
     marginTop: 16,

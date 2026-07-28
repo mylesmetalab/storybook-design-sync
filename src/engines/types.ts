@@ -23,6 +23,15 @@ export interface CodeSnapshot {
    */
   variantClasses?: string[];
   /**
+   * Every class on the story root element, in DOM order (so the first entry is
+   * the base class). `variantClasses` is the *expanded candidate set* derived
+   * from these, which destroys the information needed to tell "this component
+   * expresses variants as modifier classes" from "this component is styled
+   * with utility classes and selects variants by prop" — so the raw list is
+   * sent alongside it and `variantSetRowApplicable` decides on that basis.
+   */
+  rootClasses?: string[];
+  /**
    * Visible text content within the targeted element (recursive innerText),
    * trimmed and split into non-empty strings. Used by the `copy` diff to
    * check that Figma TEXT-node strings appear in the rendered story.

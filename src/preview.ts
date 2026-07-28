@@ -187,7 +187,10 @@ function snapshotElement(el: HTMLElement): CodeSnapshot {
   }
   const variantClasses = [...candidates];
 
-  return { styles, bindings, variantClasses, texts };
+  // The raw list too: expanding to candidates loses which convention (if any)
+  // produced them, and the engine needs that to decide whether the variant-set
+  // comparison applies to this component at all.
+  return { styles, bindings, variantClasses, rootClasses: allClasses, texts };
 }
 
 const channel = addons.getChannel();

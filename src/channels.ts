@@ -110,6 +110,13 @@ export interface ApplyCodeResultPayload {
 export interface DriftErrorPayload {
   storyId: string;
   message: string;
+  /**
+   * How the panel should present `message`. Defaults to `"error"` when absent
+   * (every genuine failure). `"info"` marks a correct, expected state that
+   * merely has no report to show — currently only a `pending` registry stub —
+   * so it renders as a neutral notice instead of in error red.
+   */
+  severity?: "error" | "info";
 }
 
 export interface RegisteredStoryEntry {

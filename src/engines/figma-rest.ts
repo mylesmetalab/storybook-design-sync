@@ -11,6 +11,7 @@ import type {
   ModeAwareValue,
 } from "../dimensions/types.js";
 import { normalizeTokenName } from "@metalab/design-sync-core";
+import { variantSetRowApplicable } from "../row-triage.js";
 import { PersistentCache } from "../cache.js";
 import { isTransparentColor, normalizeColor } from "./color-normalize.js";
 
@@ -256,11 +257,17 @@ class FigmaRestEngine implements Engine {
     const snapshot = input.snapshot;
     const activeMode = input.mode;
 
+    // props runs first so the variant-set check can see whether the same axes
+    // were already compared against the story args (in which case its own,
+    // weaker class-based comparison has nothing to add). Push order below is
+    // unchanged — the panel's row order is not affected.
+    const propsDiffs = this.diffProps(node, input.args);
+
     dimensions.push(...this.diffTokenValues(node, snapshot, variables, activeMode));
     dimensions.push(...this.diffTokenBindings(node, snapshot, variables, activeMode));
-    dimensions.push(...this.diffVariantSet(node, snapshot, input.storyId));
+    dimensions.push(...this.diffVariantSet(node, snapshot, input.storyId, propsDiffs));
     dimensions.push(...this.diffCopy(node, snapshot));
-    dimensions.push(...this.diffProps(node, input.args));
+    dimensions.push(...propsDiffs);
 
     // Reserved kinds — engine fills as flag-only placeholders.
     dimensions.push(
@@ -939,6 +946,7 @@ class FigmaRestEngine implements Engine {
     node: FigmaNode,
     snapshot: CodeSnapshot | undefined,
     storyId: string,
+    propsDiffs: DimensionDiff[] = [],
   ): DimensionDiff[] {
     // The preview already expands BEM-modifier classes and adjacent classes
     // (.file-item.active style) into a candidate set. Lowercase everything
@@ -976,17 +984,32 @@ class FigmaRestEngine implements Engine {
       const missing: string[] = [];
       const matched: string[] = [];
       const skipped: string[] = [];
+      const evaluatedAxes: string[] = [];
 
       for (const [prop, value] of Object.entries(figmaProps)) {
         if (isFalsyVariantValue(value)) {
           skipped.push(`${prop}=${value}`);
           continue;
         }
+        evaluatedAxes.push(prop);
         if (codeVariants.has(value.toLowerCase())) {
           matched.push(`${prop}=${value}`);
         } else {
           missing.push(`${prop}=${value}`);
         }
+      }
+
+      // Inapplicable (no modifier-class convention to reason about) or
+      // redundant (props already confirmed every axis)? Then this row is a
+      // confident signal that doesn't apply — emit nothing at all.
+      if (
+        !variantSetRowApplicable({
+          rootClasses: snapshot?.rootClasses,
+          evaluatedAxes,
+          propsStatuses: propsStatusesByAxis(propsDiffs),
+        })
+      ) {
+        return [];
       }
 
       const status: DimensionDiff["status"] = missing.length === 0 ? "match" : "drift";
@@ -1013,6 +1036,12 @@ class FigmaRestEngine implements Engine {
       }
     }
     if (codeVariants.size === 0 && figmaOptions.size === 0) return [];
+
+    // Same premise, same suppression: comparing a utility class list against a
+    // Figma component set's variant options is not a comparison. (No per-axis
+    // `props` rows exist for a COMPONENT_SET, so only the evidence rule can
+    // fire here.)
+    if (!variantSetRowApplicable({ rootClasses: snapshot?.rootClasses })) return [];
 
     // Drift only if the code variant isn't a known Figma option.
     const unknownInFigma = [...codeVariants].filter((v) => !figmaOptions.has(v));
@@ -1375,6 +1404,19 @@ function parseVariantName(name: string): Record<string, string> {
     const k = part.slice(0, eq).trim();
     const v = part.slice(eq + 1).trim();
     if (k && v) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Index the `props` rows by the Figma variant axis they compared, so the
+ * variant-set check can ask "was this axis already confirmed against the story
+ * args?". `diffProps` emits one row per axis, keyed by the axis name.
+ */
+function propsStatusesByAxis(propsDiffs: DimensionDiff[]): Record<string, DimensionDiff["status"]> {
+  const out: Record<string, DimensionDiff["status"]> = {};
+  for (const d of propsDiffs) {
+    if (d.kind === "props") out[d.property] = d.status;
   }
   return out;
 }

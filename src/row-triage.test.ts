@@ -7,6 +7,10 @@ import {
   stagedEditsVisible,
   rowHasAnyValue,
   bindingScanEmpty,
+  isUtilityShapedClass,
+  modifierClassCandidates,
+  variantSetRowApplicable,
+  summarizeListCell,
   type GroupedRow,
 } from "./row-triage.js";
 import type { DimensionDiff } from "./dimensions/types.js";
@@ -288,5 +292,214 @@ describe("explainInfo — advisories are specific, actionable, never generic (P2
     expect(msg).toMatch(/args/);
     expect(msg).toMatch(/deferred/i);
     expect(msg).toMatch(/no unambiguous write target/i);
+  });
+});
+
+/**
+ * The class lists these tests reason about are real: the shadcn/cva Button as
+ * rendered by the consumer that exposed the bug (25 utility classes, variants
+ * chosen by props), and the BEM/adjacent-modifier components the variant-set
+ * check was designed for.
+ */
+const CVA_BUTTON_CLASSES = [
+  "inline-flex",
+  "items-center",
+  "justify-center",
+  "gap-2",
+  "whitespace-nowrap",
+  "rounded-md",
+  "text-sm",
+  "font-medium",
+  "transition-all",
+  "disabled:pointer-events-none",
+  "disabled:opacity-50",
+  "[&_svg]:pointer-events-none",
+  "[&_svg:not([class*='size-'])]:size-4",
+  "shrink-0",
+  "outline-none",
+  "focus-visible:border-ring",
+  "focus-visible:ring-ring/50",
+  "focus-visible:ring-[3px]",
+  "aria-invalid:ring-destructive/20",
+  "bg-primary",
+  "text-primary-foreground",
+  "shadow-xs",
+  "hover:bg-primary/90",
+  "h-9",
+  "px-4",
+];
+
+describe("isUtilityShapedClass — utility framework class vs component modifier", () => {
+  it("reads every class of a real cva Button as a utility", () => {
+    const notUtilities = CVA_BUTTON_CLASSES.filter((c) => !isUtilityShapedClass(c));
+    expect(notUtilities).toEqual([]);
+  });
+
+  it("does not mistake hand-authored modifier classes for utilities", () => {
+    for (const c of [
+      "active",
+      "is-open",
+      "selected",
+      "state-hover",
+      "variant-primary",
+      "icon-button--accent",
+      "file-item",
+      "hidden",
+      "disabled",
+    ]) {
+      expect(isUtilityShapedClass(c), c).toBe(false);
+    }
+  });
+});
+
+describe("modifierClassCandidates — the evidence the variant-set check needs", () => {
+  it("finds nothing to reason about on a utility class list", () => {
+    expect(modifierClassCandidates(CVA_BUTTON_CLASSES)).toEqual([]);
+  });
+
+  it("reads BEM `--` suffixes, wherever they sit in the list", () => {
+    expect(modifierClassCandidates(["icon-button", "icon-button--accent"])).toEqual(["accent"]);
+    // A BEM modifier still counts when the element also carries utilities.
+    expect(modifierClassCandidates(["btn", "px-4", "btn--primary"])).toEqual(["primary"]);
+  });
+
+  it("reads adjacent modifier classes (`.file-item.active`)", () => {
+    expect(modifierClassCandidates(["file-item", "active"])).toEqual(["active"]);
+  });
+
+  it("never treats the base class alone as a modifier", () => {
+    expect(modifierClassCandidates(["file-item"])).toEqual([]);
+  });
+});
+
+describe("variantSetRowApplicable — a confident signal that doesn't apply is worse than none", () => {
+  it("suppresses the row on a Tailwind/cva component (no modifier convention at all)", () => {
+    expect(
+      variantSetRowApplicable({
+        rootClasses: CVA_BUTTON_CLASSES,
+        evaluatedAxes: ["Variant", "Size"],
+        propsStatuses: { Variant: "drift", Size: "drift" },
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps the row for a BEM component with a genuinely missing modifier", () => {
+    expect(
+      variantSetRowApplicable({
+        rootClasses: ["icon-button", "icon-button--accent"],
+        evaluatedAxes: ["State"],
+        propsStatuses: { State: "drift" },
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the row for a BEM component whose modifiers all match", () => {
+    expect(
+      variantSetRowApplicable({
+        rootClasses: ["icon-button", "icon-button--accent"],
+        evaluatedAxes: ["Variant"],
+        propsStatuses: { Variant: "drift" },
+      }),
+    ).toBe(true);
+  });
+
+  it("suppresses the row when matching props rows already cover every axis", () => {
+    expect(
+      variantSetRowApplicable({
+        rootClasses: ["icon-button", "icon-button--accent"],
+        evaluatedAxes: ["Variant", "Size"],
+        propsStatuses: { Variant: "match", Size: "match" },
+      }),
+    ).toBe(false);
+  });
+
+  it("does not count a partially-confirmed or unconfirmable axis as covered", () => {
+    const bem = ["icon-button", "icon-button--accent"];
+    expect(
+      variantSetRowApplicable({
+        rootClasses: bem,
+        evaluatedAxes: ["Variant", "Size"],
+        propsStatuses: { Variant: "match", Size: "drift" },
+      }),
+    ).toBe(true);
+    expect(
+      variantSetRowApplicable({
+        rootClasses: bem,
+        evaluatedAxes: ["Variant"],
+        propsStatuses: { Variant: "flag-only" },
+      }),
+    ).toBe(true);
+    // No props row at all for the axis.
+    expect(
+      variantSetRowApplicable({ rootClasses: bem, evaluatedAxes: ["Variant"] }),
+    ).toBe(true);
+  });
+
+  it("keeps the row when the snapshot carries no class list (evidence unknown)", () => {
+    // Older preview bundle / replayed snapshot: absence of `rootClasses` is not
+    // evidence of absence, so behaviour stays as it was.
+    expect(variantSetRowApplicable({ evaluatedAxes: ["Variant"] })).toBe(true);
+    expect(variantSetRowApplicable({})).toBe(true);
+  });
+
+  it("ignores the props rule when no axis was evaluated (all-falsy variants)", () => {
+    expect(
+      variantSetRowApplicable({
+        rootClasses: ["icon-button", "icon-button--accent"],
+        evaluatedAxes: [],
+        propsStatuses: { Selected: "match" },
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("summarizeListCell — long list cells collapse, short ones don't", () => {
+  it("collapses a long list to a count plus its items", () => {
+    const summary = summarizeListCell(CVA_BUTTON_CLASSES);
+    expect(summary).not.toBeNull();
+    expect(summary?.count).toBe(25);
+    expect(summary?.items).toHaveLength(25);
+  });
+
+  it("leaves a short list (and any non-list) to render inline", () => {
+    expect(summarizeListCell(["accent"])).toBeNull();
+    expect(summarizeListCell(["a", "b", "c"])).toBeNull();
+    expect(summarizeListCell({ State: "Hover" })).toBeNull();
+    expect(summarizeListCell(null)).toBeNull();
+  });
+});
+
+describe("explainInfo — a variant-set row that does appear stays readable", () => {
+  it("keeps the BEM advisory byte-identical (short candidate list)", () => {
+    const msg = explainInfo(
+      other({
+        kind: "variant-set",
+        property: "active-variant",
+        codeValue: ["accent"],
+        figmaValue: { State: "Hover" },
+        note: "Figma variants not present in code: [State=Hover]",
+      }),
+    );
+    expect(msg).toBe(
+      "Figma variant(s) [State=Hover] have no matching modifier class in code (code has [accent]). " +
+        "Fix code-side by adding the BEM modifier rule and story, or Figma-side by removing/renaming the variant. " +
+        "No auto-apply: creating an empty CSS rule or deleting a Figma variant would be a guess — see roadmap P3.1 (per-variant-explicit codemod).",
+    );
+  });
+
+  it("counts instead of dumping when the candidate list is long, keeping the advisory", () => {
+    const msg = explainInfo(
+      other({
+        kind: "variant-set",
+        property: "active-variant",
+        codeValue: CVA_BUTTON_CLASSES,
+        figmaValue: { State: "Hover" },
+        note: "Figma variants not present in code: [State=Hover]",
+      }),
+    );
+    expect(msg).toContain("code has 25 candidate modifier classes");
+    expect(msg).not.toContain("inline-flex");
+    expect(msg).toMatch(/BEM modifier/);
+    expect(msg).toMatch(/No auto-apply/);
   });
 });

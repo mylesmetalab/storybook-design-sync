@@ -1,4 +1,5 @@
-import type { DimensionDiff } from "./dimensions/types.js";
+import { splitVariants } from "@metalab/design-sync-core";
+import type { DimensionDiff, DimensionStatus } from "./dimensions/types.js";
 
 /**
  * Pure row-triage logic for the drift panel, extracted from manager.tsx so
@@ -110,6 +111,173 @@ export function rowHasDrift(row: GroupedRow): boolean {
   return row.diff.status === "drift";
 }
 
+/* ------------------------------------------------------------------------- *
+ * variant-set applicability
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Tailwind utility families. A class whose head segment is one of these AND
+ * which carries a scale tail (`bg-primary`, `px-4`, `text-sm`) is a utility,
+ * not a variant modifier. Heads only — the tail is deliberately unconstrained
+ * so an unknown consumer scale key (`bg-brandish`) still reads as a utility.
+ */
+const UTILITY_FAMILY_HEADS = new Set([
+  "accent", "align", "animate", "appearance", "aspect", "auto", "backdrop", "basis",
+  "bg", "block", "blur", "border", "bottom", "box", "break", "brightness", "caption",
+  "caret", "clear", "col", "columns", "content", "contrast", "cursor", "decoration",
+  "delay", "divide", "drop", "duration", "ease", "field", "fill", "filter", "flex",
+  "float", "font", "from", "gap", "grayscale", "grid", "grow", "h", "hue", "hyphens",
+  "indent", "inset", "invert", "isolation", "items", "justify", "leading", "left",
+  "line", "list", "m", "mask", "max", "mb", "min", "mix", "ml", "mr", "mt", "mx",
+  "my", "object", "opacity", "order", "origin", "outline", "overflow", "overscroll",
+  "p", "pb", "peer", "pl", "place", "pointer", "pr", "pt", "px", "py", "right",
+  "ring", "rotate", "rounded", "row", "saturate", "scale", "scroll", "select",
+  "self", "sepia", "shadow", "shrink", "size", "skew", "snap", "space", "stroke",
+  "subpixel", "supports", "table", "tab", "text", "to", "top", "touch", "tracking",
+  "transform", "transition", "translate", "underline", "via", "w", "whitespace",
+  "will", "wrap", "z",
+]);
+
+/**
+ * Standalone utilities (no scale tail). Deliberately excludes words that are
+ * equally plausible as hand-authored state modifiers — `hidden`, `visible`,
+ * `active`, `open`, `disabled`, `checked` are NOT here, because misreading one
+ * of those as a utility would suppress a check a BEM/adjacent-modifier
+ * consumer legitimately relies on.
+ */
+const STANDALONE_UTILITIES = new Set([
+  "antialiased", "border", "capitalize", "container", "contents", "flex", "grid",
+  "inline", "inline-block", "inline-flex", "inline-grid", "isolate", "italic",
+  "line-through", "lowercase", "no-underline", "overline", "relative", "absolute",
+  "fixed", "sticky", "static", "rounded", "ring", "shadow", "sr-only", "table",
+  "flow-root", "truncate", "underline", "uppercase",
+]);
+
+/**
+ * Whether a class is recognizably a utility-framework class rather than a
+ * component modifier.
+ *
+ * Honesty direction: an unrecognized class is treated as a *possible* modifier
+ * (returns false), which keeps the variant-set row visible. Being wrong here
+ * therefore preserves the pre-existing behaviour rather than silently dropping
+ * a check.
+ */
+export function isUtilityShapedClass(cls: string): boolean {
+  if (cls.length === 0) return false;
+  // `hover:`, `dark:`, `data-[state=open]:`, `[&_svg]:` — variant-modified
+  // classes only exist in utility frameworks.
+  if (splitVariants(cls).variants.length > 0) return true;
+  const bare = cls.replace(/^!/, "");
+  // Arbitrary values / opacity modifiers / CSS-var shorthands: `bg-[#444]`,
+  // `bg-primary/90`, `w-(--sidebar)`.
+  if (/[[\]()/@]/.test(bare)) return true;
+  if (STANDALONE_UTILITIES.has(bare)) return true;
+  const unsigned = bare.replace(/^-/, "");
+  const dash = unsigned.indexOf("-");
+  if (dash <= 0) return false;
+  return UTILITY_FAMILY_HEADS.has(unsigned.slice(0, dash));
+}
+
+/**
+ * The modifier-class evidence on an element, using exactly the two
+ * conventions the variant-set check knows how to reason about:
+ *
+ *  - **BEM modifiers** — any class containing `--`; the suffix is the
+ *    modifier (`icon-button--accent` → `accent`). Unambiguous, so a class
+ *    list containing one always counts as evidence.
+ *  - **Adjacent modifiers** — `.file-item.active`: any class after the first
+ *    (the base) that is not recognizably a utility class.
+ *
+ * Returns the candidates it found; empty means the check's premise — that
+ * variants are expressed as modifier classes — does not hold for this
+ * element.
+ */
+export function modifierClassCandidates(classes: string[]): string[] {
+  const bem: string[] = [];
+  for (const c of classes) {
+    const i = c.indexOf("--");
+    if (i > 0) bem.push(c.slice(i + 2));
+  }
+  if (bem.length > 0) return [...new Set(bem)];
+  const adjacent = classes.slice(1).filter((c) => c.length > 0 && !isUtilityShapedClass(c));
+  return [...new Set(adjacent)];
+}
+
+/** Everything the applicability decision is allowed to look at. */
+export interface VariantSetContext {
+  /**
+   * Every class on the snapshotted element, in DOM order (the first is the
+   * base). `undefined` when the snapshot predates `rootClasses` (an older
+   * preview bundle) — treated as "evidence unknown", which keeps the row.
+   */
+  rootClasses?: string[] | undefined;
+  /**
+   * Figma variant axes this row actually evaluated (falsy/default axes
+   * excluded — the check skips those). Empty for the COMPONENT_SET shape,
+   * which has no per-axis props comparison to be redundant with.
+   */
+  evaluatedAxes?: string[];
+  /** Status of the `props` row for each axis, by axis name. */
+  propsStatuses?: Record<string, DimensionStatus>;
+}
+
+/**
+ * Whether the `variant-set` row has any business being reported.
+ *
+ * The check compares Figma's variant values against modifier classes found on
+ * the rendered element, using two CSS-era conventions (BEM `--` suffixes and
+ * adjacent modifier classes). On a cva / Tailwind component that premise is
+ * structurally false: variants are cva keys chosen by **props**, and the
+ * element carries a long list of utility classes that are not modifiers at
+ * all. Reported anyway, the row swept 25 utility classes into its "code
+ * variants" cell, claimed `Figma variants not present in code`, and advised
+ * adding a BEM modifier rule — confident guidance that is wrong for that
+ * architecture, while the `props` rows right below it had already compared
+ * the same axes against the story args and matched.
+ *
+ * So the row is suppressed when EITHER:
+ *
+ *  1. **No modifier-class evidence.** `modifierClassCandidates` finds neither
+ *     a BEM `--` class nor a non-utility adjacent class, so there is nothing
+ *     the check's heuristics can reason about.
+ *  2. **The `props` rows already cover every axis, and all of them match.**
+ *     Nothing is left to report or to add.
+ *
+ * Conservative by construction: a class list containing a BEM `--` class is
+ * always evidence, an unrecognized class counts as a possible modifier, and
+ * rule 2 needs at least one evaluated axis and a `match` on every one of
+ * them. Whenever there is real modifier evidence and anything unconfirmed,
+ * the row (and its advisory) is reported exactly as before.
+ */
+export function variantSetRowApplicable(ctx: VariantSetContext): boolean {
+  if (ctx.rootClasses !== undefined && modifierClassCandidates(ctx.rootClasses).length === 0) {
+    return false;
+  }
+  const axes = ctx.evaluatedAxes ?? [];
+  if (axes.length > 0) {
+    const statuses = ctx.propsStatuses ?? {};
+    if (axes.every((axis) => statuses[axis] === "match")) return false;
+  }
+  return true;
+}
+
+/**
+ * Collapse a long list-shaped cell value into "N items" plus the items
+ * themselves, so a `variant-set` row that legitimately appears doesn't paste
+ * a 25-class dump into the table (and again into its Notes). Returns null
+ * when the value is short enough to read inline — three or fewer entries are
+ * clearer flat than behind a disclosure.
+ */
+export function summarizeListCell(
+  value: unknown,
+  threshold = 3,
+): { count: number; items: string[] } | null {
+  if (!Array.isArray(value)) return null;
+  const items = value.map((v) => String(v));
+  if (items.length <= threshold) return null;
+  return { count: items.length, items };
+}
+
 /**
  * If a value is a `{light, dark}` map produced by dual-mode merging,
  * flatten it to a single string when both modes agree. If modes disagree,
@@ -192,6 +360,18 @@ function describeSide(value: unknown): string {
 }
 
 /**
+ * The code side of a variant-set row, without pasting the whole candidate list
+ * a second time — the row's Code cell already carries the list (behind a
+ * disclosure when it's long). Long lists become a count so the advisory stays
+ * readable; short ones are still spelled out, since naming two classes is more
+ * useful than counting them.
+ */
+function describeCodeVariants(value: unknown): string {
+  const long = summarizeListCell(value);
+  return long ? `${long.count} candidate modifier classes` : describeSide(value);
+}
+
+/**
  * Per-row reason the row landed in the informational section, with concrete
  * next steps. Each branch points at the actual blocker so the user knows
  * what to change — never a generic "no engine" shrug (P2.3).
@@ -229,13 +409,13 @@ export function explainInfo(row: GroupedRow): string {
       const missing = d.note?.match(/\[(.+)\]/)?.[1];
       const what = missing ? `Figma variant(s) ${`[${missing}]`}` : `Figma side ${describeSide(d.figmaValue)}`;
       return (
-        `${what} have no matching modifier class in code (code has ${describeSide(d.codeValue)}). ` +
+        `${what} have no matching modifier class in code (code has ${describeCodeVariants(d.codeValue)}). ` +
         `Fix code-side by adding the BEM modifier rule and story, or Figma-side by removing/renaming the variant. ` +
         `No auto-apply: creating an empty CSS rule or deleting a Figma variant would be a guess — see roadmap P3.1 (per-variant-explicit codemod).`
       );
     }
     return (
-      `Code declares variant class(es) ${describeSide(d.codeValue)} not in the Figma component set's options ${describeSide(d.figmaValue)}. ` +
+      `Code declares variant class(es) ${describeCodeVariants(d.codeValue)} not in the Figma component set's options ${describeSide(d.figmaValue)}. ` +
       `Fix Figma-side by adding the option to the variant property, or code-side by renaming/removing the modifier class. ` +
       `No auto-apply: which side is wrong isn't inferable from the diff.`
     );

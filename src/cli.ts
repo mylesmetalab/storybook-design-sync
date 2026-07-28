@@ -1,5 +1,4 @@
 import { readFile } from "node:fs/promises";
-import { relative } from "node:path";
 import { glob } from "tinyglobby";
 import { loadConfig } from "./config.js";
 import {
@@ -14,6 +13,14 @@ import {
   parseChildFlag,
   validateChildBindings,
 } from "./child-bindings.js";
+import {
+  discoverStories,
+  explicitTitle,
+  regexStoryExports,
+  toStoryId,
+  type DiscoveredStory,
+  type DiscoveryOutcome,
+} from "./story-discovery.js";
 
 interface CommonOptions {
   cwd: string;
@@ -65,6 +72,8 @@ function printHelp(): void {
       "Usage:",
       "  design-sync audit                       Diff stories on disk against the registry (exits non-zero on drift)",
       "                                          Also validates the SHAPE of declared child bindings (not that they resolve)",
+      "                                          Exits non-zero on any story file it could not read — a file that yields no",
+      "                                          story ids is a coverage hole, not a warning",
       "  design-sync register [--hints <path>]   Bulk-register stories from .design-sync/hints.json; stubs the rest",
       "  design-sync register --story <id> --child \"<selector>=<nodeId>\" [--child …]",
       "                                          Declare child-element bindings so composed components are checked",
@@ -157,63 +166,57 @@ function parseCommonAllowing(
 
 // ---- discovery ------------------------------------------------------------
 
-interface DiscoveredStory {
-  id: string;
-  file: string; // relative
-  title: string;
-  exportName: string;
-}
-
-interface DiscoveryResult {
-  stories: DiscoveredStory[];
-  warnings: string[];
-}
-
+/**
+ * Story discovery lives in `story-discovery.ts` (a real CSF parse plus
+ * Storybook's own autotitle derivation — see that file for why the old regex
+ * undercounted CSF3 autotitle files, and what "unreadable" means).
+ */
 async function discover(
   opts: CommonOptions,
   configGlobs: string[],
-): Promise<DiscoveryResult> {
-  const effective = opts.storyGlobsOverride ?? configGlobs;
-  const files = await glob(effective, { cwd: opts.cwd, absolute: true });
-  const stories: DiscoveredStory[] = [];
-  const warnings: string[] = [];
-  const seen = new Set<string>();
-  for (const file of files) {
-    const source = await readFile(file, "utf8");
-    const parsed = parseStoryFile(source);
-    if (!parsed) {
-      warnings.push(relative(opts.cwd, file));
-      continue;
-    }
-    for (const exportName of parsed.exports) {
-      const id = toStoryId(parsed.title, exportName);
-      if (seen.has(id)) continue;
-      seen.add(id);
-      stories.push({ id, file: relative(opts.cwd, file), title: parsed.title, exportName });
-    }
-  }
-  return { stories, warnings };
+): Promise<DiscoveryOutcome & { globs: string[] }> {
+  const globs = opts.storyGlobsOverride ?? configGlobs;
+  const files = await glob(globs, { cwd: opts.cwd, absolute: true });
+  const outcome = await discoverStories({ cwd: opts.cwd, files, globs });
+  return { ...outcome, globs };
 }
 
 /**
- * Regex-based CSF parse. Returns null when no `title:` literal is detected —
- * caller surfaces those as parse warnings rather than silently passing.
+ * Print everything discovery could NOT turn into story ids. Shared by `audit`,
+ * `register` and `ls` so no command can quietly omit it.
+ *
+ * Worded as a coverage hole, because that is what it is: the stories in these
+ * files are registered by nothing and checked by nothing.
+ */
+function reportDiscoveryProblems(outcome: DiscoveryOutcome, globs: string[]): void {
+  if (outcome.skipped.length > 0) {
+    console.log(`\nNot a source of story ids (${outcome.skipped.length} file(s)):`);
+    for (const s of outcome.skipped) console.log(`  - ${s.file}: ${s.reason}`);
+  }
+  if (outcome.unreadable.length > 0) {
+    console.log(
+      `\nUNREADABLE — ${outcome.unreadable.length} file(s) match storyGlobs [${globs.join(", ")}] ` +
+        `but produced NO story ids. Any stories they contain are registered by nothing and checked by ` +
+        `nothing; this is a coverage hole, not a formatting nit:`,
+    );
+    for (const u of outcome.unreadable) console.log(`  - ${u.file}: ${u.reason}`);
+  }
+  if (outcome.degraded) {
+    console.log(`\nNote: discovery ran degraded — ${outcome.degraded}.`);
+  }
+}
+
+/**
+ * @deprecated Regex-based CSF read. Superseded by `discoverStories`, which uses
+ * the installed Storybook's CSF parser and finds CSF3 **autotitle** files (this
+ * function returns null for every one of them — the undercount that made
+ * `audit` report a complete registry over stories nothing checks). Retained
+ * unchanged so any direct importer keeps working.
  */
 export function parseStoryFile(source: string): { title: string; exports: string[] } | null {
-  const titleMatch = source.match(/title\s*:\s*(['"`])([^'"`]+)\1/);
-  if (!titleMatch) return null;
-  const title = titleMatch[2]!;
-  const exports = new Set<string>();
-  const namedConst = /export\s+const\s+([A-Za-z_$][\w$]*)/g;
-  let m: RegExpExecArray | null;
-  while ((m = namedConst.exec(source)) !== null) {
-    if (m[1] !== "default") exports.add(m[1]!);
-  }
-  const namedFn = /export\s+function\s+([A-Za-z_$][\w$]*)/g;
-  while ((m = namedFn.exec(source)) !== null) {
-    if (m[1] !== "default") exports.add(m[1]!);
-  }
-  return { title, exports: [...exports] };
+  const title = explicitTitle(source);
+  if (title === null) return null;
+  return { title, exports: regexStoryExports(source) };
 }
 
 /** Back-compat: previous CLI exposed this. Keep so any direct importer holds. */
@@ -223,35 +226,15 @@ export function extractStoryIds(source: string): string[] | null {
   return parsed.exports.map((name) => toStoryId(parsed.title, name));
 }
 
-export function toStoryId(title: string, exportName: string): string {
-  return `${sanitize(title)}--${sanitize(storyNameFromExport(exportName))}`;
-}
-
-function storyNameFromExport(key: string): string {
-  return key
-    .replace(/_/g, " ")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
-    .replace(/([a-zA-Z])([0-9])/g, "$1 $2")
-    .replace(/([0-9])([a-zA-Z])/g, "$1 $2")
-    .trim();
-}
-
-function sanitize(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[ '’–—/]/g, "-")
-    .replace(/[^a-z0-9_.\-]/g, "")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
+export { toStoryId };
 
 // ---- audit ----------------------------------------------------------------
 
 async function audit(opts: CommonOptions): Promise<number> {
   const config = await loadConfig(opts.cwd);
   const registry = await loadRegistry(config.registryPath, opts.cwd);
-  const { stories, warnings } = await discover(opts, config.storyGlobs);
+  const outcome = await discover(opts, config.storyGlobs);
+  const { stories, unreadable, globs } = outcome;
 
   const codeIds = new Set(stories.map((s) => s.id));
   const registryIds = new Set(Object.keys(registry.stories));
@@ -266,7 +249,21 @@ async function audit(opts: CommonOptions): Promise<number> {
   // below for what audit deliberately cannot check).
   const children = auditChildBindings(registry.stories);
 
+  const autotitled = stories.filter((s) => s.titleSource === "autotitle").length;
+  const storyFiles = new Set(stories.map((s) => s.file)).size;
+
   console.log(`Stories on disk:     ${codeIds.size}`);
+  // The counts that make an undercount visible. "Stories on disk: 0" used to be
+  // the only thing an autotitle consumer saw, and it read as "you have no
+  // stories" rather than "I could not read any of your files".
+  console.log(
+    `Story files read:    ${storyFiles} of ${storyFiles + unreadable.length + outcome.skipped.length} matched` +
+      ` (${codeIds.size - autotitled} from an explicit title, ${autotitled} autotitled)`,
+  );
+  console.log(
+    `Unreadable files:    ${unreadable.length}` +
+      (unreadable.length > 0 ? "  ← stories in these are checked by NOTHING (listed below)" : ""),
+  );
   console.log(`Stories registered:  ${registryIds.size} (${pending.length} pending)`);
   console.log(`Missing:             ${missing.length}`);
   console.log(`Extra:               ${extra.length}`);
@@ -305,17 +302,17 @@ async function audit(opts: CommonOptions): Promise<number> {
         `per binding.`,
     );
   }
-  if (warnings.length > 0) {
-    console.log(
-      `\nWarning: could not parse ${warnings.length} story file(s) — title or exports not detected:`,
-    );
-    for (const f of warnings) console.log(`  - ${f}`);
-    console.log(
-      "Audit uses regex-based discovery; computed titles or unusual CSF shapes may be missed.",
-    );
-  }
+  reportDiscoveryProblems(outcome, globs);
 
-  return missing.length > 0 || extra.length > 0 || children.issues.length > 0 ? 1 : 0;
+  // An unreadable story file fails the audit. A green CI over stories nothing
+  // checks is the exact failure this release is closing: the registry looks
+  // complete because the files that would have added to it were never counted.
+  return missing.length > 0 ||
+    extra.length > 0 ||
+    children.issues.length > 0 ||
+    unreadable.length > 0
+    ? 1
+    : 0;
 }
 
 // ---- ls -------------------------------------------------------------------
@@ -323,10 +320,14 @@ async function audit(opts: CommonOptions): Promise<number> {
 async function ls(opts: CommonOptions): Promise<number> {
   const config = await loadConfig(opts.cwd);
   const registry = await loadRegistry(config.registryPath, opts.cwd);
-  const { stories } = await discover(opts, config.storyGlobs);
+  const outcome = await discover(opts, config.storyGlobs);
+  const { stories } = outcome;
   if (stories.length === 0) {
+    // "No stories discovered." on its own is a lie when files matched and
+    // failed to parse — the reason follows immediately.
     console.log("No stories discovered.");
-    return 0;
+    reportDiscoveryProblems(outcome, outcome.globs);
+    return outcome.unreadable.length > 0 ? 1 : 0;
   }
 
   // Group by title for the tree view.
@@ -456,7 +457,8 @@ async function register(opts: RegisterOptions): Promise<number> {
 
   const config = await loadConfig(opts.cwd);
   const registry = await loadRegistry(config.registryPath, opts.cwd);
-  const { stories, warnings } = await discover(opts, config.storyGlobs);
+  const outcome = await discover(opts, config.storyGlobs);
+  const { stories } = outcome;
   const hints = await loadHints(opts.cwd, opts.hintsPath);
 
   let added = 0;
@@ -490,9 +492,9 @@ async function register(opts: RegisterOptions): Promise<number> {
     `\n${added} registered from hints, ${stubbed} stubbed as pending` +
       (opts.dryRun ? " (dry-run; nothing written)" : ""),
   );
-  if (warnings.length > 0) {
-    console.log(`Skipped ${warnings.length} unparsable story file(s).`);
-  }
+  // Same report as `audit`: a file that produced no story ids means stories
+  // this registry will never contain, so `register` must not finish quietly.
+  reportDiscoveryProblems(outcome, outcome.globs);
 
   if (!opts.dryRun && (added > 0 || stubbed > 0)) {
     await saveRegistry(config.registryPath, updated, opts.cwd);

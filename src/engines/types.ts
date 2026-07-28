@@ -88,6 +88,28 @@ export interface CheckDriftInput {
   mode?: string;
   /** Storybook story args at request time. Used by the props dimension. */
   args?: Record<string, unknown>;
+  /**
+   * Why this check is running.
+   *
+   *  - `"explicit"` (default when absent) — a human pressed **Check drift** on
+   *    this story, or the panel re-checked after a write. A deliberate re-check
+   *    is a request for the truth, so engines MUST NOT answer it out of a
+   *    time-based cache: the caller's whole question is "has Figma changed?".
+   *  - `"bulk"` — one story of a **Check all** run. Here caching is the point:
+   *    one variables fetch legitimately serves ~90 stories, and without it the
+   *    run hits Figma's rate limits.
+   *
+   * Absent means `"explicit"` — the conservative default. A caller that forgets
+   * to say gets correctness, not speed.
+   */
+  trigger?: "explicit" | "bulk";
+  /**
+   * Identifier for the user action this check belongs to. A dual-mode check runs
+   * the engine twice for one press of Check drift; both calls carry the same
+   * `checkId`, so an explicit check revalidates Figma **once** per press instead
+   * of once per mode. Absent means "assume a fresh action" (revalidate).
+   */
+  checkId?: string;
 }
 
 export interface Engine {

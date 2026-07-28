@@ -18,7 +18,10 @@ import {
   type GroupedRow,
   flattenDualModeValue,
   tokenRowFixability,
-  partitionRow,
+  applyEngineCanAct,
+  classifyRow,
+  sortRowsByFinding,
+  rowHasAdvisory,
   explainInfo,
   applyControlsEnabled,
   rowHasDrift,
@@ -29,8 +32,10 @@ import {
   rowChildSelector,
   unresolvedChildBindings,
   type ElementGroup,
+  type RowFinding,
 } from "./row-triage.js";
-import { buildFixPrompt } from "./fix-prompt.js";
+import { buildFixPrompt, buildBulkFixPrompt, type FixPromptInput } from "./fix-prompt.js";
+import { driftedSiblings } from "./property-families.js";
 
 const STORY_RENDERED_EVENT = "storyRendered";
 
@@ -793,25 +798,35 @@ function visibleDimensions(report: DriftReport): DimensionDiff[] {
 const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext, applyResults, onApply, onUndo }) => {
   // Rows with neither a code value nor a Figma value carry no information
   // (all em-dashes) — drop them from the table entirely.
-  const grouped = groupDimensions(visibleDimensions(report)).filter(rowHasAnyValue);
-  const mainRows = grouped.filter((r) => partitionRow(r) === "main");
-  const infoRows = grouped.filter((r) => partitionRow(r) === "info");
+  const dimensions = visibleDimensions(report);
+  const grouped = groupDimensions(dimensions).filter(rowHasAnyValue);
+  // ONE table, ordered by what the finding is: detached Figma values first, then
+  // value drift, then rows needing a judgement call, then matches. The old
+  // split — main table vs a collapsed "manual fix" section — partitioned on
+  // whether a *write engine* could apply the row, which in `apply: "off"` (the
+  // shipped default) is nothing at all: the collapse's header was false and it
+  // implied the rows above it had an apply path. It also buried the most
+  // important finding in the report under trivial matches.
+  const rows = sortRowsByFinding(grouped);
   // Per-element grouping. `hasChildren` is false for every story without
-  // declared child bindings, and the tables then render exactly as before —
-  // no group headers, no extra chrome.
+  // declared child bindings, and the table then renders exactly as before —
+  // no group headers, no extra chrome. Grouping preserves relative order, so
+  // each element's rows stay sorted by finding.
   const hasChildren = (report.children?.length ?? 0) > 0;
-  const mainGroups = groupRowsByElement(mainRows, report.children);
-  const infoGroups = groupRowsByElement(infoRows, report.children);
+  const groups = groupRowsByElement(rows, report.children);
   const unresolvedChildren = unresolvedChildBindings(report.children);
 
-  // Build the self-contained fix prompt for a drift row. Shared by both
-  // apply modes — auditing without writes still hands you the fix.
+  // Build the fix-prompt input for one drift row. Shared by both apply modes —
+  // auditing without writes still hands you the fix.
   //
   // A child row's prompt must point at the *child*: its selector (scoped under
   // the story's target, so an agent can find it) and its own Figma node id.
   // Handing over the root's selector and node would send the fix to the wrong
   // element.
-  const promptFor = (d: DimensionDiff): string => {
+  const promptInputFor = (
+    d: DimensionDiff,
+    extras?: { finding?: RowFinding; advisory?: string },
+  ): FixPromptInput => {
     const child = d.childSelector
       ? report.children?.find((c) => c.selector === d.childSelector)
       : undefined;
@@ -820,7 +835,12 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
         ? `${fixContext.selector} ${d.childSelector}`
         : d.childSelector
       : fixContext.selector;
-    return buildFixPrompt({
+    // Siblings that drifted to the same expected value on the same element.
+    // Named inside the prompt so a lone per-row copy can't produce the
+    // asymmetric-padding outcome: the text has to survive being pasted into a
+    // session with no other context.
+    const siblings = driftedSiblings(d, dimensions).map((s) => s.property);
+    return {
       storyId: report.storyId,
       kind: d.kind,
       property: d.property,
@@ -835,11 +855,59 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
       nodeId: child?.nodeId ?? report.nodeId,
       fileKey: fixContext.fileKey,
       note: d.note,
-    });
+      ...(extras?.finding ? { finding: extras.finding } : {}),
+      ...(extras?.advisory ? { advisory: extras.advisory } : {}),
+      ...(siblings.length > 0 ? { siblingProperties: siblings } : {}),
+    };
   };
 
-  const renderRow = (row: GroupedRow, i: number, fixable: boolean) => {
+  const promptFor = (d: DimensionDiff, extras?: { finding?: RowFinding; advisory?: string }): string =>
+    buildFixPrompt(promptInputFor(d, extras));
+
+  /** The drifted diff a row's prompt describes (value side wins — it carries the token). */
+  const rowDiff = (row: GroupedRow): DimensionDiff | undefined =>
+    row.kind === "token"
+      ? row.value?.status === "drift"
+        ? row.value
+        : (row.binding ?? row.value)
+      : row.diff;
+
+  // One prompt covering every drifted row in the story, related properties
+  // grouped. The default path: four drifted paddings are one change, and four
+  // separate prompts (or one of the four) is how a component ends up 6/12/12/12.
+  const driftedInputs: FixPromptInput[] = rows.flatMap((row) => {
+    const finding = classifyRow(row);
+    if (finding === "no-drift") return [];
+    const d = rowDiff(row);
+    if (!d) return [];
+    return [
+      promptInputFor(d, {
+        finding,
+        ...(rowHasAdvisory(row) ? { advisory: explainInfo(row) } : {}),
+      }),
+    ];
+  });
+  const bulkPrompt =
+    driftedInputs.length > 0
+      ? buildBulkFixPrompt({
+          storyId: report.storyId,
+          context: {
+            selector: fixContext.selector,
+            filePaths: fixContext.filePaths,
+            fileKey: fixContext.fileKey,
+            nodeId: report.nodeId,
+          },
+          rows: driftedInputs,
+        })
+      : null;
+
+  const renderRow = (row: GroupedRow, i: number) => {
     const element = rowChildSelector(row) ?? "root";
+    const finding = classifyRow(row);
+    const advisory = rowHasAdvisory(row) ? explainInfo(row) : undefined;
+    // Write capability gates Apply buttons ONLY (and only under
+    // apply:"experimental"); it never decides where a row appears.
+    const fixable = applyEngineCanAct(row);
     if (row.kind === "token") {
       const key = `token-${element}-${row.property}-${i}`;
       return (
@@ -850,6 +918,8 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
           value={row.value}
           binding={row.binding}
           applyEnabled={applyEnabled}
+          finding={finding}
+          {...(advisory ? { advisory } : {})}
           promptFor={promptFor}
           applyResults={applyResults}
           onApply={onApply}
@@ -865,7 +935,8 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
         d={d}
         fixable={fixable}
         applyEnabled={applyEnabled}
-        {...(fixable ? {} : { infoNote: explainInfo(row) })}
+        finding={finding}
+        {...(advisory ? { advisory } : {})}
         promptFor={promptFor}
         codeResult={applyResults[`${key}:code`]}
         figmaResult={applyResults[`${key}:figma`]}
@@ -935,7 +1006,28 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
         </div>
       )}
 
-      {mainRows.length > 0 && (
+      {/* Bulk fix prompt — the default path out of a report with several
+          drifted rows. One prompt, related properties grouped, so an agent
+          sees "all four paddings move to Space/150" rather than four
+          unrelated asks. Absent when nothing drifted. */}
+      {bulkPrompt && (
+        <div style={styles.bulkPromptBar}>
+          <CopyFixPromptButton
+            getText={() => bulkPrompt}
+            label={`Copy fix prompt for all drift (${driftedInputs.length})`}
+            title="Copy ONE self-contained prompt covering every drifted row in this story, with related properties grouped as single changes"
+            style={styles.bulkPromptButton}
+          />
+          <span style={styles.muted}>
+            One prompt for all {driftedInputs.length} drifted row
+            {driftedInputs.length === 1 ? "" : "s"} — related properties (the four
+            paddings, the four corner radii, font-size/line-height) are described as
+            one change each. Per-row prompts are still on every row.
+          </span>
+        </div>
+      )}
+
+      {rows.length > 0 && (
         <table style={styles.table}>
           <thead>
             <tr>
@@ -949,36 +1041,13 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
                     Apply <span style={styles.experimentalBadge}>experimental</span>
                   </>
                 ) : (
-                  "Fix"
+                  "Fix / notes"
                 )}
               </th>
             </tr>
           </thead>
-          {renderGroups(mainGroups, hasChildren, true, renderRow)}
+          {renderGroups(groups, hasChildren, renderRow)}
         </table>
-      )}
-
-      {infoRows.length > 0 && (
-        <details style={styles.infoDetails}>
-          <summary style={styles.infoSummary}>
-            Detected drift — manual fix ({infoRows.length})
-            <span style={styles.muted}>
-              {" "}— shown for context; the addon has no automated apply path for these.
-            </span>
-          </summary>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th}>Property</th>
-                <th style={styles.th}>Code</th>
-                <th style={styles.th}>Figma</th>
-                <th style={styles.th}>Value</th>
-                <th style={styles.th}>{applyEnabled ? "Why no Apply" : "Notes"}</th>
-              </tr>
-            </thead>
-            {renderGroups(infoGroups, hasChildren, false, renderRow)}
-          </table>
-        </details>
       )}
     </div>
   );
@@ -993,12 +1062,11 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
 function renderGroups(
   groups: ElementGroup[],
   showLabels: boolean,
-  fixable: boolean,
-  renderRow: (row: GroupedRow, i: number, fixable: boolean) => React.ReactNode,
+  renderRow: (row: GroupedRow, i: number) => React.ReactNode,
 ): React.ReactNode {
   if (!showLabels) {
     const all = groups.flatMap((g) => g.rows);
-    return <tbody>{all.map((row, i) => renderRow(row, i, fixable))}</tbody>;
+    return <tbody>{all.map((row, i) => renderRow(row, i))}</tbody>;
   }
   return (
     <>
@@ -1023,7 +1091,7 @@ function renderGroups(
                 </span>
               </th>
             </tr>
-            {group.rows.map((row, i) => renderRow(row, i, fixable))}
+            {group.rows.map((row, i) => renderRow(row, i))}
           </tbody>
         ))}
     </>
@@ -1073,19 +1141,50 @@ const StatusPill: React.FC<{ status: DimensionDiff["status"] | undefined; title:
   );
 };
 
+/**
+ * The row's verdict. Ordinary findings show their status pill; an
+ * `unbound-figma-value` row gets its own label, because "drift" alone says the
+ * two sides disagree and hides what actually happened — a Figma property was
+ * detached from its variable, which is a design-system violation with a
+ * design-side fix, not a code value to chase.
+ */
+const FINDING_PILL_LABEL: Partial<Record<RowFinding, string>> = {
+  "unbound-figma-value": "not bound in Figma",
+};
+
+const FindingPill: React.FC<{
+  status: DimensionDiff["status"] | undefined;
+  title: string | undefined;
+  finding: RowFinding;
+}> = ({ status, title, finding }) => {
+  const label = FINDING_PILL_LABEL[finding];
+  if (!label) return <StatusPill status={status} title={title} />;
+  const props: { title?: string } = {};
+  if (title) props.title = title;
+  return (
+    <span style={{ ...styles.pill, ...styles.pillUnbound }} {...props}>
+      {label}
+    </span>
+  );
+};
+
 interface TokenRowProps {
   rowKey: string;
   property: string;
   value: DimensionDiff | undefined;
   binding: DimensionDiff | undefined;
   applyEnabled: boolean;
-  promptFor: (d: DimensionDiff) => string;
+  /** What kind of finding this row is — drives the pill and the prompt shape. */
+  finding: RowFinding;
+  /** Advisory for a judgement-call / unbound-Figma-value row. */
+  advisory?: string;
+  promptFor: (d: DimensionDiff, extras?: { finding?: RowFinding; advisory?: string }) => string;
   applyResults: Record<string, ApplyResult>;
   onApply: (d: DimensionDiff, key: string, scope: ApplyScope) => void;
   onUndo: (key: string, scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, applyEnabled, promptFor, applyResults, onApply, onUndo }) => {
+const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, applyEnabled, finding, advisory, promptFor, applyResults, onApply, onUndo }) => {
   // Prefer value diff for the Code/Figma cells (concrete px/rgb is more
   // useful than a token name); fall back to binding if value is absent.
   const display = value ?? binding;
@@ -1119,7 +1218,7 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
         )}
       </td>
       <td style={styles.td}>
-        <StatusPill status={value?.status} title={valueTitle} />
+        <FindingPill status={value?.status} title={valueTitle} finding={finding} />
       </td>
       <td style={styles.td}>
         {applyEnabled && bindingFixable && binding ? (
@@ -1153,12 +1252,25 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
             />
           </div>
         ) : null}
+        {advisory && (
+          <div style={styles.muted} title={advisory}>
+            {advisory}
+          </div>
+        )}
         {rowHasDrift({ kind: "token", property, ...(value !== undefined ? { value } : {}), ...(binding !== undefined ? { binding } : {}) }) ? (
           // Prefer the drifted value diff (it carries tokenName); fall back
           // to the binding diff. `display` is never undefined here — drift
           // implies at least one of the two exists.
           <CopyFixPromptButton
-            getText={() => promptFor(value?.status === "drift" ? value : (binding ?? value)!)}
+            getText={() =>
+              promptFor(value?.status === "drift" ? value : (binding ?? value)!, {
+                finding,
+                ...(advisory ? { advisory } : {}),
+              })
+            }
+            {...(finding === "unbound-figma-value"
+              ? { label: "Copy Figma fix prompt" }
+              : {})}
           />
         ) : (
           <span style={styles.muted}>—</span>
@@ -1171,23 +1283,29 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
 interface OtherRowProps {
   d: DimensionDiff;
   /**
-   * Whether the addon's Apply path can act on this diff. When false, the
-   * Apply column renders an explanatory note instead of buttons that
-   * would always reject (see CLAUDE.md anti-pattern #3 / "honest Apply").
+   * Whether the addon's Apply path can act on this diff. When false, no Apply
+   * button renders — a button that would always reject is worse than none (see
+   * CLAUDE.md anti-pattern #3 / "honest Apply"). Gates buttons only; it has no
+   * say in where the row appears.
    */
   fixable: boolean;
   /** v1 write gating — when false, no Apply buttons render even on fixable rows. */
   applyEnabled: boolean;
-  /** Human-readable reason shown in the Apply column when `fixable` is false. */
-  infoNote?: string;
-  promptFor: (d: DimensionDiff) => string;
+  /** What kind of finding this row is. */
+  finding: RowFinding;
+  /**
+   * The row's advisory — why there is no mechanical fix and what to do instead.
+   * Present exactly on judgement-call / unbound-Figma-value rows.
+   */
+  advisory?: string;
+  promptFor: (d: DimensionDiff, extras?: { finding?: RowFinding; advisory?: string }) => string;
   codeResult: ApplyResult | undefined;
   figmaResult: ApplyResult | undefined;
   onApply: (scope: ApplyScope) => void;
   onUndo: (scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, applyEnabled, infoNote, promptFor, codeResult, figmaResult, onApply, onUndo }) => {
+const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, applyEnabled, finding, advisory, promptFor, codeResult, figmaResult, onApply, onUndo }) => {
   return (
     <tr>
       <td style={styles.td}>
@@ -1206,7 +1324,7 @@ const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, applyEnabled, infoNote,
         )}
       </td>
       <td style={styles.td}>
-        <StatusPill status={d.status} title={d.note} />
+        <FindingPill status={d.status} title={d.note} finding={finding} />
         {d.note && <div style={styles.muted}>{d.note}</div>}
       </td>
       <td style={styles.td}>
@@ -1230,10 +1348,18 @@ const OtherRow: React.FC<OtherRowProps> = ({ d, fixable, applyEnabled, infoNote,
             />
           </div>
         )}
-        {!fixable && (
-          <div style={styles.muted} title={infoNote}>{infoNote ?? "Manual fix only."}</div>
+        {advisory && (
+          <div style={styles.muted} title={advisory}>
+            {advisory}
+          </div>
         )}
-        {d.status === "drift" && <CopyFixPromptButton getText={() => promptFor(d)} />}
+        {!fixable && !advisory && <div style={styles.muted}>Manual fix only.</div>}
+        {d.status === "drift" && (
+          <CopyFixPromptButton
+            getText={() => promptFor(d, { finding, ...(advisory ? { advisory } : {}) })}
+            {...(finding === "unbound-figma-value" ? { label: "Copy Figma fix prompt" } : {})}
+          />
+        )}
         {fixable && !applyEnabled && d.status !== "drift" && <span style={styles.muted}>—</span>}
       </td>
     </tr>
@@ -1320,12 +1446,18 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
 }
 
 /**
- * Per-row "Copy fix prompt" — copies a self-contained prompt (see
- * fix-prompt.ts) that a coding agent can act on without any other context.
- * Rendered on every drift row in BOTH apply modes: it's the audit-only
- * story's path from "found it" to "fixed it".
+ * "Copy fix prompt" — copies a self-contained prompt (see fix-prompt.ts) that a
+ * coding agent can act on without any other context. Rendered on every drift
+ * row, and once above the table for the whole story, in BOTH apply modes: it's
+ * the audit-only story's path from "found it" to "fixed it".
  */
-const CopyFixPromptButton: React.FC<{ getText: () => string }> = ({ getText }) => {
+const CopyFixPromptButton: React.FC<{
+  getText: () => string;
+  /** Defaults to the per-row wording. */
+  label?: string | undefined;
+  title?: string | undefined;
+  style?: React.CSSProperties | undefined;
+}> = ({ getText, label, title, style }) => {
   const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");
   const onClick = async (): Promise<void> => {
     const ok = await copyTextToClipboard(getText());
@@ -1334,11 +1466,18 @@ const CopyFixPromptButton: React.FC<{ getText: () => string }> = ({ getText }) =
   };
   return (
     <button
-      style={{ ...styles.copyPromptButton, ...(status === "copied" ? styles.applyButtonApplied : {}) }}
+      style={{
+        ...styles.copyPromptButton,
+        ...(style ?? {}),
+        ...(status === "copied" ? styles.applyButtonApplied : {}),
+      }}
       onClick={() => void onClick()}
-      title="Copy a self-contained prompt describing this drift, ready to paste to a coding agent"
+      title={
+        title ??
+        "Copy a self-contained prompt describing this drift, ready to paste to a coding agent"
+      }
     >
-      {status === "copied" ? "Copied" : status === "failed" ? "Copy failed" : "Copy fix prompt"}
+      {status === "copied" ? "Copied" : status === "failed" ? "Copy failed" : (label ?? "Copy fix prompt")}
     </button>
   );
 };
@@ -1468,6 +1607,11 @@ function checkOneStory(
       // from the active story's parameters, so we don't need to pass them.
       const payload: CheckDriftRequestPayload = { storyId };
       if (opts.dualMode) payload.dualMode = true;
+      // This is one story of a Check-all run: the engine's caches are what make
+      // the run affordable (one variables fetch for every story instead of one
+      // per story, which hits Figma's rate limits). A single explicit check
+      // sends no `bulk` flag and is served fresh.
+      payload.bulk = true;
       emit(EVENTS.CheckDriftRequest, payload);
     };
     channel.on(STORY_RENDERED_EVENT, onRendered);
@@ -2156,20 +2300,28 @@ const styles: Record<string, React.CSSProperties> = {
     wordBreak: "break-word" as const,
   },
   modes: { color: "#7a7a7a", fontSize: 11, marginTop: 2 },
-  infoDetails: {
-    marginTop: 16,
-    border: "1px solid #e5e5e5",
-    borderRadius: 4,
-    background: "#fafafa",
+  // A Figma value with no variable behind it is drift AND a design-system
+  // violation, so it gets its own label rather than a generic red "drift" pill.
+  // Amber-on-red: wrong, but wrong in Figma — the code isn't the thing to fix.
+  pillUnbound: { color: "#9a3412", background: "#fff7ed", fontWeight: 700 },
+  // Bulk fix-prompt bar, above the table: the default path out of a multi-row
+  // drift report.
+  bulkPromptBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    flexWrap: "wrap" as const,
+    marginBottom: 8,
   },
-  infoSummary: {
-    cursor: "pointer",
-    padding: "8px 12px",
+  bulkPromptButton: {
+    border: "1px solid #b91c1c",
+    color: "#b91c1c",
     fontWeight: 600,
-    fontSize: 12,
-    color: "#525252",
-    userSelect: "none" as const,
+    minWidth: 0,
+    marginTop: 0,
   },
+  // (`infoDetails` / `infoSummary` styled the collapsed "manual fix" section,
+  // deleted in v0.0.37 along with the fixability partition it dressed up.)
   // Per-element group heading inside the drift table. Rendered as a full-width
   // `<th>` at the top of each `<tbody>` so a child's rows can never be mistaken
   // for the root's.

@@ -74,6 +74,27 @@ for binding writes, REST for variable values).
   self-contained prompt — story, file paths or selector, property, current
   vs expected value, token name and `var(--token)` form, Figma refs, and
   closing instructions — ready to paste to a coding agent or teammate.
+  A row whose **siblings drifted to the same value** says so inside the
+  prompt (`padding-right`, `padding-bottom` and `padding-left` have also
+  drifted to `Space/150`…), so one row handed over on its own can't produce
+  the 6/12/12/12 padding nobody designed.
+- **Copy fix prompt for all drift (N)** above the table: ONE prompt covering
+  every drifted row in the story, with related properties grouped as single
+  changes (the four paddings, the four corner radii, the per-edge border
+  colours, `font-size`/`line-height`). This is the default path; the per-row
+  buttons remain for when you deliberately want one thing. Rows that aren't
+  code fixes are listed separately — see the next two bullets — and the
+  prompt tells the agent not to act on them.
+- **One table, ordered by what the finding is.** Detached Figma values first,
+  then value drift, then rows needing a judgement call (`props` /
+  `variant-set` advisories), then unset/unreadable, then matches. There is no
+  "manual fix" collapse: it partitioned on whether a *write engine* could
+  apply the row, which in the default `apply: "off"` is nothing at all — so
+  its header was false and it buried real findings under trivial matches.
+- **`not bound in Figma`** is a first-class row state. When a designer
+  detaches a property from its variable and types a literal, the row says so
+  and its prompt routes the work to Figma — it never tells you to hardcode
+  the literal or to retune a theme token to match it.
 - **Apply controls are gated** by the `apply` config field:
   - `"off"` (default) — audit-only. Full drift detail and advisories,
     no write buttons anywhere.
@@ -132,7 +153,7 @@ All fields except `fileKey` are optional:
 | `apply` | `"off"` | Write gating. `"off"` = audit-only panel (drift detail, advisories, and Copy fix prompt, but no write buttons). `"experimental"` = enables the Apply / Preview-all / bulk-apply write surface, labeled experimental. |
 | `engine` | `"figma-rest"` | Drift-engine adapter name. |
 | `registryPath` | `".design-sync/registry.json"` | Where the story ↔ Figma-node registry lives. |
-| `codeTargets` | `[]` | Files the addon may **write** when applying a code-scope edit in-process, e.g. `[{ "path": "src/components/Button.css" }, { "path": "src/components/Button.tsx" }]`. Required for `apply: "experimental"` code writes (`.css` → PostCSS token swaps, `.tsx`/`.jsx` → inline-style and JSX-text edits); with an empty list, code-scope applies are rejected with a "configure codeTargets" message. Also used by fix prompts to name the files involved. |
+| `codeTargets` | `[]` | The files this component's code lives in. Two accepted shapes, mixable: a **glob/path string** (`"src/components/ui/**/*.tsx"`) or an **object** (`{ "path": "src/Button.css", "scopeSelector": ".btn" }`). Fix prompts name these files, so this is worth setting even in audit-only mode. For `apply: "experimental"` code writes (`.css` → PostCSS token swaps, `.tsx`/`.jsx` → inline-style and JSX-text edits) the entry must be a **concrete path** — the write engines open the file, so a glob is refused with a message saying so. An empty list rejects code-scope applies with a "configure codeTargets" message. Anything that is neither shape is a config error naming the offending entry (it used to become a silent `undefined` in every fix prompt). |
 | `cssEntries` | `["src/**/*.css"]` | Globs (relative to the Storybook host's cwd) for the CSS files the startup scanner **reads** to derive `selector → token` bindings. |
 | `tsxEntries` | `["src/**/*.tsx"]` | Globs for `.tsx` files the scanner reads to extract inline-style token bindings (`style={{ paddingTop: "var(--space-4)" }}`). Set explicitly when components live in a sibling package. |
 | `storyGlobs` | `src/**/*.stories.*`, `stories/**/*.stories.*` | Where the CLI looks for stories (see [CLI](#cli)). |
@@ -224,7 +245,28 @@ doesn't have:
 
 **Cost.** All bound children are fetched in **one** batched
 `GET /files/:key/nodes?ids=…` request — a 3-child component adds exactly one
-HTTP call, and none at all when the node cache is warm.
+HTTP call, and none at all when the node cache is warm during a **Check all**
+run (see below).
+
+### Caching, and why Check drift ignores it
+
+Pressing **Check drift** is a request for the truth, so it always re-reads
+Figma: this file's cached variables and nodes are dropped before the check
+runs, and the on-disk report cache is not consulted. A dual-mode check
+revalidates **once** per press, not once per mode.
+
+**Check all** is the opposite case — one variables fetch serving ~90 stories is
+the difference between a working bulk run and a wall of 429s — so it keeps the
+in-memory caches, and additionally drops them whenever the file's
+`lastModified` has moved since the last one it saw.
+
+This matters because it used to be wrong: the variables cache carried a 5-minute
+TTL justified by "variables are stable for the lifetime of a working session",
+and v0.0.28's engine memoization turned that per-check cache into a cross-check
+one. Change a token's value in Figma, press Check drift, and the panel could
+confidently report `match` for up to five minutes. The report header's
+`N cache hits / M misses` counters still describe real HTTP traffic — a dropped
+entry shows up as a miss, never as a phantom hit.
 
 Set the Figma Personal Access Token in your environment:
 
@@ -559,28 +601,39 @@ them.
 ```
 Drift report — node 37:30 — 5:31:55 PM
 
-Property                 Code              Figma                          Value   Apply
-background-color         rgb(37,99,235)    rgb(37,99,235)                 match   —
+[ Copy fix prompt for all drift (5) ]  one prompt for all 5 drifted rows —
+related properties are described as one change each
+
+Property                 Code              Figma                          Value                Fix / notes
+border-color             rgb(221,221,221)  rgb(200,200,200)               not bound in Figma   Figma's value here is NOT bound to a variable…
+border-top-left-radius   8px               6px (token: radius/lg)         drift                Copy fix prompt
+border-top-right-radius  8px               6px (token: radius/lg)         drift                Copy fix prompt
+border-bottom-left-…     8px               6px (token: radius/lg)         drift                Copy fix prompt
+border-bottom-right-…    8px               6px (token: radius/lg)         drift                Copy fix prompt
+gap                      8px               4px (token: space/4)           drift                Copy fix prompt
+background-color         rgb(37,99,235)    rgb(37,99,235)                 match                —
                                             light: rgb(37,99,235) ·
                                             dark:  rgb(96,165,250)
-padding-top              8px               8px (token: space/8)           match   —
-padding-right            8px               8px (token: space/8)           match   —
-padding-bottom           8px               8px (token: space/8)           match   —
-padding-left             8px               8px (token: space/8)           match   —
-border-top-left-radius   8px               6px (token: radius/lg)         drift   Use token
-border-top-right-radius  8px               6px (token: radius/lg)         drift   Use token
-border-bottom-left-…     8px               6px (token: radius/lg)         drift   Use token
-border-bottom-right-…    8px               6px (token: radius/lg)         drift   Use token
-gap                      8px               4px (token: space/4)           drift   Use token
-font-size                13px              13px (token: typography/ui/13) match   —
-color                    rgb(31,30,30)     rgb(31,30,30)                  match   —
-active-variant           ["accent"]        ["accent"]                     match   —
+padding-top              8px               8px (token: space/8)           match                —
+padding-right            8px               8px (token: space/8)           match                —
+padding-bottom           8px               8px (token: space/8)           match                —
+padding-left             8px               8px (token: space/8)           match                —
+font-size                13px              13px (token: typography/ui/13) match                —
+color                    rgb(31,30,30)     rgb(31,30,30)                  match                —
+active-variant           ["accent"]        ["accent"]                     match                —
 ```
 
-The four `border-*-radius` rows above are a real finding: code uses
+Drift sorts to the top and matches to the bottom, in one table. The
+`border-color` row is the most important line in that report — a designer
+detached it from its variable — which is exactly why it is first and not
+folded into a collapse.
+
+The four `border-*-radius` rows are a real finding too: code uses
 `var(--radius-xl)` (8px) but the Figma variant binds to `radius/lg` (6px).
 Either the design or the code is wrong. With the default `apply: "off"`,
-each row's **Copy fix prompt** hands the fix to a coding agent; with
+the bulk button hands all five rows to a coding agent as one change set (and
+each row's **Copy fix prompt** hands over just that row, naming its
+siblings); with
 `apply: "experimental"`, **Use token** rewrites the CSS literal to
 `var(--radius-lg)` in one click without leaving Storybook.
 

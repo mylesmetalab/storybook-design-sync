@@ -60,7 +60,12 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       const payload: ConfigInfoPayload = {
         apply: config.apply,
         fileKey: config.fileKey,
-        codeTargetPaths: config.codeTargets.map((t) => t.path),
+        // Read the normalized paths off the config; do NOT re-derive them here.
+        // `config.codeTargets.map((t) => t.path)` used to live at this line and
+        // produced `[undefined]` for every consumer using the documented
+        // glob-string shorthand, which then shipped into fix prompts as a file
+        // named `undefined`. See `config.ts`.
+        codeTargetPaths: config.codeTargetPaths,
       };
       channel.emit(EVENTS.ConfigInfo, payload);
     } catch (err: unknown) {
@@ -139,7 +144,7 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
   });
 
   channel.on(EVENTS.CodeSnapshot, async (payload: unknown) => {
-    const { storyId, snapshot, mode, args, additionalSnapshots, target, childSnapshots } =
+    const { storyId, snapshot, mode, args, additionalSnapshots, target, childSnapshots, bulk } =
       payload as CodeSnapshotPayload;
     try {
       // Each snapshot carries its own mode, so each gets its own resolution —
@@ -203,6 +208,12 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         storyId,
         nodeRef: { fileKey, nodeId: entry.nodeId! },
         registryPath: config.registryPath,
+        // A bulk run wants the caches (one variables fetch for ~90 stories); a
+        // deliberate Check drift wants the truth. `checkId` ties the two passes
+        // of a dual-mode check to one user action so Figma is revalidated once
+        // per press, not once per mode.
+        trigger: bulk ? "bulk" : "explicit",
+        checkId: `${storyId}:${Date.now()}`,
       };
       if (snapshot) baseInput.snapshot = snapshot;
       if (mode) baseInput.mode = mode;

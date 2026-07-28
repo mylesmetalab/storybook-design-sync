@@ -109,6 +109,21 @@ class TtlCache<V> {
   set(key: string, value: V): void {
     this.store.set(key, { value, expires: Date.now() + this.ttlMs });
   }
+  /**
+   * Drop an entry. Deliberately NOT a counter event: the next `get` records the
+   * miss and the fetch that follows records itself, so the panel's hit/miss
+   * numbers keep describing real HTTP traffic. Those counters were the
+   * diagnostic that made the stale-`match` bug findable.
+   */
+  delete(key: string): void {
+    this.store.delete(key);
+  }
+  /** Drop every entry whose key matches — node keys are `${fileKey}:${nodeId}`. */
+  deleteWhere(predicate: (key: string) => boolean): void {
+    for (const key of [...this.store.keys()]) {
+      if (predicate(key)) this.store.delete(key);
+    }
+  }
 }
 
 /**
@@ -210,8 +225,18 @@ class FigmaRestEngine implements Engine {
   /** Cache of `node_id → containing_frame.nodeId` per fileKey. */
   private readonly parentMaps = new Map<string, Map<string, string>>();
   /**
-   * Variables are stable for the lifetime of a working session; 5 min TTL
-   * is generous and saves ~200ms per drift check during bulk runs.
+   * Variables, cached for 5 min. The TTL exists for **bulk** runs, where one
+   * fetch serving ~90 stories is the difference between a working Check-all and
+   * a wall of 429s.
+   *
+   * It is NOT a claim that variables are stable: this comment used to read
+   * "variables are stable for the lifetime of a working session", and a designer
+   * changing a token value mid-session is precisely what this tool exists to
+   * detect. Combined with the engine memoization added in v0.0.28 (which turned
+   * these per-check caches into cross-check ones), that premise gave the panel a
+   * five-minute window in which it confidently reported `match` against values
+   * that had changed. An explicit Check drift now drops this entry before
+   * reading — see `revalidateBeforeExplicitCheck`.
    */
   private readonly variablesCache = new TtlCache<FigmaLocalVariablesResponse>(5 * 60_000);
   /**
@@ -222,6 +247,14 @@ class FigmaRestEngine implements Engine {
   private readonly nodeCache = new TtlCache<FigmaNode>(30_000);
   /** File metadata (lastModified) — 60s TTL. Used for cross-restart cache invalidation. */
   private readonly fileMetaCache = new TtlCache<string>(60_000);
+  /**
+   * The `lastModified` we last saw per fileKey. When it moves, every artefact
+   * cached for that file is suspect and gets dropped — a cheap truth signal is a
+   * better invalidator than a timer.
+   */
+  private readonly lastSeenModified = new Map<string, string>();
+  /** The user action whose explicit revalidation we already performed. */
+  private lastRevalidatedCheckId: string | undefined;
   /** Persistent on-disk cache (gitignored sidecar). Optional. */
   private readonly persistentCache: PersistentCache | null;
 
@@ -241,12 +274,30 @@ class FigmaRestEngine implements Engine {
     const hitsBefore = this.variablesCache.hits + this.nodeCache.hits;
     const missesBefore = this.variablesCache.misses + this.nodeCache.misses;
 
+    // A deliberate Check drift is a request for the truth, so it never reads
+    // Figma out of a timer-backed cache. A bulk run keeps its caches — that is
+    // what makes ~90 stories affordable.
+    const explicit = input.trigger !== "bulk";
+    if (explicit) {
+      await this.revalidateBeforeExplicitCheck(fileKey, input.checkId);
+    } else {
+      await this.dropCachesIfFileChanged(fileKey);
+    }
+
     // Persistent-cache short-circuit. Cheap path: fetch only file metadata
     // (one tiny HTTP call, cached for 60s) and check whether the cached
     // report is still valid for this story + snapshot. Hit → return
     // immediately, no node/variables fetch, no engine work.
-    if (this.persistentCache) {
-      await this.persistentCache.load();
+    //
+    // Skipped for an explicit check: the entry is keyed on the file's
+    // `lastModified`, so it can only be trusted to the same degree that signal
+    // can, and the whole point of the click is not to trust a timestamp. Bulk
+    // runs (and cold starts after a restart) still get the full benefit, and an
+    // explicit check still *writes* the cache below.
+    // Loaded either way: an explicit check skips the *read* but still writes,
+    // and writing without having loaded would drop every other story's entry.
+    if (this.persistentCache) await this.persistentCache.load();
+    if (this.persistentCache && !explicit) {
       const fileLastModified = await this.fetchFileLastModified(fileKey).catch(() => "");
       const cached = this.persistentCache.get(
         input.storyId,
@@ -344,6 +395,67 @@ class FigmaRestEngine implements Engine {
     }
 
     return report;
+  }
+
+  /* ---- cache freshness ---------------------------------------------------- *
+   *
+   * Two mechanisms, and both are needed:
+   *
+   *  (a) **Revalidate on a cheap truth signal.** The file's `lastModified` is one
+   *      small request. When it moves, everything cached for that file is
+   *      suspect and gets dropped. This is strictly better than a timer, and it
+   *      is what keeps a long bulk run honest without re-fetching per story.
+   *
+   *  (b) **Bypass on an explicit check.** (a) is only as good as its signal, and
+   *      we have NOT verified against live Figma that editing a *variable value*
+   *      (as opposed to a node) bumps the consuming file's `lastModified` — a
+   *      published-library value in particular may not, until the update is
+   *      accepted in the file. So an explicit Check drift drops this file's
+   *      variables and nodes unconditionally rather than asking a timestamp for
+   *      permission. This is the mechanism the correctness guarantee rests on;
+   *      (a) is the optimisation that extends some of it to bulk runs.
+   */
+
+  /** Drop every in-memory artefact cached for one file. */
+  private invalidateFile(fileKey: string): void {
+    this.variablesCache.delete(fileKey);
+    this.nodeCache.deleteWhere((key) => key.startsWith(`${fileKey}:`));
+    this.parentMaps.delete(fileKey);
+  }
+
+  /**
+   * (a) — compare the file's `lastModified` against the last one we saw and drop
+   * this file's caches when it moved. Uses the 60s-cached metadata value, so a
+   * bulk run pays at most one extra request per minute and still shares a single
+   * variables fetch for the run.
+   */
+  private async dropCachesIfFileChanged(fileKey: string): Promise<void> {
+    const current = await this.fetchFileLastModified(fileKey).catch(() => "");
+    if (!current) return;
+    const previous = this.lastSeenModified.get(fileKey);
+    this.lastSeenModified.set(fileKey, current);
+    if (previous !== undefined && previous !== current) this.invalidateFile(fileKey);
+  }
+
+  /**
+   * (b) — prepare for a user-initiated check: re-read `lastModified` with its own
+   * cache bypassed, then drop this file's variables and nodes regardless of what
+   * it says.
+   *
+   * Runs **once per user action**: a dual-mode check calls `checkDrift` twice for
+   * one press, and invalidating between the two passes would double the request
+   * count for no gain (nothing can have changed between them). Callers that pass
+   * no `checkId` are treated as a fresh action — correctness over speed.
+   */
+  private async revalidateBeforeExplicitCheck(
+    fileKey: string,
+    checkId: string | undefined,
+  ): Promise<void> {
+    if (checkId !== undefined && checkId === this.lastRevalidatedCheckId) return;
+    this.lastRevalidatedCheckId = checkId;
+    this.fileMetaCache.delete(fileKey);
+    await this.dropCachesIfFileChanged(fileKey);
+    this.invalidateFile(fileKey);
   }
 
   /**

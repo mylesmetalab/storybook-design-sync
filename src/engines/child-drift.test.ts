@@ -326,7 +326,30 @@ describe("a bound child that resolves", () => {
     expect(childBatches).toHaveLength(1);
   });
 
-  it("re-uses the node cache instead of re-requesting on a second check", async () => {
+  it("re-uses the node cache across a bulk run's checks", async () => {
+    const log = installFetchStub();
+    const engine = createFigmaRestEngine({ figmaPat: "test-pat" });
+    const input = {
+      storyId: "ui-card--default",
+      nodeRef: { fileKey: FILE_KEY, nodeId: ROOT_ID },
+      snapshot: snapshot("16px"),
+      trigger: "bulk" as const,
+      children: [
+        { selector: "[data-slot=header]", nodeId: HEADER_ID, snapshot: snapshot("16px") },
+      ],
+    };
+    await engine.checkDrift(input);
+    const after = log.urls.filter((u) => u.includes("/nodes?ids=")).length;
+    await engine.checkDrift(input);
+
+    expect(log.urls.filter((u) => u.includes("/nodes?ids=")).length).toBe(after);
+  });
+
+  it("re-fetches the child nodes on a second EXPLICIT check", async () => {
+    // This assertion used to be the opposite: a second check of any kind reused
+    // the node cache. That is what let a deliberate Check drift report `match`
+    // against a node the designer had just edited. Cache sharing is a bulk-run
+    // property (above); an explicit re-check is a request for the truth.
     const log = installFetchStub();
     const engine = createFigmaRestEngine({ figmaPat: "test-pat" });
     const input = {
@@ -341,7 +364,7 @@ describe("a bound child that resolves", () => {
     const after = log.urls.filter((u) => u.includes("/nodes?ids=")).length;
     await engine.checkDrift(input);
 
-    expect(log.urls.filter((u) => u.includes("/nodes?ids=")).length).toBe(after);
+    expect(log.urls.filter((u) => u.includes("/nodes?ids=")).length).toBeGreaterThan(after);
   });
 });
 

@@ -77,6 +77,16 @@ export interface CheckDriftRequestPayload {
    * `["light", "dark"]`. Per-story override via `parameters.designSync.modes`.
    */
   dualModes?: [string, string];
+  /**
+   * Set only by a **Check all** run. It tells the engine that caching is
+   * wanted here: one variables fetch serving every story is what keeps a
+   * ~90-story run under Figma's rate limits.
+   *
+   * Absent — a human pressed Check drift on this story — means the engine must
+   * revalidate against Figma instead of answering from a timer-backed cache. A
+   * deliberate re-check is a request for the truth. See `CheckDriftInput.trigger`.
+   */
+  bulk?: boolean;
 }
 
 export interface ChildBindingsRequestPayload {
@@ -147,6 +157,12 @@ export interface CodeSnapshotPayload {
    * and merges results.
    */
   additionalSnapshots?: Array<{ mode: string; snapshot: CodeSnapshot }>;
+  /**
+   * Relayed straight from the `CheckDriftRequest` that produced this snapshot,
+   * so the server can tell a bulk run's story from a deliberate single check
+   * and set `CheckDriftInput.trigger` accordingly. Absent = explicit.
+   */
+  bulk?: boolean;
 }
 
 export interface DriftReportPayload {

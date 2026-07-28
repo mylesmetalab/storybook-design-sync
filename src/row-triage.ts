@@ -1,5 +1,9 @@
 import { splitVariants } from "@metalab/design-sync-core";
-import type { DimensionDiff, DimensionStatus } from "./dimensions/types.js";
+import type {
+  ChildBindingReport,
+  DimensionDiff,
+  DimensionStatus,
+} from "./dimensions/types.js";
 
 /**
  * Pure row-triage logic for the drift panel, extracted from manager.tsx so
@@ -369,6 +373,102 @@ function describeSide(value: unknown): string {
 function describeCodeVariants(value: unknown): string {
   const long = summarizeListCell(value);
   return long ? `${long.count} candidate modifier classes` : describeSide(value);
+}
+
+/* ------------------------------------------------------------------------- *
+ * per-element grouping (declared child bindings)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Which element a grouped row describes. `undefined` = the story root.
+ * Every diff in a token row shares one element, so the first one that carries
+ * the field answers for the row.
+ */
+export function rowChildSelector(row: GroupedRow): string | undefined {
+  if (row.kind === "token") return row.value?.childSelector ?? row.binding?.childSelector;
+  return row.diff.childSelector;
+}
+
+export interface ElementGroup {
+  /** `undefined` for the story root; otherwise the declared child selector. */
+  selector: string | undefined;
+  /** Heading text: "Story root", or the selector plus the Figma node's name. */
+  label: string;
+  /** Figma node id compared for this element, when known. */
+  nodeId?: string;
+  /** The Figma node's own name, when the node was read successfully. */
+  nodeName?: string;
+  rows: GroupedRow[];
+}
+
+/**
+ * Split rows into per-element groups, **root first**, then declared children in
+ * registry order.
+ *
+ * A flat table where a child's `padding-top` is indistinguishable from the
+ * root's would be worse than no feature: both rows are individually true, and
+ * together they read as one contradictory element. So grouping is not cosmetic
+ * — it is what makes a child row mean anything.
+ *
+ * Returns a single root group (with no label shown by the caller) for a story
+ * with no child bindings, which is how the pre-existing panel layout is
+ * preserved exactly.
+ */
+export function groupRowsByElement(
+  rows: GroupedRow[],
+  children: readonly ChildBindingReport[] | undefined,
+): ElementGroup[] {
+  const rootRows: GroupedRow[] = [];
+  const byselector = new Map<string, GroupedRow[]>();
+  for (const row of rows) {
+    const selector = rowChildSelector(row);
+    if (selector === undefined) {
+      rootRows.push(row);
+      continue;
+    }
+    const list = byselector.get(selector) ?? [];
+    list.push(row);
+    byselector.set(selector, list);
+  }
+
+  const groups: ElementGroup[] = [{ selector: undefined, label: "Story root", rows: rootRows }];
+
+  // Registry order first, so the panel matches the order the author wrote.
+  const seen = new Set<string>();
+  for (const child of children ?? []) {
+    seen.add(child.selector);
+    const group: ElementGroup = {
+      selector: child.selector,
+      label: childGroupLabel(child),
+      rows: byselector.get(child.selector) ?? [],
+    };
+    if (child.nodeId) group.nodeId = child.nodeId;
+    if (child.nodeName) group.nodeName = child.nodeName;
+    groups.push(group);
+  }
+  // Any selector with rows but no report entry (defensive — the server builds
+  // `children` from the same declarations). Shown rather than dropped.
+  for (const [selector, list] of byselector) {
+    if (seen.has(selector)) continue;
+    groups.push({ selector, label: selector, rows: list });
+  }
+  return groups;
+}
+
+/** `[data-slot=header] → "Card header"` when Figma named the node. */
+export function childGroupLabel(child: ChildBindingReport): string {
+  return child.nodeName ? `${child.selector} → ${child.nodeName}` : child.selector;
+}
+
+/**
+ * Child bindings that produced no comparison. Rendered as a prominent block, not
+ * folded into the table: each one is a piece of the component that a "clean"
+ * report does NOT cover, and the user has to know that.
+ */
+export function unresolvedChildBindings(
+  children: readonly ChildBindingReport[] | undefined,
+): ChildBindingReport[] {
+  return (children ?? []).filter((c) => c.status !== "compared");
 }
 
 /**

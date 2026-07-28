@@ -25,6 +25,10 @@ import {
   stagedEditsVisible,
   rowHasAnyValue,
   summarizeListCell,
+  groupRowsByElement,
+  rowChildSelector,
+  unresolvedChildBindings,
+  type ElementGroup,
 } from "./row-triage.js";
 import { buildFixPrompt } from "./fix-prompt.js";
 
@@ -792,30 +796,52 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
   const grouped = groupDimensions(visibleDimensions(report)).filter(rowHasAnyValue);
   const mainRows = grouped.filter((r) => partitionRow(r) === "main");
   const infoRows = grouped.filter((r) => partitionRow(r) === "info");
+  // Per-element grouping. `hasChildren` is false for every story without
+  // declared child bindings, and the tables then render exactly as before —
+  // no group headers, no extra chrome.
+  const hasChildren = (report.children?.length ?? 0) > 0;
+  const mainGroups = groupRowsByElement(mainRows, report.children);
+  const infoGroups = groupRowsByElement(infoRows, report.children);
+  const unresolvedChildren = unresolvedChildBindings(report.children);
 
   // Build the self-contained fix prompt for a drift row. Shared by both
   // apply modes — auditing without writes still hands you the fix.
-  const promptFor = (d: DimensionDiff): string =>
-    buildFixPrompt({
+  //
+  // A child row's prompt must point at the *child*: its selector (scoped under
+  // the story's target, so an agent can find it) and its own Figma node id.
+  // Handing over the root's selector and node would send the fix to the wrong
+  // element.
+  const promptFor = (d: DimensionDiff): string => {
+    const child = d.childSelector
+      ? report.children?.find((c) => c.selector === d.childSelector)
+      : undefined;
+    const selector = d.childSelector
+      ? fixContext.selector
+        ? `${fixContext.selector} ${d.childSelector}`
+        : d.childSelector
+      : fixContext.selector;
+    return buildFixPrompt({
       storyId: report.storyId,
       kind: d.kind,
       property: d.property,
       codeValue: d.codeValue,
       figmaValue: d.figmaValue,
       tokenName: d.tokenName,
-      selector: fixContext.selector,
+      selector,
       // Present when the scanner derived this property from a Tailwind utility
       // class; makes the prompt name the class instead of a CSS declaration.
       codeClassName: d.codeClassName,
       filePaths: fixContext.filePaths,
-      nodeId: report.nodeId,
+      nodeId: child?.nodeId ?? report.nodeId,
       fileKey: fixContext.fileKey,
       note: d.note,
     });
+  };
 
   const renderRow = (row: GroupedRow, i: number, fixable: boolean) => {
+    const element = rowChildSelector(row) ?? "root";
     if (row.kind === "token") {
-      const key = `token-${row.property}-${i}`;
+      const key = `token-${element}-${row.property}-${i}`;
       return (
         <TokenRow
           key={key}
@@ -832,7 +858,7 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
       );
     }
     const d = row.diff;
-    const key = `${d.kind}-${d.property}-${i}`;
+    const key = `${d.kind}-${element}-${d.property}-${i}`;
     return (
       <OtherRow
         key={key}
@@ -876,6 +902,39 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
         </div>
       )}
 
+      {/* Declared child bindings that produced NO comparison. Deliberately
+          above the tables and styled as a problem: each one is a part of the
+          component the report below does not cover, and a green table with a
+          silently-skipped child is the exact lie this feature exists to
+          prevent. */}
+      {unresolvedChildren.length > 0 && (
+        <div style={styles.error}>
+          <strong>
+            {unresolvedChildren.length} declared child binding
+            {unresolvedChildren.length === 1 ? "" : "s"} not compared
+          </strong>
+          <div style={styles.muted}>
+            The rows below do not cover {unresolvedChildren.length === 1 ? "this element" : "these elements"}.
+          </div>
+          <ul style={styles.childProblemList}>
+            {unresolvedChildren.map((c) => (
+              <li key={c.selector} style={styles.childProblemItem}>
+                <code>{c.selector}</code> — {c.message}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {hasChildren && (
+        <div style={styles.note}>
+          Rows are grouped per element. Child groups compare CSS values, token
+          wiring and copy against their own Figma node;{" "}
+          <code>variant-set</code> and <code>props</code> are reported once for the
+          story root, where a variant identity actually exists.
+        </div>
+      )}
+
       {mainRows.length > 0 && (
         <table style={styles.table}>
           <thead>
@@ -895,7 +954,7 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
               </th>
             </tr>
           </thead>
-          <tbody>{mainRows.map((row, i) => renderRow(row, i, true))}</tbody>
+          {renderGroups(mainGroups, hasChildren, true, renderRow)}
         </table>
       )}
 
@@ -917,7 +976,7 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
                 <th style={styles.th}>{applyEnabled ? "Why no Apply" : "Notes"}</th>
               </tr>
             </thead>
-            <tbody>{infoRows.map((row, i) => renderRow(row, i, false))}</tbody>
+            {renderGroups(infoGroups, hasChildren, false, renderRow)}
           </table>
         </details>
       )}
@@ -925,15 +984,65 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
   );
 };
 
+/**
+ * Render one `<tbody>` per element, root first, each headed by its label.
+ *
+ * With no child bindings this collapses to a single unlabelled `<tbody>` holding
+ * every row — byte-for-byte the pre-existing table.
+ */
+function renderGroups(
+  groups: ElementGroup[],
+  showLabels: boolean,
+  fixable: boolean,
+  renderRow: (row: GroupedRow, i: number, fixable: boolean) => React.ReactNode,
+): React.ReactNode {
+  if (!showLabels) {
+    const all = groups.flatMap((g) => g.rows);
+    return <tbody>{all.map((row, i) => renderRow(row, i, fixable))}</tbody>;
+  }
+  return (
+    <>
+      {groups
+        .filter((g) => g.rows.length > 0)
+        .map((group) => (
+          <tbody key={group.selector ?? "__root__"}>
+            <tr>
+              <th colSpan={5} style={styles.groupHeader}>
+                {group.selector === undefined ? (
+                  <>Story root</>
+                ) : (
+                  <>
+                    <code>{group.selector}</code>
+                    {group.nodeName && <span style={styles.muted}> → {group.nodeName}</span>}
+                    {group.nodeId && <span style={styles.muted}> · node {group.nodeId}</span>}
+                  </>
+                )}
+                <span style={styles.muted}>
+                  {" "}
+                  · {group.rows.length} row{group.rows.length === 1 ? "" : "s"}
+                </span>
+              </th>
+            </tr>
+            {group.rows.map((row, i) => renderRow(row, i, fixable))}
+          </tbody>
+        ))}
+    </>
+  );
+}
+
 function groupDimensions(diffs: DimensionDiff[]): GroupedRow[] {
   const indexByProp = new Map<string, number>();
   const rows: GroupedRow[] = [];
   for (const d of diffs) {
     if (d.kind === "token-value" || d.kind === "token-binding") {
-      let idx = indexByProp.get(d.property);
+      // Keyed by element as well as property: the root and a bound child both
+      // report `padding-top`, and pairing the root's value with the child's
+      // binding would fabricate a row describing neither.
+      const key = `${d.childSelector ?? ""}|${d.property}`;
+      let idx = indexByProp.get(key);
       if (idx === undefined) {
         idx = rows.length;
-        indexByProp.set(d.property, idx);
+        indexByProp.set(key, idx);
         rows.push({ kind: "token", property: d.property });
       }
       const row = rows[idx] as Extract<GroupedRow, { kind: "token" }>;
@@ -1698,7 +1807,23 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
               <td style={styles.td}>
                 {r.status === "pending" && <span style={styles.muted}>queued</span>}
                 {r.status === "running" && <span>running…</span>}
-                {r.status === "done" && <span style={{ color: "#0a7d3e" }}>✓</span>}
+                {r.status === "done" &&
+                  (() => {
+                    // A story whose child bindings didn't resolve has no drift
+                    // rows for them, so a bare ✓ would advertise coverage the
+                    // run doesn't have.
+                    const skipped = unresolvedChildBindings(r.report?.children);
+                    if (skipped.length === 0) return <span style={{ color: "#0a7d3e" }}>✓</span>;
+                    return (
+                      <span
+                        style={{ color: "#92610a", fontWeight: 600 }}
+                        title={skipped.map((c) => c.message ?? c.status).join("\n\n")}
+                      >
+                        ✓ · {skipped.length} child binding{skipped.length === 1 ? "" : "s"} not
+                        compared
+                      </span>
+                    );
+                  })()}
                 {r.status === "error" && (
                   <span style={{ color: "#b91c1c" }} title={r.error}>
                     ✕ {r.error?.slice(0, 40)}
@@ -1742,8 +1867,19 @@ function buildMarkdownReport(bulk: BulkState): string {
   const driftedStories = bulk.rows.filter((r) => r.drift > 0);
   const flaggedStories = bulk.rows.filter((r) => r.drift === 0 && r.flagOnly > 0);
   const errorStories = bulk.rows.filter((r) => r.status === "error");
+  // Declared child bindings that produced no comparison. They carry no drift
+  // rows by definition, so without this the report would print "No drift
+  // detected" over a component whose header was never looked at.
+  const skippedChildren = bulk.rows.flatMap((r) =>
+    unresolvedChildBindings(r.report?.children).map((c) => ({ storyId: r.storyId, child: c })),
+  );
 
-  if (driftedStories.length === 0 && flaggedStories.length === 0 && errorStories.length === 0) {
+  if (
+    driftedStories.length === 0 &&
+    flaggedStories.length === 0 &&
+    errorStories.length === 0 &&
+    skippedChildren.length === 0
+  ) {
     lines.push(`No drift detected.`);
     return lines.join("\n");
   }
@@ -1770,6 +1906,18 @@ function buildMarkdownReport(bulk: BulkState): string {
     }
     lines.push("");
   }
+  if (skippedChildren.length > 0) {
+    lines.push(`## Not compared — declared child bindings`);
+    lines.push("");
+    lines.push(
+      `These elements are bound in the registry but were not checked, so the rows above do not cover them.`,
+    );
+    lines.push("");
+    for (const { storyId, child } of skippedChildren) {
+      lines.push(`- \`${storyId}\` · \`${child.selector}\` — ${child.message ?? child.status}`);
+    }
+    lines.push("");
+  }
   return lines.join("\n");
 }
 
@@ -1782,13 +1930,23 @@ function renderStorySection(
   if (!report) return;
   const rows = visibleDimensions(report).filter((d) => include.includes(d.status));
   if (rows.length === 0) return;
+  // The Element column only appears for stories with declared child bindings, so
+  // output for every other story is unchanged.
+  const showElement = (report.children?.length ?? 0) > 0;
   lines.push(`### \`${row.storyId}\` — node ${report.nodeId}`);
   lines.push("");
-  lines.push(`| Kind | Property | Code | Figma | Note |`);
-  lines.push(`| --- | --- | --- | --- | --- |`);
+  lines.push(
+    showElement
+      ? `| Element | Kind | Property | Code | Figma | Note |`
+      : `| Kind | Property | Code | Figma | Note |`,
+  );
+  lines.push(showElement ? `| --- | --- | --- | --- | --- | --- |` : `| --- | --- | --- | --- | --- |`);
   for (const d of rows) {
+    const tail = `${d.kind} | ${d.property} | ${cellValue(d.codeValue)} | ${cellValue(d.figmaValue)} | ${escapeCell(d.note ?? "")}`;
     lines.push(
-      `| ${d.kind} | ${d.property} | ${cellValue(d.codeValue)} | ${cellValue(d.figmaValue)} | ${escapeCell(d.note ?? "")} |`,
+      showElement
+        ? `| ${escapeCell(d.childSelector ?? "(story root)")} | ${tail} |`
+        : `| ${tail} |`,
     );
   }
   lines.push("");
@@ -2012,6 +2170,21 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#525252",
     userSelect: "none" as const,
   },
+  // Per-element group heading inside the drift table. Rendered as a full-width
+  // `<th>` at the top of each `<tbody>` so a child's rows can never be mistaken
+  // for the root's.
+  groupHeader: {
+    textAlign: "left" as const,
+    padding: "8px 8px 4px",
+    borderBottom: "1px solid #e5e5e5",
+    borderTop: "1px solid #e5e5e5",
+    background: "#f7f7f7",
+    fontWeight: 600,
+    fontSize: 11,
+    color: "#374151",
+  },
+  childProblemList: { margin: "6px 0 0", paddingLeft: 18, lineHeight: 1.5 },
+  childProblemItem: { marginBottom: 4 },
 };
 
 addons.register(ADDON_ID, () => {

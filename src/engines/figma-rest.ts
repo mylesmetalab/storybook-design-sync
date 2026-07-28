@@ -26,6 +26,7 @@ import {
   shadowsEqual,
   type FigmaEffect,
 } from "./box-shadow.js";
+import { layoutRows } from "./layout.js";
 import { textStyleRows, type FigmaTypeStyle } from "./text-style-map.js";
 import {
   componentPropertyRows,
@@ -353,6 +354,10 @@ class FigmaRestEngine implements Engine {
     dimensions.push(...this.diffVariantSet(node, snapshot, input.storyId, propsDiffs));
     dimensions.push(...this.diffCopy(node, snapshot));
     dimensions.push(...propsDiffs);
+    // `structure` — Figma auto-layout vs computed CSS layout. Emits nothing
+    // unless BOTH sides are laying out children (see `layout.ts`), which is why
+    // it can be shown at all.
+    dimensions.push(...layoutRows(node, snapshot?.styles));
 
     // Declared child bindings. Nothing runs — and no `children` field appears on
     // the report — when the registry entry has no `children` key, which is what
@@ -374,11 +379,11 @@ class FigmaRestEngine implements Engine {
       childReports = outcome.reports;
     }
 
-    // Reserved kinds — engine fills as flag-only placeholders.
-    dimensions.push(
-      this.placeholder("structure", "story.structure"),
-      this.placeholder("motion", "story.motion"),
-    );
+    // Reserved kinds — engine fills as flag-only placeholders. `structure` left
+    // this list in v0.0.39: it now emits real comparisons (see `layoutRows`
+    // above), and a placeholder alongside them would be a row claiming the
+    // dimension does nothing.
+    dimensions.push(this.placeholder("motion", "story.motion"));
 
     const report: DriftReport = {
       storyId: input.storyId,
@@ -700,6 +705,10 @@ class FigmaRestEngine implements Engine {
           valueDiffs: childValueDiffs,
         }),
         ...this.diffCopy(node, child.snapshot),
+        // A declared child is very often the flex container that matters (a
+        // Card's header row), so it gets the same layout comparison as the root
+        // — and the same applicability guard.
+        ...layoutRows(node, child.snapshot.styles),
       ];
       for (const row of rows) row.childSelector = child.selector;
       dimensions.push(...rows);
@@ -1083,6 +1092,63 @@ class FigmaRestEngine implements Engine {
           figmaValue: tokenName ? `${figmaShadow} (token: ${tokenName})` : figmaShadow,
           status,
           ...(tokenName ? { tokenName } : {}),
+        });
+      }
+    }
+
+    // Opacity — `node.opacity` against computed `opacity`. Directly
+    // comparable: Figma's node opacity and CSS `opacity` both scale the whole
+    // element including its children, on the same 0..1 scale, so this needs no
+    // unit conversion and no heuristics.
+    //
+    // Three shapes, and the distinction between them is the whole honesty of
+    // the row:
+    //   - The snapshot has no `opacity` key at all (a preview bundle older than
+    //     the property). No comparison is possible — emit nothing rather than
+    //     read a missing value as 0 or 1.
+    //   - Figma omits `opacity` (the common case: it is only serialized when
+    //     it isn't 1) AND the code computes 1. Both sides are at the default and
+    //     neither said anything — no row, same rule the box-shadow comparison
+    //     uses for "no shadow on either side".
+    //   - Otherwise compare. When Figma's side is the implicit default, the note
+    //     says so, so a drift row can't be misread as "the designer set 1 here".
+    {
+      const rawCode = snapshot.styles["opacity"];
+      const figmaRaw = (node as Record<string, unknown>)["opacity"];
+      const figmaExplicit = typeof figmaRaw === "number" && Number.isFinite(figmaRaw);
+      const figmaOpacity = figmaExplicit ? (figmaRaw as number) : 1;
+      const codeOpacity = rawCode === undefined ? null : Number.parseFloat(rawCode);
+      const codeUsable = codeOpacity !== null && Number.isFinite(codeOpacity);
+      const bothDefault = !figmaExplicit && codeUsable && Math.abs(codeOpacity! - 1) < 0.001;
+      if (rawCode !== undefined && !bothDefault) {
+        // A bound variable gives the row a token name, so a drifted literal can
+        // be promoted to `var(--token)` the same way padding is.
+        let tokenName: string | undefined;
+        const alias = pickAlias(node.boundVariables?.["opacity"]);
+        if (alias && variables) {
+          const v = variables.meta.variables[alias.id];
+          if (v && v.resolvedType === "FLOAT") tokenName = v.name;
+        }
+        const status: DimensionDiff["status"] = !codeUsable
+          ? "flag-only"
+          : Math.abs(codeOpacity! - figmaOpacity) < 0.001
+            ? "match"
+            : "drift";
+        const notes: string[] = [];
+        if (!figmaExplicit) {
+          notes.push("Figma's node has no explicit opacity, which means 1.");
+        }
+        if (!codeUsable) {
+          notes.push(`Computed \`opacity: ${rawCode}\` is not a number, so no comparison was made.`);
+        }
+        out.push({
+          kind: "token-value",
+          property: "opacity",
+          codeValue: rawCode,
+          figmaValue: tokenName ? `${figmaOpacity} (token: ${tokenName})` : String(figmaOpacity),
+          status,
+          ...(tokenName ? { tokenName } : {}),
+          ...(notes.length > 0 ? { note: notes.join(" ") } : {}),
         });
       }
     }

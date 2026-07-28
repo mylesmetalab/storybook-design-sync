@@ -852,7 +852,21 @@ export function explainInfo(row: GroupedRow): string {
       `Prop-default auto-writes are deferred: this diff has no unambiguous write target (arg? registry binding? Figma default?) — guessing would violate the honesty contract.`
     );
   }
-  if (d.kind === "structure" || d.kind === "motion") {
+  if (d.kind === "structure") {
+    // Visible since v0.0.39, so the old "reserved for a future engine" line
+    // would now be false on a row carrying two real values. There is still no
+    // Apply path (rewriting a layout property is a component decision, not a
+    // token swap), so this says which two values disagree and that the fix is
+    // a human one.
+    const code = flattenDualModeValue(d.codeValue) ?? describeSide(d.codeValue);
+    const figma = flattenDualModeValue(d.figmaValue) ?? describeSide(d.figmaValue);
+    return (
+      `Figma's auto-layout implies \`${d.property}: ${figma}\`, the rendered element computes \`${code}\`. ` +
+      `Decide which side is right: change the layout in code, or change the auto-layout in Figma. ` +
+      `No auto-apply — a layout property is a component decision, and the addon will not rewrite one from a diff.`
+    );
+  }
+  if (d.kind === "motion") {
     return `\`${d.kind}\` dimension is reserved for a future engine — surfaced for awareness only.`;
   }
   return `No engine for "${d.kind}" dimension yet — fix in code or Figma manually.`;

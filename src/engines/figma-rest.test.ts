@@ -1022,3 +1022,101 @@ describe("props: Figma component properties vs story args", () => {
     expect(only[0]).toMatchObject({ property: "story.args", status: "flag-only" });
   });
 });
+
+/**
+ * `opacity` — the last trivially-comparable property, wired in v0.0.39. Both
+ * sides are a 0..1 scalar over the whole element, so the only thing that can go
+ * wrong is what a *missing* value is taken to mean.
+ */
+describe("token-value: opacity", () => {
+  it("matches when both sides agree", async () => {
+    const dimensions = await check({
+      styles: { ...MATCHING_STYLES, opacity: "0.5" },
+      node: nodeResponse({ opacity: 0.5 }),
+    });
+    expect(row(dimensions, "opacity")).toMatchObject({
+      codeValue: "0.5",
+      figmaValue: "0.5",
+      status: "match",
+    });
+  });
+
+  it("reports drift when Figma dims the node and the code does not", async () => {
+    const dimensions = await check({
+      styles: { ...MATCHING_STYLES, opacity: "1" },
+      node: nodeResponse({ opacity: 0.4 }),
+    });
+    expect(row(dimensions, "opacity")).toMatchObject({
+      codeValue: "1",
+      figmaValue: "0.4",
+      status: "drift",
+    });
+  });
+
+  it("emits no row when neither side sets opacity", async () => {
+    // Figma serializes `opacity` only when it isn't 1, so "absent" means 1.
+    // Both sides at 1 is agreement nobody authored — no information, no row.
+    const dimensions = await check({ styles: { ...MATCHING_STYLES, opacity: "1" } });
+    expect(maybeRow(dimensions, "opacity")).toBeUndefined();
+  });
+
+  it("says so when Figma's 1 is the implicit default", async () => {
+    const dimensions = await check({ styles: { ...MATCHING_STYLES, opacity: "0.5" } });
+    const opacity = row(dimensions, "opacity");
+    expect(opacity.status).toBe("drift");
+    expect(opacity.note).toContain("no explicit opacity");
+  });
+
+  it("emits no row when the snapshot predates the property", async () => {
+    const withoutOpacity = { ...MATCHING_STYLES };
+    delete withoutOpacity["opacity"];
+    const dimensions = await check({
+      styles: withoutOpacity,
+      node: nodeResponse({ opacity: 0.4 }),
+    });
+    expect(maybeRow(dimensions, "opacity")).toBeUndefined();
+  });
+});
+
+/**
+ * `structure` — the engine wiring only. The mappings and the applicability
+ * rules have their own suite in `layout.test.ts`; this pins down that the rows
+ * reach a real report, and that a non-flex story root still produces none.
+ */
+describe("structure: Figma auto-layout vs computed layout", () => {
+  function structureRows(dimensions: DimensionDiff[]): DimensionDiff[] {
+    return dimensions.filter((d) => d.kind === "structure");
+  }
+
+  it("reports the direction drift a Card handed off the wrong way round has", async () => {
+    const dimensions = await check({
+      styles: { ...MATCHING_STYLES, display: "flex", "flex-direction": "row" },
+      node: nodeResponse({ layoutMode: "VERTICAL" }),
+    });
+    expect(structureRows(dimensions)).toEqual([
+      expect.objectContaining({
+        kind: "structure",
+        property: "flex-direction",
+        codeValue: "row",
+        figmaValue: "column",
+        status: "drift",
+      }),
+    ]);
+  });
+
+  it("emits no structure row when the story root is not a flex/grid container", async () => {
+    const dimensions = await check({
+      styles: { ...MATCHING_STYLES, display: "block", "flex-direction": "row" },
+      node: nodeResponse({ layoutMode: "VERTICAL", primaryAxisAlignItems: "CENTER" }),
+    });
+    expect(structureRows(dimensions)).toEqual([]);
+  });
+
+  it("no longer emits a `structure` placeholder row", async () => {
+    // The placeholder was the whole dimension before v0.0.39; alongside real
+    // rows it would be a row asserting the dimension does nothing.
+    const dimensions = await check({ styles: MATCHING_STYLES });
+    expect(dimensions.find((d) => d.property === "story.structure")).toBeUndefined();
+    expect(dimensions.find((d) => d.property === "story.motion")).toBeDefined();
+  });
+});

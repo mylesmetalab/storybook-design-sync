@@ -9,8 +9,10 @@ import {
 } from "./channels.js";
 import { applyCodeEdit } from "./apply-code.js";
 import type { DimensionDiff, DriftReport } from "./dimensions/types.js";
-import { getAutoTokenMap } from "./auto-tokens.js";
+import { getAutoScan, getAutoTokenMap } from "./auto-tokens.js";
 import { lookupBindings } from "./scan-css.js";
+import { resolveComponentBindings } from "./tailwind-components.js";
+import { componentNameFromStoryId } from "./fix-prompt.js";
 
 /**
  * Storybook 10 server channel. Registered via the addon's preset.
@@ -104,10 +106,12 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
   channel.on(EVENTS.CodeSnapshot, async (payload: unknown) => {
     const { storyId, snapshot, mode, args, additionalSnapshots, target } = payload as CodeSnapshotPayload;
     try {
-      mergeAutoBindings(storyId, target, snapshot);
+      // Each snapshot carries its own mode, so each gets its own resolution —
+      // a `dark:` class applies in the dark pass and not the light one.
+      const autoBindings = mergeAutoBindings(storyId, target, snapshot, args, mode);
       if (additionalSnapshots) {
         for (const extra of additionalSnapshots) {
-          mergeAutoBindings(storyId, target, extra.snapshot);
+          mergeAutoBindings(storyId, target, extra.snapshot, args, extra.mode);
         }
       }
       const config = await loadConfig();
@@ -176,6 +180,13 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         report = await engine.checkDrift(baseInput);
       }
 
+      annotateClassHints(report, autoBindings.classes);
+      if (autoBindings.advisory) {
+        // eslint-disable-next-line no-console
+        console.warn(`[design-sync] ${storyId}: ${autoBindings.advisory}`);
+        report.scanAdvisory = autoBindings.advisory;
+      }
+
       channel.emit(EVENTS.DriftReport, { report });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -187,21 +198,93 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
 }
 
 /**
- * Merge CSS-derived bindings into the snapshot. The auto-derived map (built
- * by the preset's PostCSS scanner) takes precedence over story-param
- * `tokens` and per-element `data-token-*` attrs for any property the
- * scanner found a binding for. Properties the scanner didn't see fall
- * through to whatever the snapshot already carried.
+ * Merge scanner-derived bindings into the snapshot. Two independent sources:
+ *
+ *  1. **Selector-keyed** bindings from the CSS/TSX scanners, looked up by the
+ *     story's `parameters.designSync.target` with cascade fallback. Requires a
+ *     target selector — without one there is nothing to key on.
+ *  2. **Tailwind `cva()` components**, resolved by the story id's component
+ *     segment plus the story's args. Needs no target selector, because a
+ *     Tailwind component has no stable class to point at: the utilities *are*
+ *     the styling. This is the path that makes shadcn/cva consumers work.
+ *
+ * Both take precedence over story-param `tokens` and per-element
+ * `data-token-*` attrs for any property they resolved. Properties neither saw
+ * fall through to whatever the snapshot already carried.
+ *
+ * Returns the class attribution for the properties it resolved (property → the
+ * utility class a fix should change) plus any advisory the caller should
+ * surface, so the report can name the class instead of only the property.
  */
+interface AutoBindingOutcome {
+  classes: Record<string, string>;
+  /** Human-readable note when resolution was refused rather than empty. */
+  advisory?: string;
+}
+
 function mergeAutoBindings(
   storyId: string,
   target: string | undefined,
   snapshot: import("./engines/types.js").CodeSnapshot | undefined,
+  args: Record<string, unknown> | undefined,
+  mode: string | undefined,
+): AutoBindingOutcome {
+  if (!snapshot) return { classes: {} };
+  const scan = getAutoScan();
+  const bindings: Record<string, string> = {};
+  const classes: Record<string, string> = {};
+  let advisory: string | undefined;
+
+  if (target) {
+    Object.assign(bindings, lookupBindings(getAutoTokenMap(), target));
+    for (const key of Object.keys(bindings)) {
+      const hint = scan.classHints[target]?.[key];
+      if (hint) classes[key] = hint;
+    }
+  }
+
+  if (scan.components.length > 0) {
+    const resolution = resolveComponentBindings(
+      scan.components,
+      componentNameFromStoryId(storyId),
+      args,
+      scan.themeVars,
+      mode,
+    );
+    if (resolution.kind === "resolved") {
+      Object.assign(bindings, resolution.bindings);
+      Object.assign(classes, resolution.classes);
+    } else if (resolution.kind === "ambiguous") {
+      // Two scanned components answer to the same name. Picking one would
+      // produce authoritative-looking bindings from the wrong file.
+      advisory =
+        `Tailwind bindings not derived: ${resolution.files.length} scanned components ` +
+        `answer to "${resolution.component}" (${resolution.files.join(", ")}). ` +
+        `Rename one, or narrow \`tsxEntries\` in design-sync.config.json.`;
+    }
+  }
+
+  if (Object.keys(bindings).length > 0) {
+    snapshot.bindings = { ...(snapshot.bindings ?? {}), ...bindings };
+  }
+  return advisory === undefined ? { classes } : { classes, advisory };
+}
+
+/**
+ * Attach the utility class that produced each code-side binding to the matching
+ * drift rows, so the fix prompt can say "change `bg-primary`" rather than only
+ * "background-color drifted". Purely additive annotation — no diff's status,
+ * values, or partitioning depend on it.
+ */
+function annotateClassHints(
+  report: DriftReport,
+  classes: Record<string, string>,
 ): void {
-  if (!snapshot || !target) return;
-  const auto = lookupBindings(getAutoTokenMap(), target);
-  if (Object.keys(auto).length === 0) return;
-  snapshot.bindings = { ...(snapshot.bindings ?? {}), ...auto };
+  if (Object.keys(classes).length === 0) return;
+  for (const dim of report.dimensions) {
+    const cls = classes[dim.property];
+    if (cls) dim.codeClassName = cls;
+  }
 }
 
 /**

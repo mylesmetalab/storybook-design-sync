@@ -9,6 +9,7 @@ import {
   normalizeBindingKey,
   compositeBorderTokens,
 } from "./binding-shape.js";
+import { resolveStoryRoot } from "./story-root.js";
 
 const SNAPSHOT_PROPERTIES = [
   // Box / background
@@ -51,92 +52,12 @@ const SNAPSHOT_PROPERTIES = [
 ] as const;
 
 /**
- * Find the element that actually represents the rendered story.
- *
- * Resolution order:
- *   1. Explicit `parameters.designSync.target` selector (most specific)
- *   2. Element with `data-design-sync-target` (explicit opt-in)
- *   3. Class-name match: descendant whose class name (with hyphens stripped)
- *      starts with the kebab-collapsed component segment of the storyId
- *      (e.g. "atoms-iconbutton--accent" → look for ".icon-button" or
- *      ".iconbutton" on a descendant). Skips Storybook decorator wrappers
- *      automatically.
- *   4. Deepest single-child walker fallback
+ * Story-root resolution — including portalled overlay content (Radix / Base UI
+ * Dialog, Popover, Tooltip, Select, Menu all render outside `#storybook-root`)
+ * — lives in `story-root.ts` so it can be unit-tested against a DOM without
+ * importing Storybook's preview API. See that file for the resolution order and
+ * the ambiguity rules.
  */
-function findStoryRoot(selector?: string, storyId?: string): HTMLElement | null {
-  if (selector) {
-    const el = document.querySelector<HTMLElement>(selector);
-    if (el) return el;
-  }
-  const explicit = document.querySelector<HTMLElement>("[data-design-sync-target]");
-  if (explicit) return explicit;
-
-  const root = document.getElementById("storybook-root");
-  if (!root) return null;
-
-  if (storyId) {
-    const matched = findByComponentSegment(root, storyId);
-    if (matched) return matched;
-  }
-
-  let el: HTMLElement = root;
-  while (el.children.length === 1 && el.firstElementChild instanceof HTMLElement) {
-    el = el.firstElementChild;
-  }
-  return el;
-}
-
-/**
- * Walk descendants and return the first one whose classList carries a class
- * matching the component segment of the storyId.
- *
- * Component segment is the last hyphen-separated piece of the part before "--":
- *   "atoms-iconbutton--accent" → "iconbutton"
- *   "organisms-ai-popover--default" → "popover"   (false hit on multi-word)
- *
- * To compensate for SB collapsing component names ("IconButton" → "iconbutton"),
- * we strip hyphens from candidate class names before comparing — so
- * `.icon-button` matches "iconbutton" and `.ai-popover` matches "aipopover".
- *
- * Returns null if no match — caller falls back to the single-child walker.
- */
-function findByComponentSegment(root: HTMLElement, storyId: string): HTMLElement | null {
-  const beforeDoubleDash = storyId.split("--")[0] ?? "";
-  // Use the WHOLE pre-double-dash segment (collapsed) to handle both
-  // "atoms-iconbutton" and "organisms-aipopover" without losing the "ai" prefix.
-  // We try increasingly specific matches: full pre-segment, then just the last word.
-  const candidates = new Set<string>();
-  const collapsed = beforeDoubleDash.replace(/-/g, "").toLowerCase();
-  if (collapsed) candidates.add(collapsed);
-  const lastSegment = beforeDoubleDash.split("-").pop()?.toLowerCase();
-  if (lastSegment) candidates.add(lastSegment);
-
-  // Prefer the deepest match so we land on the leafmost component element
-  // (`.icon-button.icon-button--accent` rather than a wrapping container).
-  let best: HTMLElement | null = null;
-  let bestDepth = -1;
-
-  function walk(el: HTMLElement, depth: number): void {
-    for (const cls of Array.from(el.classList)) {
-      const stripped = cls.replace(/-/g, "").toLowerCase();
-      for (const candidate of candidates) {
-        if (stripped === candidate || stripped.startsWith(candidate)) {
-          if (depth > bestDepth) {
-            best = el;
-            bestDepth = depth;
-          }
-          break;
-        }
-      }
-    }
-    for (const child of Array.from(el.children)) {
-      if (child instanceof HTMLElement) walk(child, depth + 1);
-    }
-  }
-
-  walk(root, 0);
-  return best;
-}
 
 /**
  * Pull a token name out of an inline-style value. Accepts:
@@ -325,16 +246,25 @@ function waitForStyleFlush(): Promise<void> {
 }
 
 channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) => {
-  const target = findStoryRoot(payload.target, payload.storyId);
-  if (!target) {
+  const resolution = resolveStoryRoot({
+    doc: document,
+    selector: payload.target,
+    storyId: payload.storyId,
+  });
+  if (resolution.kind !== "found") {
+    // Ambiguity is reported, never resolved by picking one: snapshotting the
+    // wrong element yields drift numbers that are real but describe something
+    // else, which is the worst failure mode this addon has.
     channel.emit(EVENTS.DriftError, {
       storyId: payload.storyId,
-      message: payload.target
-        ? `Story root not found: selector "${payload.target}" matched no element.`
-        : "Story root not found in DOM (looked for [data-design-sync-target] and #storybook-root).",
+      message:
+        resolution.kind === "ambiguous"
+          ? `${resolution.message} Candidates: ${resolution.candidates.join(" | ")}`
+          : resolution.message,
     });
     return;
   }
+  const target = resolution.element;
 
   const modeAttribute = payload.modeAttribute ?? "data-theme";
 

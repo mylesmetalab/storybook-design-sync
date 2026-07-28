@@ -2,7 +2,12 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import postcss, { type Rule, type Declaration } from "postcss";
 import { glob } from "tinyglobby";
-import { deriveSelectorChain } from "@metalab/design-sync-core";
+import {
+  deriveSelectorChain,
+  parseTailwindTheme,
+  mergeTailwindThemes,
+  type TailwindThemeVars,
+} from "@metalab/design-sync-core";
 import { expandDecl, extractBareVarToken } from "./binding-shape.js";
 
 /**
@@ -29,6 +34,19 @@ export interface ScanResult {
   map: AutoTokenMap;
   warnings: ScanWarning[];
   scannedFiles: string[];
+  /**
+   * Tailwind v4 `@theme` custom properties found across all scanned files,
+   * keyed without the leading `--`. Empty for a consumer that isn't on
+   * Tailwind v4's CSS-first theme (including v3, whose scale lives in
+   * `tailwind.config.js` and is not evaluated).
+   *
+   * Fed to `scanTsx`, which needs it to turn a utility class into a token:
+   * `bg-primary` is only a binding if the consumer's theme declares
+   * `--color-primary`. Parsing the theme here rather than in the TSX scanner
+   * keeps CSS reading in one place — the TSX scanner never opens a `.css`
+   * file.
+   */
+  themeVars: TailwindThemeVars;
 }
 
 /**
@@ -85,6 +103,7 @@ export async function scanCss(
   });
 
   const map: AutoTokenMap = {};
+  const themes: TailwindThemeVars[] = [];
   for (const file of files) {
     let source: string;
     try {
@@ -93,6 +112,10 @@ export async function scanCss(
       warnings.push({ file, message: `Failed to read: ${(err as Error).message}` });
       continue;
     }
+    // Theme extraction is independent of the PostCSS pass and must not be
+    // skipped when a file fails to parse as CSS — `@theme` blocks are read by
+    // a standalone scanner in core, so run it on the raw source first.
+    themes.push(parseTailwindTheme(source));
     let root;
     try {
       root = postcss.parse(source, { from: file });
@@ -105,7 +128,12 @@ export async function scanCss(
     });
   }
 
-  return { map, warnings, scannedFiles: files.map((f) => resolve(f)) };
+  return {
+    map,
+    warnings,
+    scannedFiles: files.map((f) => resolve(f)),
+    themeVars: mergeTailwindThemes(...themes),
+  };
 }
 
 /**

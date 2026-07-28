@@ -54,6 +54,14 @@ export interface DimensionDiff {
    * drift Apply path to construct a `var(--token)` rewrite in code.
    */
   tokenName?: string;
+  /**
+   * The utility class the code-side binding came from (`"bg-primary"`), when
+   * the scanner derived this property from Tailwind rather than from a
+   * `var(--token)` declaration. Attribution only: it lets the fix prompt name
+   * the class to change instead of only describing the property. Nothing about
+   * a row's status, values, or partitioning depends on it.
+   */
+  codeClassName?: string;
 }
 
 export interface DriftTiming {
@@ -76,4 +84,11 @@ export interface DriftReport {
   mode?: string;
   /** Timing + cache stats — shown in the panel for visibility into perf. */
   timing?: DriftTiming;
+  /**
+   * Set when the startup scanner refused to derive bindings for this story and
+   * the reason is actionable — currently only "two scanned components answer to
+   * the same name". Surfaced so an empty binding column reads as "we declined
+   * to guess" rather than "your code declares nothing".
+   */
+  scanAdvisory?: string;
 }

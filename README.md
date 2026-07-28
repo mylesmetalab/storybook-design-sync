@@ -183,6 +183,100 @@ falls back to `.icon-button` when a property isn't redeclared on the variant rul
 Where the CSS lives is configured by `cssEntries` in `design-sync.config.json`
 (default: `["src/**/*.css"]`).
 
+`target` is also how you point at **portalled** content and how you resolve an
+ambiguous story root — see [Portalled components](#portalled-components-dialog-popover-tooltip-select).
+
+### Tailwind / shadcn / cva consumers
+
+If your components style themselves with utility classes rather than
+`var(--token)` declarations, `target` is usually **unnecessary** — there is no
+stable class to point at, because the utilities *are* the styling. The scanner
+instead reads your `cva()` calls and matches them to a story by the story id's
+component segment plus the story's `args`:
+
+```
+ui-button--primary   →  component "button"  →  src/components/ui/button.tsx
+args { variant: "primary", size: "medium" }  →  the cva slots that applied
+```
+
+So `bg-primary` in the `variant.primary` slot becomes
+`background-color → primary` for the `Primary` story and nothing at all for the
+`Neutral` one. Anything the theme can't vouch for (arbitrary values, `p-3` under
+the `--spacing` multiplier, Tailwind defaults like `bg-transparent`) produces no
+binding rather than a guess. Full rules, including the complete "produces
+nothing" table, are in
+[design-sync-core's README](https://github.com/mylesmetalab/design-sync-core#tailwind-utility--token-mapping-v002).
+
+**State modifiers are resolved, not blanket-ignored.** The bindings describe the
+state the story renders in, because that is what the snapshot measures:
+
+- `hover:`, `focus-visible:`, `active:` — provably off (nothing forces them), so
+  they contribute nothing.
+- `data-disabled:` / `disabled:` / `aria-disabled:` — applied when the story's
+  `disabled` arg is set, and they outrank the variant slot's own classes. A
+  `PrimaryDisabled` story reports `background-color → disabled` via
+  `data-disabled:bg-disabled`, not `primary`.
+- `dark:` — resolved from the active mode when your stories set one
+  (`modeAttribute`); left unbound when they don't.
+- breakpoints, `[&_svg]:`, other `data-*`/`aria-*` hooks — unknowable, so the
+  property is left unbound rather than answered from the unmodified class.
+
+Requirements:
+
+- **Tailwind v4 CSS-first theme.** The scanner reads `@theme` blocks out of your
+  `cssEntries`. A v3 `tailwind.config.js` scale is not evaluated, so a v3
+  consumer gets no Tailwind bindings.
+- **`tsxEntries` must cover your components** (default `["src/**/*.tsx"]`).
+- **One component per name.** If two scanned `cva()` components answer to the
+  same name, the addon derives nothing for that story and says so in the panel —
+  rename one, or narrow `tsxEntries`.
+
+The startup log tells you what it found:
+
+```
+[design-sync] Scanned 1 CSS + 1 TSX file(s); derived bindings for 4 selector(s)
+  (css: 0, tsx: 0, tailwind-cva: 4 scope(s) across 1 component(s) [button]);
+  Tailwind @theme vars: 37.
+```
+
+A `tailwind-cva` count of 0 with a non-zero `@theme vars` count means the classes
+were read but none of them resolved to a consumer token — check whether your
+components use arbitrary values or Tailwind's default scale.
+
+### Portalled components (Dialog, Popover, Tooltip, Select)
+
+Radix and Base UI render overlay content into `document.body`, outside
+`#storybook-root`. The addon looks for open portalled content — an ARIA overlay
+role, Base UI's `data-open`, Radix's `data-state="open"`, or a known portal
+container — and snapshots it when the story root holds nothing but the trigger.
+
+It will **not** guess. Two situations are reported as errors rather than resolved:
+
+- more than one portalled overlay is open; or
+- the story root contains an element matching the story name **and** an overlay
+  is open outside it (the usual trigger-plus-popup shape).
+
+Both are fixed by saying which element you mean:
+
+```ts
+export const Open: StoryObj<typeof Dialog> = {
+  parameters: {
+    // Queried against the whole document, so it reaches portalled content.
+    designSync: { target: '[role="dialog"]' },
+  },
+};
+```
+
+or by putting `data-design-sync-target` on the element itself. (Two elements
+carrying that attribute is likewise reported, not guessed.)
+
+**State forcing is not needed for arg-driven states.** A story arg that the
+component forwards to the DOM produces the real attribute — `disabled: true` on a
+Base UI Button renders `data-disabled`, so `data-disabled:bg-disabled` applies
+and `getComputedStyle` reads the true disabled paint. Pseudo-states (`hover`,
+`focus-visible`) cannot be expressed as args and are not snapshotted; force those
+in the Design Inspector instead.
+
 > **Deprecated:** `parameters.designSync.tokens` (a hand-maintained map from
 > CSS property → token name) is still accepted for one release for backwards
 > compat, but logs a deprecation warning in the manager console. CSS-derived
@@ -196,10 +290,18 @@ The preview hook reads:
   radius, color, font-*)
 - token bindings derived from the consumer's CSS at startup (PostCSS scan
   of `cssEntries`, keyed by the story's `target` selector)
+- token bindings derived from Tailwind utility classes at startup (`cva()` calls
+  and literal `className` attributes in `tsxEntries`, keyed by component +
+  story args — see above)
 - `data-token-*` attributes (e.g. `data-token-background-color="color/accent/blue"`)
   on the snapshotted element (overrides per-element only)
 - `parameters.designSync.tokens` declared in the story *(deprecated — see above)*
 - BEM-style modifier classes (anything containing `--`) for variant diffs
+
+Where a binding came from a utility class, the row's **Copy fix prompt** names
+that class (`swap `bg-primary` for the utility whose theme variable resolves to
+`--color-x``) instead of telling a Tailwind codebase to write a CSS declaration
+it has nowhere to put.
 
 If the registry doesn't list the current story, the panel shows:
 > Not registered. Add this story to `.design-sync/registry.json`.

@@ -91,3 +91,43 @@ describe("buildFixPrompt — self-contained agent prompt", () => {
     expect(p).toContain("variable not found in file");
   });
 });
+
+/**
+ * Tailwind consumers: a prompt that says "set background-color to #2c2c2c" is
+ * not actionable on a shadcn/cva component — there is no declaration to edit.
+ * When the scanner knows which utility class produced the binding, the prompt
+ * has to name it.
+ */
+describe("buildFixPrompt — Tailwind class attribution", () => {
+  it("names the class to change and where it may live", () => {
+    const p = buildFixPrompt({ ...base, codeClassName: "bg-primary" });
+    expect(p).toContain("`bg-primary`");
+    expect(p).toMatch(/Tailwind utility class/i);
+    expect(p).toMatch(/cva\(\)` base array or variant slot/i);
+  });
+
+  it("scopes the minimal-change instruction to that class", () => {
+    const p = buildFixPrompt({ ...base, codeClassName: "rounded-md" });
+    expect(p).toMatch(/change only the `rounded-md` class/i);
+    expect(p).toMatch(/leave every other utility class alone/i);
+  });
+
+  it("advises a utility swap, not a CSS declaration, when a token is known", () => {
+    const p = buildFixPrompt({
+      ...base,
+      tokenName: "size/radius/200",
+      codeClassName: "rounded-md",
+    });
+    expect(p).toMatch(/swap `rounded-md` for the utility class/i);
+    expect(p).toContain("--size-radius-200");
+    // The CSS-declaration advice must NOT appear — it is uncorrectable advice
+    // for this codebase.
+    expect(p).not.toMatch(/set `border-top-left-radius: var\(/);
+  });
+
+  it("keeps the CSS-declaration advice when there is no class attribution", () => {
+    const p = buildFixPrompt({ ...base, tokenName: "size/radius/200" });
+    expect(p).toMatch(/set `border-top-left-radius: var\(--size-radius-200\)`/);
+    expect(p).not.toMatch(/utility class/i);
+  });
+});

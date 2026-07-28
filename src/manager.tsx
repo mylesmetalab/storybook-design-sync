@@ -787,6 +787,9 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
       figmaValue: d.figmaValue,
       tokenName: d.tokenName,
       selector: fixContext.selector,
+      // Present when the scanner derived this property from a Tailwind utility
+      // class; makes the prompt name the class instead of a CSS declaration.
+      codeClassName: d.codeClassName,
       filePaths: fixContext.filePaths,
       nodeId: report.nodeId,
       fileKey: fixContext.fileKey,
@@ -846,6 +849,15 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
           <strong>Value</strong> — does it look right today (px, color match)?
         </span>
       </div>
+
+      {/* The scanner declined to derive bindings and the reason is actionable
+          (e.g. two components answer to the same name). Say so, rather than
+          letting an empty binding column read as "your code declares nothing". */}
+      {report.scanAdvisory && (
+        <div style={styles.note}>
+          <strong>Scanner:</strong> {report.scanAdvisory}
+        </div>
+      )}
 
       {mainRows.length > 0 && (
         <table style={styles.table}>
@@ -1819,6 +1831,18 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: 1.4,
   },
   legendDivider: { color: "#c4c4c4" },
+  // Report-level advisory (currently: the scanner declined to derive bindings
+  // and said why). Deliberately not styled as an error — nothing is broken.
+  note: {
+    color: "#6a4b00",
+    fontSize: 11,
+    background: "#fffbeb",
+    border: "1px solid #fde68a",
+    borderRadius: 4,
+    padding: "6px 10px",
+    marginBottom: 8,
+    lineHeight: 1.4,
+  },
   header: { display: "flex", alignItems: "center", gap: 12, marginBottom: 12 },
   button: {
     padding: "6px 12px",

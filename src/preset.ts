@@ -2,7 +2,8 @@ import { registerServerChannel } from "./server.js";
 import { loadConfig } from "./config.js";
 import { scanCss, type AutoTokenMap } from "./scan-css.js";
 import { scanTsx } from "./scan-tsx.js";
-import { setAutoTokenMap } from "./auto-tokens.js";
+import { setAutoScan, setAutoTokenMap } from "./auto-tokens.js";
+import { countTailwindScopes } from "./tailwind-components.js";
 
 /**
  * Storybook 10 preset. Manager + preview entries are auto-discovered from
@@ -43,19 +44,37 @@ async function runInitialScan(): Promise<void> {
   try {
     const config = await loadConfig();
     const cwd = process.cwd();
-    const [cssResult, tsxResult] = await Promise.all([
-      scanCss(cwd, config.cssEntries),
-      scanTsx(cwd, config.tsxEntries),
-    ]);
+    // CSS first: it yields the Tailwind `@theme` variables the TSX scan needs
+    // to turn a utility class into a token. (`bg-primary` is only a binding if
+    // the consumer's theme declares `--color-primary`.)
+    const cssResult = await scanCss(cwd, config.cssEntries);
+    const tsxResult = await scanTsx(cwd, config.tsxEntries, cssResult.themeVars);
     const merged = mergeMaps(cssResult.map, tsxResult.map);
-    setAutoTokenMap(merged);
+    setAutoScan({
+      map: merged,
+      themeVars: cssResult.themeVars,
+      components: tsxResult.components,
+      classHints: tsxResult.classHints,
+    });
+    const themeCount = Object.keys(cssResult.themeVars).length;
+    const cvaScopes = countTailwindScopes(tsxResult.components, cssResult.themeVars);
+    const componentNames = tsxResult.components
+      .map((c) => c.components[0] ?? "?")
+      .join(", ");
+    // A cva variant slot is an independently-resolvable binding scope but it is
+    // NOT a CSS selector, so it is named as its own number in the breakdown
+    // rather than folded silently into "selector(s)".
     // eslint-disable-next-line no-console
     console.log(
       `[design-sync] Scanned ${cssResult.scannedFiles.length} CSS + ` +
         `${tsxResult.scannedFiles.length} TSX file(s); ` +
-        `derived bindings for ${Object.keys(merged).length} selector(s) ` +
+        `derived bindings for ${Object.keys(merged).length + cvaScopes} selector(s) ` +
         `(css: ${Object.keys(cssResult.map).length}, ` +
-        `tsx: ${Object.keys(tsxResult.map).length}).`,
+        `tsx: ${Object.keys(tsxResult.map).length}, ` +
+        `tailwind-cva: ${cvaScopes} scope(s) across ` +
+        `${tsxResult.components.length} component(s)` +
+        (componentNames ? ` [${componentNames}]` : "") +
+        `); Tailwind @theme vars: ${themeCount}.`,
     );
     for (const w of [...cssResult.warnings, ...tsxResult.warnings]) {
       // eslint-disable-next-line no-console

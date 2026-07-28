@@ -44,6 +44,16 @@ export const EVENTS = {
   ConfigRequest: "design-sync:configRequest",
   /** Server → manager: reply to ConfigRequest (or a config load error). */
   ConfigInfo: "design-sync:configInfo",
+  /**
+   * Preview → server: "what child bindings does the registry declare for this
+   * story?". Asked by the preview *before* it snapshots, so the child elements
+   * are captured in the same pass as the root (and in the same mode, during a
+   * dual-mode run). The registry lives on disk on the Node side, so the preview
+   * can't read it directly.
+   */
+  ChildBindingsRequest: "design-sync:childBindingsRequest",
+  /** Server → preview: reply to ChildBindingsRequest. */
+  ChildBindingsInfo: "design-sync:childBindingsInfo",
 } as const;
 
 export interface CheckDriftRequestPayload {
@@ -69,9 +79,53 @@ export interface CheckDriftRequestPayload {
   dualModes?: [string, string];
 }
 
+export interface ChildBindingsRequestPayload {
+  storyId: string;
+}
+
+export interface ChildBindingsInfoPayload {
+  storyId: string;
+  /**
+   * Well-formed declarations, in registry order. Empty for a legacy entry, an
+   * unregistered story, or when the registry couldn't be read — in all of those
+   * cases the server's own CodeSnapshot handling reports the real problem, so
+   * the preview simply snapshots the root as before.
+   */
+  children: Array<{ selector: string; nodeId: string }>;
+}
+
+/**
+ * Per-child result of the preview's DOM resolution. One entry for every
+ * declaration the preview was told about; `kind` other than "found" means the
+ * preview refused to snapshot (nothing matched, or more than one thing did).
+ */
+export interface ChildSnapshotEntry {
+  selector: string;
+  nodeId: string;
+  kind: "found" | "not-found" | "ambiguous" | "invalid";
+  /** Present only when `kind === "found"`. */
+  snapshot?: CodeSnapshot;
+  /** Second-mode snapshot during a dual-mode run. */
+  additionalSnapshots?: Array<{ mode: string; snapshot: CodeSnapshot }>;
+  /** Element descriptions when `kind === "ambiguous"`. */
+  candidates?: string[];
+  /** Parser message when `kind === "invalid"`. */
+  detail?: string;
+  /** True when a not-found selector would have matched the story root itself. */
+  rootMatches?: boolean;
+}
+
 export interface CodeSnapshotPayload {
   storyId: string;
   snapshot: CodeSnapshot;
+  /**
+   * Declared child bindings the preview attempted, in the order the server sent
+   * them. Absent for a story with no `children` in the registry — which keeps
+   * the payload (and therefore the cache hash) byte-identical for legacy
+   * entries. A declaration the server knows about but that is missing here is
+   * reported as `snapshot-missing`, never ignored.
+   */
+  childSnapshots?: ChildSnapshotEntry[];
   /**
    * The selector the preview used to find the story root. Relayed so the
    * server can look up CSS-derived token bindings for that selector and

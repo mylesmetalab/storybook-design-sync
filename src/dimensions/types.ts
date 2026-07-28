@@ -5,6 +5,7 @@
 // the package's public `index.ts`) keep resolving.
 import type { ModeAwareValue } from "@metalab/design-sync-core";
 export type { ModeAwareValue };
+import type { ChildBindingStatus } from "../child-bindings.js";
 
 export type DimensionKind =
   | "token-value"
@@ -62,6 +63,18 @@ export interface DimensionDiff {
    * a row's status, values, or partitioning depends on it.
    */
   codeClassName?: string;
+  /**
+   * The declared child binding this row belongs to (the CSS selector, exactly
+   * as written in the registry's `children` map). **Absent means the story
+   * root** — every row produced before declared child bindings existed, and
+   * every row for a story with no `children` key, has no `childSelector` and is
+   * byte-identical to what it was.
+   *
+   * The panel groups rows by this field and labels each group, because a flat
+   * table where a child's `padding-top` is indistinguishable from the root's
+   * would be worse than no feature.
+   */
+  childSelector?: string;
 }
 
 export interface DriftTiming {
@@ -75,11 +88,39 @@ export interface DriftTiming {
   cacheMisses: number;
 }
 
+/**
+ * Per-declared-child outcome. One entry for **every** binding in the registry's
+ * `children` map, in registry order, whether or not it produced rows — that is
+ * what makes a failure impossible to miss and impossible to drop.
+ *
+ * `status: "compared"` means rows exist with this `selector` as their
+ * `childSelector`. Anything else means no comparison ran, and `message` says
+ * why and what to do (worded in `child-bindings.ts`).
+ */
+export interface ChildBindingReport {
+  /** CSS selector exactly as declared in the registry. */
+  selector: string;
+  /** Figma node id declared for it. Empty string when the binding is malformed. */
+  nodeId: string;
+  /** Figma node's own name, when the node was read successfully. */
+  nodeName?: string;
+  status: ChildBindingStatus;
+  /** Present whenever `status !== "compared"`. Actionable, names the selector. */
+  message?: string;
+  /** How many rows this child contributed (0 when not compared). */
+  rowCount?: number;
+}
+
 export interface DriftReport {
   storyId: string;
   nodeId: string;
   dimensions: DimensionDiff[];
   generatedAt: string;
+  /**
+   * Present only when the registry entry declared `children`. Absent for every
+   * legacy entry, so nothing downstream changes for them.
+   */
+  children?: ChildBindingReport[];
   /** Active mode name used for comparison (e.g. "light", "dark"). */
   mode?: string;
   /** Timing + cache stats — shown in the panel for visibility into perf. */

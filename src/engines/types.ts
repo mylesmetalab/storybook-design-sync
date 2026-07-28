@@ -1,4 +1,5 @@
 import type { DriftReport } from "../dimensions/types.js";
+import type { ChildBindingStatus } from "../child-bindings.js";
 
 export interface NodeRef {
   fileKey: string;
@@ -39,11 +40,45 @@ export interface CodeSnapshot {
   texts?: string[];
 }
 
+/**
+ * One declared child binding as handed to the engine. Every binding in the
+ * registry's `children` map produces exactly one of these, **including the ones
+ * that failed to resolve** — the engine reports on all of them so a failure can
+ * never be silently dropped.
+ *
+ * `snapshot` present ⟺ `problem` absent. When `problem` is set no comparison
+ * runs for this child and the engine emits a report entry carrying the reason.
+ */
+export interface ChildTarget {
+  /** CSS selector exactly as declared in the registry. Row identity + label. */
+  selector: string;
+  /** Figma node id declared for it (empty string when the binding is malformed). */
+  nodeId: string;
+  /** Computed-style snapshot of the single matched element. */
+  snapshot?: CodeSnapshot;
+  /** Pre-computed resolution failure (DOM side, or registry shape). */
+  problem?: {
+    status: Exclude<ChildBindingStatus, "compared">;
+    message: string;
+  };
+}
+
 export interface CheckDriftInput {
   storyId: string;
   nodeRef: NodeRef;
   /** Optional snapshot of the rendered code-side story. */
   snapshot?: CodeSnapshot;
+  /**
+   * Declared child bindings for this story, in registry order. Absent/empty for
+   * every legacy entry — the engine then behaves exactly as it did before, with
+   * no extra requests and no `children` field on the report.
+   */
+  children?: ChildTarget[];
+  /**
+   * Consumer-relative registry path (`config.registryPath`). Used **only** to
+   * word child-binding failures so the message says where to make the edit.
+   */
+  registryPath?: string;
   /**
    * Active mode name (e.g. "light", "dark") read from the rendered DOM.
    * The engine uses this to pick matching values when resolving Figma

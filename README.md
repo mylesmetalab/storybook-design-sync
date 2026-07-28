@@ -37,9 +37,28 @@ for binding writes, REST for variable values).
 - Properties compared today: `background-color`, `padding-*` (×4),
   `border-*-radius` (×4), `gap`, `border-width`, `border-color`, `color`,
   `font-size`, `font-weight`, `font-family`, `font-style`, `line-height`,
-  `letter-spacing`, `text-transform`, `text-decoration`, `text-align`,
+  `letter-spacing`, `text-transform`, `text-decoration-line`, `text-align`,
   `box-shadow`. Diff dimensions: `token-value`, `token-binding`,
   `variant-set`, `copy`, `props`. (`structure`, `motion` reserved.)
+  `opacity` is snapshotted but not yet compared.
+- **No row rather than a wrong row.** Where a faithful comparison isn't
+  available, the property is skipped instead of guessed. Documented cases:
+  Figma small-caps (an OpenType feature, not a `text-transform`);
+  percent letter-spacing with no font size to resolve it against;
+  `text-align` when Figma states none (a hug-width label's placement is the
+  parent auto-layout's business) or when the text hugs both axes; shadows
+  with a blend mode CSS can't express or a colour that can't be read; a
+  Figma text case whose rendered effect depends on how the label is literally
+  typed. `font-style` reads Figma's `italic` flag, never the `fontStyle`
+  variable (which holds a weight+slant style *name*).
+- **Figma component properties vs story args.** BOOLEAN properties
+  (`Has Icon Start` ↔ `iconStart`) are matched on a normalized name and
+  compared against the arg's truthiness; TEXT properties defer to the `copy`
+  dimension when they'd report the same string twice; INSTANCE_SWAP is
+  surfaced as unmodelled rather than compared. An ambiguous or missing arg
+  correspondence produces no row, and a disagreement with a component
+  *default* (rather than an INSTANCE's actual value) is informational, never
+  drift.
 - **Token-name normalization.** `radius/xl` ≡ `radius-xl` ≡ `--radius-xl`.
   Token-binding comparison doesn't false-flag drift on a naming
   convention difference.

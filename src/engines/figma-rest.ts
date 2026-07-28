@@ -14,6 +14,19 @@ import { normalizeTokenName } from "@metalab/design-sync-core";
 import { variantSetRowApplicable } from "../row-triage.js";
 import { PersistentCache } from "../cache.js";
 import { isTransparentColor, normalizeColor } from "./color-normalize.js";
+import {
+  figmaEffectsToShadows,
+  formatShadows,
+  parseCssBoxShadow,
+  shadowsEqual,
+  type FigmaEffect,
+} from "./box-shadow.js";
+import { textStyleRows, type FigmaTypeStyle } from "./text-style-map.js";
+import {
+  componentPropertyRows,
+  type FigmaComponentPropertyDefinition,
+  type FigmaComponentPropertyValue,
+} from "./component-properties.js";
 
 const FIGMA_API = "https://api.figma.com/v1";
 
@@ -28,10 +41,9 @@ interface FigmaNode {
   boundVariables?: Record<string, FigmaVariableAlias | FigmaVariableAlias[]>;
   fills?: FigmaPaint[];
   // Variant info shows up on COMPONENT (instance variant props) or COMPONENT_SET.
-  componentPropertyDefinitions?: Record<
-    string,
-    { type: string; defaultValue: unknown; variantOptions?: string[] }
-  >;
+  componentPropertyDefinitions?: Record<string, FigmaComponentPropertyDefinition>;
+  /** Actual property values — INSTANCE nodes only. */
+  componentProperties?: Record<string, FigmaComponentPropertyValue>;
   variantProperties?: Record<string, string>;
   children?: FigmaNode[];
   [key: string]: unknown;
@@ -676,65 +688,58 @@ class FigmaRestEngine implements Engine {
       }
     }
 
-    // Effects (DROP_SHADOW / INNER_SHADOW → box-shadow). Figma may bind the
-    // whole `effects` array to a single variable representing the shadow
-    // token (e.g. `shadow/popover`). We can't resolve the variable's value
-    // to a CSS string without inspecting its raw value shape (it's stored as
-    // an effect object, not a number/color), so we surface the *resolved
-    // effect array on the node itself* — Figma's REST node response already
-    // includes the resolved effect — and compare to the code's computed
-    // `box-shadow`. If both sides have any non-NONE shadow, compare strings
-    // after normalization.
+    // Effects (DROP_SHADOW / INNER_SHADOW → box-shadow). Figma's REST node
+    // response carries the *resolved* effect array, so that — not the
+    // `effects` variable binding, whose value is an effect object rather than
+    // a number/colour — is what gets compared. Both sides are parsed into
+    // structured shadows before comparison: the computed CSS string puts the
+    // colour first and `inset` last, so no string compare could ever match
+    // Figma's field order (`box-shadow.ts` has the details, including which
+    // effect shapes are excluded outright).
     {
-      const effects = node.effects as
-        | Array<{
-            type?: string;
-            visible?: boolean;
-            offset?: { x: number; y: number };
-            radius?: number;
-            spread?: number;
-            color?: { r: number; g: number; b: number; a?: number };
-          }>
-        | undefined;
+      const effects = node.effects as FigmaEffect[] | undefined;
       const codeValue = snapshot.styles["box-shadow"];
-      const figmaShadows = (effects ?? [])
-        .filter((e) => e.visible !== false && (e.type === "DROP_SHADOW" || e.type === "INNER_SHADOW"))
-        .map((e) => {
-          const inset = e.type === "INNER_SHADOW" ? "inset " : "";
-          const x = e.offset?.x ?? 0;
-          const y = e.offset?.y ?? 0;
-          const blur = e.radius ?? 0;
-          const spread = e.spread ?? 0;
-          const color = e.color ? rgbaToCss(e.color) : "rgba(0, 0, 0, 0.25)";
-          return `${inset}${x}px ${y}px ${blur}px ${spread}px ${color}`;
-        });
-      // Try to resolve the bound `effects` variable's name for display.
-      let tokenName: string | undefined;
-      const effectAlias = pickAlias(
-        node.boundVariables?.effects as FigmaVariableAlias | FigmaVariableAlias[] | undefined,
-      );
-      if (effectAlias && variables) {
-        const v = variables.meta.variables[effectAlias.id];
-        if (v) tokenName = v.name;
-      }
-      if (figmaShadows.length > 0 || (codeValue && codeValue !== "none")) {
-        const figmaShadow = figmaShadows.join(", ");
-        const normalize = (s: string): string => s.replace(/\s+/g, " ").trim().toLowerCase();
-        const status: DimensionDiff["status"] =
-          codeValue && figmaShadow && normalize(codeValue) === normalize(figmaShadow)
-            ? "match"
-            : figmaShadow
-              ? "drift"
-              : "drift";
+      const resolveEffectColor = (effect: FigmaEffect): string | undefined => {
+        const alias = pickAlias(
+          (effect as { boundVariables?: Record<string, FigmaVariableAlias | FigmaVariableAlias[]> })
+            .boundVariables?.["color"],
+        );
+        if (alias && variables) {
+          const resolved = resolveColorVariable(alias.id, variables, activeMode);
+          if (resolved) return resolved.value;
+        }
+        return effect.color ? rgbaToCss(effect.color) : undefined;
+      };
+      const figma = figmaEffectsToShadows(effects, resolveEffectColor);
+      const code = parseCssBoxShadow(codeValue);
+      // Any excluded effect shape, an unreadable Figma side, or an unparseable
+      // code side means there is no faithful comparison to make — emit nothing
+      // rather than a verdict about a shadow we only partly understand. Both
+      // sides at "no shadow" carries no information either.
+      if (
+        figma !== null &&
+        figma.excluded.length === 0 &&
+        code !== null &&
+        !(figma.shadows.length === 0 && code.length === 0)
+      ) {
+        // The bound `effects` variable's name, for display only.
+        let tokenName: string | undefined;
+        const effectAlias = pickAlias(
+          node.boundVariables?.effects as FigmaVariableAlias | FigmaVariableAlias[] | undefined,
+        );
+        if (effectAlias && variables) {
+          const v = variables.meta.variables[effectAlias.id];
+          if (v) tokenName = v.name;
+        }
+        const figmaShadow = formatShadows(figma.shadows);
+        const status: DimensionDiff["status"] = shadowsEqual(figma.shadows, code)
+          ? "match"
+          : "drift";
         out.push({
           kind: "token-value",
           property: "box-shadow",
           codeValue: codeValue ?? null,
-          figmaValue: figmaShadow
-            ? tokenName
-              ? `${figmaShadow} (token: ${tokenName})`
-              : figmaShadow
-            : null,
+          figmaValue: tokenName ? `${figmaShadow} (token: ${tokenName})` : figmaShadow,
           status,
           ...(tokenName ? { tokenName } : {}),
         });
@@ -749,15 +754,14 @@ class FigmaRestEngine implements Engine {
     const textNode = findFirstTextNode(node);
     if (textNode) {
       const ts = textNode.style as
-        | {
+        | (FigmaTypeStyle & {
             fontFamily?: string;
             fontPostScriptName?: string;
             fontWeight?: number;
-            fontSize?: number;
             lineHeightPx?: number;
             lineHeightPercent?: number;
             lineHeightUnit?: string;
-          }
+          })
         | undefined;
       const bound = textNode.boundVariables ?? {};
 
@@ -883,6 +887,29 @@ class FigmaRestEngine implements Engine {
           if (colorTokenName) diff.tokenName = colorTokenName;
           out.push(diff);
         }
+      }
+
+      // letter-spacing / text-align / text-transform / text-decoration-line /
+      // font-style. Gated on `ts` existing: without a `style` object we cannot
+      // tell "not italic" from "this response carries no typography", and a
+      // fabricated `normal` would be exactly the confident-but-inapplicable
+      // signal these rows exist to avoid. See `text-style-map.ts` for the
+      // per-property mapping and every case that deliberately emits no row.
+      if (ts) {
+        const letterSpacingAlias = pickAlias(bound["letterSpacing"]);
+        let letterSpacingTokenName: string | undefined;
+        if (letterSpacingAlias && variables) {
+          const v = variables.meta.variables[letterSpacingAlias.id];
+          if (v && v.resolvedType === "FLOAT") letterSpacingTokenName = v.name;
+        }
+        out.push(
+          ...textStyleRows({
+            style: ts,
+            codeStyles: snapshot.styles,
+            figmaChars: (textNode as { characters?: string }).characters,
+            letterSpacingTokenName,
+          }),
+        );
       }
     }
 
@@ -1088,14 +1115,53 @@ class FigmaRestEngine implements Engine {
    *   - Anything else → look for any arg whose stringified value equals
    *     the Figma value (case-insensitive)
    *
-   * If the registered node isn't a variant (or no args were provided),
-   * emits a single flag-only row.
+   * Then, independently of the variant axes, Figma's **component properties**
+   * (BOOLEAN / TEXT / INSTANCE_SWAP) are compared against the same args — see
+   * `component-properties.ts` for the name-matching rule and its refusals.
+   *
+   * If the registered node has neither variant axes nor comparable component
+   * properties (or no args were provided), emits a single flag-only row.
    */
   private diffProps(node: FigmaNode, args: Record<string, unknown> | undefined): DimensionDiff[] {
     if (!args) {
       return [this.placeholder("props", "story.args (no args sent)")];
     }
-    if (node.type !== "COMPONENT" || !node.name.includes("=")) {
+
+    const isVariant = node.type === "COMPONENT" && node.name.includes("=");
+    const variantRows: DimensionDiff[] = isVariant
+      ? Object.entries(parseVariantName(node.name)).map(([prop, value]): DimensionDiff => {
+          if (isFalsyVariantValue(value)) {
+            return {
+              kind: "props",
+              property: prop,
+              codeValue: null,
+              figmaValue: value,
+              status: "match",
+              note: "Falsy/default — no arg expected.",
+            };
+          }
+          const matchingArg = findMatchingArg(args, prop, value);
+          return {
+            kind: "props",
+            property: prop,
+            codeValue: matchingArg ? { [matchingArg[0]]: matchingArg[1] } : null,
+            figmaValue: value,
+            status: matchingArg ? "match" : "drift",
+          };
+        })
+      : [];
+
+    // Figma *component* properties (BOOLEAN / TEXT / INSTANCE_SWAP) — distinct
+    // from variant axes, and until now read only for their `variantOptions`.
+    // `figmaTexts` lets a TEXT property defer to the `copy` dimension instead
+    // of reporting the same string twice.
+    const propertyRows = componentPropertyRows({
+      node,
+      args,
+      figmaTexts: collectFigmaText(node),
+    });
+
+    if (variantRows.length === 0 && propertyRows.length === 0) {
       return [
         {
           kind: "props",
@@ -1103,32 +1169,11 @@ class FigmaRestEngine implements Engine {
           codeValue: args,
           figmaValue: null,
           status: "flag-only",
-          note: "Registered node has no Figma variant properties to compare against.",
+          note: "Registered node has no Figma variant or component properties to compare against.",
         },
       ];
     }
-
-    const figmaProps = parseVariantName(node.name);
-    return Object.entries(figmaProps).map(([prop, value]): DimensionDiff => {
-      if (isFalsyVariantValue(value)) {
-        return {
-          kind: "props",
-          property: prop,
-          codeValue: null,
-          figmaValue: value,
-          status: "match",
-          note: "Falsy/default — no arg expected.",
-        };
-      }
-      const matchingArg = findMatchingArg(args, prop, value);
-      return {
-        kind: "props",
-        property: prop,
-        codeValue: matchingArg ? { [matchingArg[0]]: matchingArg[1] } : null,
-        figmaValue: value,
-        status: matchingArg ? "match" : "drift",
-      };
-    });
+    return [...variantRows, ...propertyRows];
   }
 
   /**
@@ -1223,6 +1268,11 @@ class FigmaRestEngine implements Engine {
  *
  * `rectangleCornerRadii` is a nested map keyed by corner; merge per-corner
  * rather than wholesale-replacing.
+ *
+ * `componentPropertyDefinitions` is inherited the same way and for the same
+ * reason: Figma declares BOOLEAN/TEXT/INSTANCE_SWAP properties on the
+ * COMPONENT_SET, not on each variant, so a registry pinned to a variant node
+ * (the normal case) would otherwise see none of them.
  */
 function mergeInheritedBindings(variant: FigmaNode, parent: FigmaNode): FigmaNode {
   const parentBV = parent.boundVariables ?? {};
@@ -1237,7 +1287,29 @@ function mergeInheritedBindings(variant: FigmaNode, parent: FigmaNode): FigmaNod
       merged[k] = v;
     }
   }
-  return { ...variant, boundVariables: merged };
+  // Inherit only the non-VARIANT definitions. A variant's own axes come from
+  // its name (`Size=Large`), and handing the parent's VARIANT entries to a
+  // variant node would hand `diffVariantSet` a second, weaker view of axes it
+  // already compares — the exact redundancy v0.0.34 removed.
+  const definitions =
+    variant.componentPropertyDefinitions ??
+    pickNonVariantDefinitions(parent.componentPropertyDefinitions);
+  return {
+    ...variant,
+    boundVariables: merged,
+    ...(definitions ? { componentPropertyDefinitions: definitions } : {}),
+  };
+}
+
+function pickNonVariantDefinitions(
+  defs: Record<string, FigmaComponentPropertyDefinition> | undefined,
+): Record<string, FigmaComponentPropertyDefinition> | undefined {
+  if (!defs) return undefined;
+  const out: Record<string, FigmaComponentPropertyDefinition> = {};
+  for (const [key, def] of Object.entries(defs)) {
+    if (def?.type !== "VARIANT") out[key] = def;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -1763,6 +1835,10 @@ const FIGMA_KEY_TO_CSS: Record<string, string> = {
   fontFamily: "font-family",
   fontSize: "font-size",
   fontWeight: "font-weight",
+  // Binding (token-name) comparison only. A Figma `fontStyle` variable holds a
+  // font *style name* ("Italic", "Semi Bold Italic") — a weight+slant compound
+  // — so it must never be read as a CSS `font-style` *value*. The value side
+  // reads `TypeStyle.italic`; see `text-style-map.ts`.
   fontStyle: "font-style",
   lineHeight: "line-height",
   letterSpacing: "letter-spacing",

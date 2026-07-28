@@ -183,6 +183,10 @@ async function check(opts: {
   return report.dimensions;
 }
 
+function maybeRow(dimensions: DimensionDiff[], property: string): DimensionDiff | undefined {
+  return dimensions.find((d) => d.kind === "token-value" && d.property === property);
+}
+
 function row(dimensions: DimensionDiff[], property: string): DimensionDiff {
   const found = dimensions.find((d) => d.kind === "token-value" && d.property === property);
   if (!found) {
@@ -523,5 +527,498 @@ describe("variant-set: only reported when modifier classes are the actual mechan
     });
 
     expect(variantSetRow(report.dimensions)?.status).toBe("drift");
+  });
+});
+
+/* -------------------------------------------------------------------------- *
+ * Text-style properties, end to end
+ * -------------------------------------------------------------------------- */
+
+/**
+ * `letter-spacing`, `text-align`, `text-transform`, `text-decoration-line`,
+ * `font-style` and `box-shadow` were all mapped in `FIGMA_KEY_TO_CSS` and all
+ * collected (or, for `font-style`, now collected) by the snapshot — but the
+ * value dimension read none of them, so a designer could change any of them in
+ * Figma and the auditor said nothing at all.
+ *
+ * These run through the real engine, because the property that matters most is
+ * the *absence* of a row: `text-style-map.ts` covers the mapping tables, and
+ * this covers what actually reaches the report.
+ */
+function textChild(style: Record<string, unknown> | undefined, characters = "Submit") {
+  return {
+    id: "4185:3779",
+    name: "Label",
+    type: "TEXT",
+    characters,
+    ...(style ? { style } : {}),
+    fills: [],
+    children: [],
+  };
+}
+
+async function textCheck(opts: {
+  style: Record<string, unknown> | undefined;
+  styles: Record<string, string>;
+  characters?: string;
+  effects?: unknown;
+}): Promise<DimensionDiff[]> {
+  return check({
+    styles: opts.styles,
+    node: nodeResponse({
+      strokes: [],
+      children: [textChild(opts.style, opts.characters)],
+      ...(opts.effects !== undefined ? { effects: opts.effects } : {}),
+    }),
+  });
+}
+
+interface TextStyleCase {
+  name: string;
+  style: Record<string, unknown> | undefined;
+  styles: Record<string, string>;
+  characters?: string;
+  /** Expected status, or `null` for "no row must be emitted". */
+  expected: DimensionDiff["status"] | null;
+}
+
+const TEXT_STYLE_CASES: Record<string, TextStyleCase[]> = {
+  "letter-spacing": [
+    {
+      name: "match",
+      style: { fontSize: 14, letterSpacing: 0.5 },
+      styles: { "letter-spacing": "0.5px" },
+      expected: "match",
+    },
+    {
+      name: "drift",
+      style: { fontSize: 14, letterSpacing: 0.5 },
+      styles: { "letter-spacing": "1.5px" },
+      expected: "drift",
+    },
+    {
+      name: "absent on the Figma side → no row",
+      style: { fontSize: 14 },
+      styles: { "letter-spacing": "1.5px" },
+      expected: null,
+    },
+  ],
+  "text-align": [
+    {
+      name: "match",
+      style: { fontSize: 14, textAlignHorizontal: "CENTER" },
+      styles: { "text-align": "center", direction: "ltr" },
+      expected: "match",
+    },
+    {
+      name: "drift",
+      style: { fontSize: 14, textAlignHorizontal: "CENTER" },
+      styles: { "text-align": "right", direction: "ltr" },
+      expected: "drift",
+    },
+    {
+      name: "absent on the Figma side → no row (auto-layout owns placement)",
+      style: { fontSize: 14 },
+      styles: { "text-align": "center", direction: "ltr" },
+      expected: null,
+    },
+  ],
+  "text-transform": [
+    {
+      name: "match",
+      style: { fontSize: 14, textCase: "UPPER" },
+      styles: { "text-transform": "uppercase" },
+      expected: "match",
+    },
+    {
+      name: "drift",
+      style: { fontSize: 14, textCase: "UPPER" },
+      styles: { "text-transform": "none" },
+      expected: "drift",
+    },
+    {
+      name: "small-caps has no `text-transform` equivalent → no row",
+      style: { fontSize: 14, textCase: "SMALL_CAPS" },
+      styles: { "text-transform": "uppercase" },
+      expected: null,
+    },
+  ],
+  "text-decoration-line": [
+    {
+      name: "match",
+      style: { fontSize: 14, textDecoration: "STRIKETHROUGH" },
+      styles: { "text-decoration-line": "line-through" },
+      expected: "match",
+    },
+    {
+      name: "drift",
+      style: { fontSize: 14, textDecoration: "STRIKETHROUGH" },
+      styles: { "text-decoration-line": "underline" },
+      expected: "drift",
+    },
+    {
+      name: "neither side decorates → no row",
+      style: { fontSize: 14 },
+      styles: { "text-decoration-line": "none" },
+      expected: null,
+    },
+  ],
+  "font-style": [
+    {
+      name: "match",
+      style: { fontSize: 14, italic: true },
+      styles: { "font-style": "italic" },
+      expected: "match",
+    },
+    {
+      name: "drift",
+      style: { fontSize: 14, italic: true },
+      styles: { "font-style": "normal" },
+      expected: "drift",
+    },
+    {
+      // Without a `style` object we can't tell "not italic" from "this response
+      // has no typography in it", so nothing is claimed.
+      name: "TEXT node with no style object → no row",
+      style: undefined,
+      styles: { "font-style": "italic" },
+      expected: null,
+    },
+  ],
+};
+
+for (const [property, cases] of Object.entries(TEXT_STYLE_CASES)) {
+  describe(`token-value: ${property}`, () => {
+    for (const c of cases) {
+      it(c.name, async () => {
+        const dimensions = await textCheck({
+          style: c.style,
+          styles: c.styles,
+          ...(c.characters ? { characters: c.characters } : {}),
+        });
+        const found = maybeRow(dimensions, property);
+        if (c.expected === null) {
+          expect(found).toBeUndefined();
+        } else {
+          expect(found?.status).toBe(c.expected);
+        }
+      });
+    }
+  });
+}
+
+describe("token-value: text-transform when Figma declares no case", () => {
+  it("drifts when code uppercases a mixed-case Figma label", async () => {
+    const dimensions = await textCheck({
+      style: { fontSize: 14 },
+      styles: { "text-transform": "uppercase" },
+      characters: "Submit",
+    });
+    expect(row(dimensions, "text-transform").status).toBe("drift");
+  });
+
+  it("does not drift when the Figma label is already typed in caps", async () => {
+    const dimensions = await textCheck({
+      style: { fontSize: 14 },
+      styles: { "text-transform": "uppercase" },
+      characters: "SUBMIT",
+    });
+    expect(row(dimensions, "text-transform").status).toBe("flag-only");
+  });
+});
+
+/* -------------------------------------------------------------------------- *
+ * box-shadow, end to end
+ * -------------------------------------------------------------------------- */
+
+const FIGMA_DROP_SHADOW = {
+  type: "DROP_SHADOW",
+  visible: true,
+  blendMode: "NORMAL",
+  offset: { x: 0, y: 2 },
+  radius: 4,
+  spread: 0,
+  color: { r: 0, g: 0, b: 0, a: 0.25 },
+};
+
+describe("token-value: box-shadow", () => {
+  it("matches the same shadow despite the computed string putting colour first", async () => {
+    // The pre-fix code compared normalized strings and its status expression was
+    // `drift : drift` — this exact case could never be reported as agreement.
+    const dimensions = await textCheck({
+      style: { fontSize: 14 },
+      styles: { "box-shadow": "rgba(0, 0, 0, 0.25) 0px 2px 4px 0px" },
+      effects: [FIGMA_DROP_SHADOW],
+    });
+    const shadow = row(dimensions, "box-shadow");
+    expect(shadow.status).toBe("match");
+    expect(shadow.figmaValue).toBe("0px 2px 4px 0px rgba(0,0,0,0.25)");
+  });
+
+  it("reports drift on a real difference", async () => {
+    const dimensions = await textCheck({
+      style: { fontSize: 14 },
+      styles: { "box-shadow": "rgba(0, 0, 0, 0.25) 0px 8px 4px 0px" },
+      effects: [FIGMA_DROP_SHADOW],
+    });
+    expect(row(dimensions, "box-shadow").status).toBe("drift");
+  });
+
+  it("maps INNER_SHADOW to `inset`", async () => {
+    const dimensions = await textCheck({
+      style: { fontSize: 14 },
+      styles: { "box-shadow": "rgba(0, 0, 0, 0.25) 0px 2px 4px 0px inset" },
+      effects: [{ ...FIGMA_DROP_SHADOW, type: "INNER_SHADOW" }],
+    });
+    expect(row(dimensions, "box-shadow").status).toBe("match");
+  });
+
+  it("drifts when Figma declares no shadow and code draws one", async () => {
+    const dimensions = await textCheck({
+      style: { fontSize: 14 },
+      styles: { "box-shadow": "rgba(0, 0, 0, 0.25) 0px 2px 4px 0px" },
+      effects: [],
+    });
+    const shadow = row(dimensions, "box-shadow");
+    expect(shadow.status).toBe("drift");
+    expect(shadow.figmaValue).toBe("none");
+  });
+
+  it("emits no row when an effect shape can't be faithfully compared", async () => {
+    const dimensions = await textCheck({
+      style: { fontSize: 14 },
+      styles: { "box-shadow": "rgba(0, 0, 0, 0.25) 0px 2px 4px 0px" },
+      effects: [{ ...FIGMA_DROP_SHADOW, blendMode: "MULTIPLY" }],
+    });
+    expect(maybeRow(dimensions, "box-shadow")).toBeUndefined();
+  });
+
+  it("emits no row when Figma reported no effects at all", async () => {
+    const dimensions = await textCheck({
+      style: { fontSize: 14 },
+      styles: { "box-shadow": "rgba(0, 0, 0, 0.25) 0px 2px 4px 0px" },
+    });
+    expect(maybeRow(dimensions, "box-shadow")).toBeUndefined();
+  });
+
+  it("emits no row when neither side has a shadow", async () => {
+    const dimensions = await textCheck({
+      style: { fontSize: 14 },
+      styles: { "box-shadow": "none" },
+      effects: [],
+    });
+    expect(maybeRow(dimensions, "box-shadow")).toBeUndefined();
+  });
+
+  it("names the bound effect token in the Figma cell", async () => {
+    const dimensions = await check({
+      styles: { "box-shadow": "rgba(0, 0, 0, 0.25) 0px 2px 4px 0px" },
+      node: nodeResponse({
+        strokes: [],
+        effects: [FIGMA_DROP_SHADOW],
+        boundVariables: { effects: { type: "VARIABLE_ALIAS", id: BORDER_NEUTRAL_SECONDARY } },
+      }),
+    });
+    const shadow = row(dimensions, "box-shadow");
+    expect(shadow.figmaValue).toContain("(token: Border/Neutral/Secondary)");
+    expect(shadow.status).toBe("match");
+  });
+});
+
+/* -------------------------------------------------------------------------- *
+ * Component properties (props dimension), end to end
+ * -------------------------------------------------------------------------- */
+
+function propsRows(dimensions: DimensionDiff[]): DimensionDiff[] {
+  return dimensions.filter((d) => d.kind === "props");
+}
+
+function propsRow(dimensions: DimensionDiff[], property: string): DimensionDiff | undefined {
+  return dimensions.find((d) => d.kind === "props" && d.property === property);
+}
+
+async function propsCheck(opts: {
+  node: Record<string, unknown>;
+  args: Record<string, unknown>;
+}): Promise<DimensionDiff[]> {
+  installFetchStub({ node: nodeResponse({ strokes: [], ...opts.node }) });
+  const engine = createFigmaRestEngine({ figmaPat: "test-pat" });
+  const report = await engine.checkDrift({
+    storyId: "components-button--with-icon",
+    nodeRef: { fileKey: FILE_KEY, nodeId: NODE_ID },
+    snapshot: { styles: MATCHING_STYLES, rootClasses: ["button", "button--primary"] },
+    args: opts.args,
+  });
+  return report.dimensions;
+}
+
+describe("props: Figma component properties vs story args", () => {
+  it("confirms a BOOLEAN property against the presence of the matching arg", async () => {
+    const dimensions = await propsCheck({
+      node: {
+        type: "INSTANCE",
+        componentProperties: { "Has Icon Start#4611:0": { type: "BOOLEAN", value: true } },
+      },
+      args: { iconStart: "★" },
+    });
+    expect(propsRow(dimensions, "Has Icon Start")).toMatchObject({
+      status: "match",
+      figmaValue: true,
+    });
+  });
+
+  it("reports drift when the instance carries the icon and the story doesn't", async () => {
+    const dimensions = await propsCheck({
+      node: {
+        type: "INSTANCE",
+        componentProperties: { "Has Icon Start#4611:0": { type: "BOOLEAN", value: true } },
+      },
+      args: { iconStart: null },
+    });
+    expect(propsRow(dimensions, "Has Icon Start")?.status).toBe("drift");
+  });
+
+  it("emits no row when the arg correspondence is ambiguous", async () => {
+    const dimensions = await propsCheck({
+      node: {
+        type: "INSTANCE",
+        componentProperties: { "Has Icon Start#4611:0": { type: "BOOLEAN", value: true } },
+      },
+      args: { iconStart: "★", isIconStart: true },
+    });
+    expect(propsRow(dimensions, "Has Icon Start")).toBeUndefined();
+  });
+
+  it("emits no comparison row for an INSTANCE_SWAP, only an unmodelled note", async () => {
+    const dimensions = await propsCheck({
+      node: {
+        type: "INSTANCE",
+        componentProperties: { "Icon Start#4611:2": { type: "INSTANCE_SWAP", value: "1:23" } },
+      },
+      args: { iconStart: "★" },
+    });
+    expect(propsRow(dimensions, "Icon Start")).toBeUndefined();
+    const unmodelled = propsRow(dimensions, "instance-swap");
+    expect(unmodelled?.status).toBe("flag-only");
+    expect(unmodelled?.figmaValue).toEqual(["Icon Start"]);
+  });
+
+  it("reports a TEXT property once — via `copy`, not twice", async () => {
+    const dimensions = await propsCheck({
+      node: {
+        type: "INSTANCE",
+        componentProperties: { "Label#4611:1": { type: "TEXT", value: "Submit" } },
+        children: [textChild({ fontSize: 14 }, "Submit")],
+      },
+      args: { label: "Submit" },
+    });
+    // `copy` owns the string…
+    const copy = dimensions.filter((d) => d.kind === "copy");
+    expect(copy).toHaveLength(1);
+    expect(copy[0]?.figmaValue).toBe("Submit");
+    // …so the component property adds nothing.
+    expect(propsRow(dimensions, "Label")).toBeUndefined();
+  });
+
+  it("compares a TEXT property that `copy` does not already cover", async () => {
+    const dimensions = await propsCheck({
+      node: {
+        type: "INSTANCE",
+        componentProperties: { "Badge Text#4611:3": { type: "TEXT", value: "New" } },
+        children: [textChild({ fontSize: 14 }, "Submit")],
+      },
+      args: { badgeText: "Old" },
+    });
+    expect(propsRow(dimensions, "Badge Text")?.status).toBe("drift");
+  });
+
+  it("keeps component-property rows alongside the variant-axis rows", async () => {
+    const dimensions = await propsCheck({
+      node: {
+        type: "COMPONENT",
+        name: "Variant=Primary",
+        componentPropertyDefinitions: {
+          Variant: { type: "VARIANT", defaultValue: "Primary", variantOptions: ["Primary"] },
+          "Has Icon Start#4611:0": { type: "BOOLEAN", defaultValue: true },
+        },
+      },
+      args: { variant: "primary", iconStart: "★" },
+    });
+    expect(propsRows(dimensions).map((d) => d.property)).toEqual(["Variant", "Has Icon Start"]);
+    expect(propsRows(dimensions).every((d) => d.status === "match")).toBe(true);
+  });
+
+  it("does not report drift against a component *default*", async () => {
+    const dimensions = await propsCheck({
+      node: {
+        type: "COMPONENT",
+        name: "Variant=Primary",
+        componentPropertyDefinitions: {
+          "Has Icon Start#4611:0": { type: "BOOLEAN", defaultValue: false },
+        },
+      },
+      args: { variant: "primary", iconStart: "★" },
+    });
+    const iconRow = propsRow(dimensions, "Has Icon Start");
+    expect(iconRow?.status).toBe("flag-only");
+    expect(iconRow?.note).toContain("default");
+  });
+
+  it("inherits the parent COMPONENT_SET's component properties for a variant node", async () => {
+    // Figma declares BOOLEAN/TEXT/INSTANCE_SWAP properties on the SET, not on
+    // each variant, and registries normally pin a variant.
+    const PARENT_ID = "4185:3700";
+    vi.stubGlobal("fetch", async (url: string) => {
+      const json = (body: unknown): Response =>
+        ({ ok: true, status: 200, json: async () => body }) as unknown as Response;
+      if (url.includes("/variables/local")) return json(variablesResponse());
+      if (url.includes("/components")) {
+        return json({
+          meta: { components: [{ node_id: NODE_ID, containing_frame: { nodeId: PARENT_ID } }] },
+        });
+      }
+      if (url.includes(encodeURIComponent(PARENT_ID))) {
+        return json({
+          nodes: {
+            [PARENT_ID]: {
+              document: {
+                id: PARENT_ID,
+                name: "Button",
+                type: "COMPONENT_SET",
+                componentPropertyDefinitions: {
+                  Variant: { type: "VARIANT", defaultValue: "Primary", variantOptions: ["Primary"] },
+                  "Has Icon Start#4611:0": { type: "BOOLEAN", defaultValue: true },
+                },
+                children: [],
+              },
+            },
+          },
+        });
+      }
+      if (url.includes("/nodes?ids=")) {
+        return json(nodeResponse({ strokes: [], type: "COMPONENT", name: "Variant=Primary" }));
+      }
+      return json({ lastModified: "2026-07-27T00:00:00Z" });
+    });
+
+    const engine = createFigmaRestEngine({ figmaPat: "test-pat" });
+    const report = await engine.checkDrift({
+      storyId: "components-button--with-icon",
+      nodeRef: { fileKey: FILE_KEY, nodeId: NODE_ID },
+      snapshot: { styles: MATCHING_STYLES, rootClasses: ["button", "button--primary"] },
+      args: { variant: "primary", iconStart: "★" },
+    });
+
+    expect(propsRow(report.dimensions, "Has Icon Start")?.status).toBe("match");
+    // The parent's VARIANT entries are deliberately NOT inherited — the
+    // variant's own name already supplies its axes.
+    expect(propsRow(report.dimensions, "Variant")?.status).toBe("match");
+  });
+
+  it("says so when a node has neither variant axes nor component properties", async () => {
+    const dimensions = await propsCheck({ node: {}, args: { size: "lg" } });
+    const only = propsRows(dimensions);
+    expect(only).toHaveLength(1);
+    expect(only[0]).toMatchObject({ property: "story.args", status: "flag-only" });
   });
 });

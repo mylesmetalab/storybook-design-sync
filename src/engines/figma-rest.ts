@@ -17,6 +17,7 @@ import { formatChildProblem } from "../child-bindings.js";
 import { matchTokenNames, aliasSignature, type TokenAliasMap } from "../token-aliases.js";
 import { divergenceNote, nameDivergenceStatus } from "../binding-divergence.js";
 import { variantSetRowApplicable } from "../row-triage.js";
+import { isTextOwnedProperty, ownsRenderedText } from "../applicability.js";
 import { PersistentCache } from "../cache.js";
 import { isTransparentColor, normalizeColor } from "./color-normalize.js";
 import {
@@ -37,7 +38,72 @@ import {
 const FIGMA_API = "https://api.figma.com/v1";
 
 interface FigmaNodesResponse {
-  nodes: Record<string, { document: FigmaNode } | null>;
+  nodes: Record<
+    string,
+    { document: FigmaNode; styles?: Record<string, FigmaStyleMeta> } | null
+  >;
+}
+
+/**
+ * One entry of the `styles` map that `GET /files/:key/nodes` returns *alongside*
+ * each requested node's `document` — style id → metadata. This is the only place
+ * a shared style's **name** is available; the node tree carries the id only.
+ *
+ * What it does NOT carry is the style's paint definition. It doesn't need to:
+ * Figma inlines the style's resolved paint into the node's own `fills`, variable
+ * binding included, so the indirection is already followed for us. Verified
+ * against the live SDS file (`Nq23XwGfazYZZZ5vr8OezI`): the Card's Image
+ * placeholder carries `styles: {fill, fills} → "293:27519"` **and**
+ * `fills[0].boundVariables.color → Slate/200` **and** a top-level
+ * `boundVariables.fills`. `GET /files/:key/styles` adds nothing here — same
+ * metadata, no paint. So no extra request is made, and none is needed.
+ */
+interface FigmaStyleMeta {
+  key?: string;
+  name?: string;
+  styleType?: string;
+  description?: string;
+}
+
+/**
+ * Where the per-node `styles` map is parked on the document so the diff methods
+ * can name a style without a second request. Non-standard field on a
+ * Figma-shaped object, hence the prefix; `FigmaNode`'s index signature carries
+ * it, and `mergeInheritedBindings` spreads the variant so it survives.
+ */
+const STYLE_META_KEY = "__designSyncStyleMeta";
+
+/** Attach the response's style metadata to the document it describes. */
+function withStyleMeta(
+  document: FigmaNode,
+  styles: Record<string, FigmaStyleMeta> | undefined,
+): FigmaNode {
+  if (!styles || Object.keys(styles).length === 0) return document;
+  (document as Record<string, unknown>)[STYLE_META_KEY] = styles;
+  return document;
+}
+
+/**
+ * The shared style delivering this node's fill, when one does.
+ *
+ * Figma writes both `styles.fill` and `styles.fills` for a paint style (the
+ * live file carries both), so either spelling counts. Returns the style's name
+ * when the response's metadata map is present, else its raw id — an id is a
+ * worse answer than a name but it is still the truth, and it is never presented
+ * as a token.
+ *
+ * `root` is the node the response was keyed by, which is where the metadata map
+ * is parked. It differs from `node` when the paint belongs to a TEXT descendant
+ * of the fetched node.
+ */
+function fillStyleName(node: FigmaNode, root: FigmaNode = node): string | undefined {
+  const styles = node.styles as Record<string, string> | undefined;
+  const id = styles?.["fill"] ?? styles?.["fills"];
+  if (!id) return undefined;
+  const meta = (root as Record<string, unknown>)[STYLE_META_KEY] as
+    | Record<string, FigmaStyleMeta>
+    | undefined;
+  return meta?.[id]?.name ?? id;
 }
 
 interface FigmaNode {
@@ -560,8 +626,9 @@ class FigmaRestEngine implements Engine {
     if (!entry) {
       throw new Error(`[design-sync] Figma node ${nodeId} not found in ${fileKey}.`);
     }
-    this.nodeCache.set(cacheKey, entry.document);
-    return entry.document;
+    const document = withStyleMeta(entry.document, entry.styles);
+    this.nodeCache.set(cacheKey, document);
+    return document;
   }
 
   /**
@@ -607,8 +674,9 @@ class FigmaRestEngine implements Engine {
     for (const id of misses) {
       const entry = data.nodes?.[id];
       if (entry?.document) {
-        this.nodeCache.set(`${fileKey}:${id}`, entry.document);
-        nodes.set(id, entry.document);
+        const document = withStyleMeta(entry.document, entry.styles);
+        this.nodeCache.set(`${fileKey}:${id}`, document);
+        nodes.set(id, document);
       } else {
         unreachable.set(id, `no node with that id in file ${fileKey}`);
       }
@@ -785,22 +853,57 @@ class FigmaRestEngine implements Engine {
     if (!snapshot) return out;
 
     // Background color: code "background-color" vs Figma fills[0] (resolved).
-    const codeBg = snapshot.styles["background-color"];
-    const figmaBg = resolveFillColor(node, variables, activeMode);
-    if (!isTransparentColor(codeBg) || figmaBg !== undefined) {
-      const modes = figmaBg?.modes;
-      const figmaValue = figmaBg?.value;
-      const status = colorRowStatus(codeBg, figmaValue);
-      const diff: DimensionDiff = {
-        kind: "token-value",
-        property: "background-color",
-        codeValue: codeBg ?? null,
-        figmaValue: figmaValue ?? null,
-        status,
-      };
-      if (modes) diff.modes = modes;
-      if (figmaBg?.tokenName) diff.tokenName = figmaBg.tokenName;
-      out.push(diff);
+    //
+    // Never on a TEXT node. A TEXT node's fill IS its text colour — Figma has no
+    // separate background for one — so comparing it against CSS
+    // `background-color` is a category error, and a guaranteed one: the code side
+    // reads `rgba(0, 0, 0, 0)` on any text element, so every bound TEXT node
+    // reported drift. Live Card, on `[data-slot=title]`: `background-color`
+    // rgba(0,0,0,0) vs rgb(30,30,30) → drift, immediately followed by `color`
+    // rgb(30,30,30) vs rgb(30,30,30) → match. Same Figma fill, compared twice,
+    // right once. The `color` path below is the one that means something.
+    if (node.type !== "TEXT") {
+      const codeBg = snapshot.styles["background-color"];
+      const figmaBg = resolveFillColor(node, variables, activeMode);
+      const fillStyle = fillStyleName(node);
+      if (!isTransparentColor(codeBg) || figmaBg !== undefined || fillStyle !== undefined) {
+        const modes = figmaBg?.modes;
+        const figmaValue = figmaBg?.value;
+        const sourceAdvisory = paintSourceAdvisory({
+          styleName: fillStyle,
+          variableId: figmaBg?.variableId,
+          variables,
+        });
+        // A shared paint style is Figma stating an opinion. When we can't turn it
+        // into a colour (a gradient or image-only style, a paint we can't read),
+        // the row has to say the read failed — `flag-only` would claim Figma
+        // declares nothing, and `match` on an absent value is the false positive
+        // the honesty invariant exists to forbid.
+        const unreadableStyle = figmaBg === undefined && fillStyle !== undefined;
+        const status: DimensionDiff["status"] = unreadableStyle
+          ? "unresolved"
+          : colorRowStatus(codeBg, figmaValue);
+        const diff: DimensionDiff = {
+          kind: "token-value",
+          property: "background-color",
+          codeValue: codeBg ?? null,
+          figmaValue: figmaValue ?? null,
+          status,
+        };
+        if (modes) diff.modes = modes;
+        if (figmaBg?.tokenName) diff.tokenName = figmaBg.tokenName;
+        if (sourceAdvisory) diff.sourceAdvisory = sourceAdvisory;
+        if (unreadableStyle) {
+          diff.note =
+            `Figma's fill comes from the shared paint style "${fillStyle}", but no colour could be ` +
+            `read from it (the paint is not a readable solid), so no comparison was made.`;
+        } else if (fillStyle !== undefined && figmaBg?.tokenName === undefined) {
+          diff.note =
+            `Figma's fill comes from the shared paint style "${fillStyle}", whose paint is not bound ` +
+            `to a variable — the design names no token for this colour.`;
+        }
+        out.push(diff);
+      }
     }
 
     // Numeric Figma boundVariables → resolved float, compared to computed CSS px.
@@ -1011,12 +1114,14 @@ class FigmaRestEngine implements Engine {
       const stroke = (node.strokes as FigmaPaint[])?.[0];
       let figmaStroke: ResolvedFill | undefined;
       let strokeTokenName: string | undefined;
+      let strokeVariableId: string | undefined;
       if (stroke) {
         const alias = stroke.boundVariables?.color;
         if (alias && variables) {
           figmaStroke = resolveColorVariable(alias.id, variables, activeMode);
           const v = variables.meta.variables[alias.id];
           if (v) strokeTokenName = v.name;
+          strokeVariableId = alias.id;
         }
         if (!figmaStroke && stroke.color) {
           figmaStroke = { value: rgbaToCss(stroke.color) };
@@ -1034,6 +1139,11 @@ class FigmaRestEngine implements Engine {
         };
         if (figmaStroke?.modes) diff.modes = figmaStroke.modes;
         if (strokeTokenName) diff.tokenName = strokeTokenName;
+        const strokeAdvisory = paintSourceAdvisory({
+          variableId: strokeVariableId,
+          variables,
+        });
+        if (strokeAdvisory) diff.sourceAdvisory = strokeAdvisory;
         out.push(diff);
       }
     }
@@ -1155,10 +1265,21 @@ class FigmaRestEngine implements Engine {
 
     // Typography — find the first TEXT descendant (or the node itself if it's
     // TEXT) and read its style + first fill. Inherited values resolve on the
-    // code side via getComputedStyle even when the snapshot target isn't a
-    // text element, so this gives consistent comparisons for buttons, tabs,
-    // menu items, etc.
-    const textNode = findFirstTextNode(node);
+    // code side via getComputedStyle, so an element that renders its own text
+    // compares cleanly whether or not it declares the type itself: buttons,
+    // tabs, menu items, headings.
+    //
+    // Gated on the element owning text. A wrapper `div` inherits a font size
+    // from the page and Figma answers from a TEXT node several levels down, so
+    // the two sides describe different elements and every row is fabricated.
+    // Live Card: the story root, `[data-slot=body]` and `[data-slot=text]` are
+    // layout divs, and between them they produced twelve such rows —
+    // `line-height` "not bound in Figma" (with a design-side fix prompt),
+    // `color` (inherited vs a descendant's fill), and two `copy` rows for
+    // strings their children hold. The text-bearing descendants are compared on
+    // their own, through their declared child bindings, where the verdict is
+    // about the element that paints the glyphs. See `applicability.ts`.
+    const textNode = ownsRenderedText(snapshot) ? findFirstTextNode(node) : undefined;
     if (textNode) {
       const ts = textNode.style as
         | (FigmaTypeStyle & {
@@ -1272,12 +1393,14 @@ class FigmaRestEngine implements Engine {
         let figmaColor: ResolvedFill | undefined;
         let colorTokenName: string | undefined;
         const fill = textNode.fills?.[0];
+        let colorVariableId: string | undefined;
         if (fill) {
           const alias = fill.boundVariables?.color;
           if (alias && variables) {
             figmaColor = resolveColorVariable(alias.id, variables, activeMode);
             const v = variables.meta.variables[alias.id];
             if (v) colorTokenName = v.name;
+            colorVariableId = alias.id;
           }
           if (!figmaColor && fill.color) figmaColor = { value: rgbaToCss(fill.color) };
         }
@@ -1292,6 +1415,12 @@ class FigmaRestEngine implements Engine {
           };
           if (figmaColor?.modes) diff.modes = figmaColor.modes;
           if (colorTokenName) diff.tokenName = colorTokenName;
+          const sourceAdvisory = paintSourceAdvisory({
+            styleName: fillStyleName(textNode, node),
+            variableId: colorVariableId,
+            variables,
+          });
+          if (sourceAdvisory) diff.sourceAdvisory = sourceAdvisory;
           out.push(diff);
         }
       }
@@ -1346,7 +1475,17 @@ class FigmaRestEngine implements Engine {
     const bindings = snapshot?.bindings ?? {};
     const figmaBindings = collectFigmaBindings(node, variables, activeMode);
 
-    const keys = new Set([...Object.keys(bindings), ...Object.keys(figmaBindings)]);
+    // Same applicability gate as the value rows: a wrapper that owns no text
+    // gets no wiring verdict on the typography family or `color` either. A
+    // binding row is the same claim as a value row with the names swapped in, so
+    // suppressing one and keeping the other would leave the report contradicting
+    // itself.
+    const ownsText = ownsRenderedText(snapshot);
+    const keys = new Set(
+      [...Object.keys(bindings), ...Object.keys(figmaBindings)].filter(
+        (key) => ownsText || !isTextOwnedProperty(key),
+      ),
+    );
     for (const key of keys) {
       const codeValue = bindings[key];
       const figma = figmaBindings[key];
@@ -1636,8 +1775,15 @@ class FigmaRestEngine implements Engine {
    *
    * Single row per Figma string. Strings present in code = match; absent =
    * drift. If neither side has any text, no row is emitted.
+   *
+   * Not run on an element that owns no text. Its `texts` are its descendants',
+   * and those descendants hold the copy, get their own `copy` rows through their
+   * child bindings, and are where a fix would be made — so a row here restates
+   * their verdict against an element that renders none of it. On the live Card
+   * this was two of the four rows on each of three layout divs.
    */
   private diffCopy(node: FigmaNode, snapshot: CodeSnapshot | undefined): DimensionDiff[] {
+    if (!ownsRenderedText(snapshot)) return [];
     const figmaStrings = collectFigmaText(node);
     const codeStringsRaw = snapshot?.texts ?? [];
     const codeTexts = codeStringsRaw.map((s) => s.toLowerCase());
@@ -1991,6 +2137,12 @@ interface ResolvedFill {
   value: string;
   modes?: ModeAwareValue;
   tokenName?: string;
+  /**
+   * Id of the variable the paint binds, when it binds one. Carried so the row
+   * can say something about the variable's *tier* — the name alone can't, and
+   * guessing tier from the name is exactly what `colorTokenTier` refuses to do.
+   */
+  variableId?: string;
 }
 
 /**
@@ -2014,12 +2166,17 @@ function resolveFillColor(
 ): ResolvedFill | undefined {
   const fill = node.fills?.[0];
   if (!fill) return undefined;
+  // A paint delivered by a shared paint style arrives here already flattened:
+  // Figma inlines the style's paint into `fills`, `boundVariables` included, so
+  // there is no style indirection left to follow. `fillStyleName` reports which
+  // style it was; this function only ever reads the paint in front of it.
   const alias = fill.boundVariables?.color;
   const tokenName = alias && variables ? variables.meta.variables[alias.id]?.name : undefined;
   if (alias && variables) {
     const resolved = resolveColorVariable(alias.id, variables, activeMode);
     if (resolved) {
       if (tokenName) resolved.tokenName = tokenName;
+      resolved.variableId = alias.id;
       return resolved;
     }
   }
@@ -2027,7 +2184,11 @@ function resolveFillColor(
   // resolved colour — use it, and keep the token name so the row still
   // knows which token it is nominally bound to.
   if (fill.color) {
-    return { value: rgbaToCss(fill.color), ...(tokenName ? { tokenName } : {}) };
+    return {
+      value: rgbaToCss(fill.color),
+      ...(tokenName ? { tokenName } : {}),
+      ...(alias ? { variableId: alias.id } : {}),
+    };
   }
   return undefined;
 }
@@ -2237,6 +2398,126 @@ function resolveColorVariable(
   return { value };
 }
 
+/* ------------------------------------------------------------------------- *
+ * where a colour came from: paint style, and token tier
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Which layer of the design's colour system a bound variable sits in.
+ *
+ *  - `"semantic"` — its own collection has more than one mode, so the variable
+ *    itself varies by theme. Nothing to say.
+ *  - `"palette"` — it has exactly one mode, **and** this file themes colour in
+ *    some other collection. Both halves are facts read from the variables
+ *    response, and together they mean something specific: the design has a
+ *    themed colour layer and this fill bypasses it, so it cannot follow the
+ *    theme. (Live case: the Card's Image placeholder binds `Slate/200` from the
+ *    single-mode `Color Primitives`, while `Background/Neutral/Tertiary` in
+ *    `Color` aliases `Slate/200` under `SDS Light` and `Slate/900` under
+ *    `SDS Dark`. The placeholder stays light grey on a dark card.)
+ *  - `"undetermined"` — anything else, and it says nothing at all.
+ *
+ * The last case is load-bearing. A single-mode collection is completely normal
+ * for Size, Radius and Typography, and it is normal for *colour* too in a
+ * single-theme design system — so "one mode" alone is not evidence of a tier
+ * mistake, and neither is a name that "looks like a palette". No name heuristic
+ * is applied here: `Slate/200` and `Background/Neutral/Tertiary` are told apart
+ * by their collections' mode counts, not by their spelling.
+ */
+type ColorTokenTier = "palette" | "semantic" | "undetermined";
+
+function colorTokenTier(
+  variableId: string,
+  variables: FigmaLocalVariablesResponse,
+): ColorTokenTier {
+  const v = variables.meta.variables[variableId];
+  if (!v || v.resolvedType !== "COLOR") return "undetermined";
+  const own = variables.meta.variableCollections[v.variableCollectionId];
+  if (!own) return "undetermined";
+  if (own.modes.length > 1) return "semantic";
+
+  // Single mode. Only meaningful if colour is themed elsewhere in this file.
+  const themesColourElsewhere = Object.values(variables.meta.variables).some((other) => {
+    if (other.resolvedType !== "COLOR") return false;
+    if (other.variableCollectionId === v.variableCollectionId) return false;
+    const c = variables.meta.variableCollections[other.variableCollectionId];
+    return (c?.modes.length ?? 0) > 1;
+  });
+  return themesColourElsewhere ? "palette" : "undetermined";
+}
+
+/**
+ * The multi-mode COLOR variables that alias **directly** to `variableId` — the
+ * design's own semantic wrappers for this primitive, by construction rather than
+ * by name similarity.
+ *
+ * One hop only. A deeper chain may well end at the same primitive, but naming a
+ * two-hop ancestor as "the token you meant" is a guess, and a guess with a
+ * variable name attached reads as a fact.
+ */
+function semanticWrappersOf(
+  variableId: string,
+  variables: FigmaLocalVariablesResponse,
+): Array<{ name: string; collection: string }> {
+  const out: Array<{ name: string; collection: string }> = [];
+  for (const other of Object.values(variables.meta.variables)) {
+    if (other.resolvedType !== "COLOR" || other.id === variableId) continue;
+    const collection = variables.meta.variableCollections[other.variableCollectionId];
+    if (!collection || collection.modes.length < 2) continue;
+    const pointsHere = Object.values(other.valuesByMode).some(
+      (raw) => asVariableAlias(raw)?.id === variableId,
+    );
+    if (pointsHere) out.push({ name: other.name, collection: collection.name });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Everything true about where a paint's colour came from, as one sentence or
+ * none. Attached to the row as `sourceAdvisory` — never as a status.
+ *
+ * Two independent facts, either or both of which may be present:
+ *  1. the fill is delivered by a shared paint style (so the fix belongs in the
+ *     style, not on the node — and until now the style was invisible in the
+ *     report even though a paint style is how most real libraries ship fills);
+ *  2. the bound variable is a palette primitive in a file that themes colour.
+ */
+function paintSourceAdvisory(opts: {
+  styleName?: string | undefined;
+  variableId?: string | undefined;
+  variables: FigmaLocalVariablesResponse | null;
+}): string | undefined {
+  const parts: string[] = [];
+  if (opts.styleName) {
+    parts.push(
+      `Delivered by the shared paint style "${opts.styleName}" — the binding below is the style's, ` +
+        `so a change belongs in the style rather than on this node.`,
+    );
+  }
+  if (opts.variableId && opts.variables) {
+    const v = opts.variables.meta.variables[opts.variableId];
+    if (v && colorTokenTier(opts.variableId, opts.variables) === "palette") {
+      const collection =
+        opts.variables.meta.variableCollections[v.variableCollectionId]?.name ?? "its collection";
+      let sentence =
+        `"${v.name}" is a single-mode variable in "${collection}", so this colour cannot follow the ` +
+        `theme — it renders the same value in every mode.`;
+      const wrappers = semanticWrappersOf(opts.variableId, opts.variables);
+      if (wrappers.length > 0) {
+        const named = wrappers
+          .slice(0, 3)
+          .map((w) => `"${w.name}" (${w.collection})`)
+          .join(", ");
+        sentence +=
+          ` ${wrappers.length === 1 ? "The variable" : "Variables"} ${named} alias${wrappers.length === 1 ? "es" : ""} ` +
+          `it and do${wrappers.length === 1 ? "es" : ""} vary per mode.`;
+      }
+      parts.push(sentence);
+    }
+  }
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
 /**
  * Pick a numeric (FLOAT) variable's value for the active mode, falling back
  * to the file's default mode if the active one isn't defined. Follows alias
@@ -2358,15 +2639,24 @@ function collectFigmaBindings(
     const aliases = Array.isArray(alias) ? alias : [alias];
     const first = aliases[0];
     if (!first) continue;
-    const cssProp = FIGMA_KEY_TO_CSS[figmaKey] ?? figmaKey;
+    // On a TEXT node `fills` is the text colour, not a background — Figma gives
+    // a TEXT node no separate background paint. Mapping it to `background-color`
+    // put the same variable on two rows, one of which could only ever read as
+    // drift against a transparent computed background.
+    const cssProp =
+      node.type === "TEXT" && figmaKey === "fills"
+        ? "color"
+        : (FIGMA_KEY_TO_CSS[figmaKey] ?? figmaKey);
     setBinding(cssProp, first);
   }
 
   // Fall back to fills[0].boundVariables.color when the node has no top-level
-  // `fills` boundVariable (some shapes carry it on the paint instead).
-  if (!out["background-color"]) {
+  // `fills` boundVariable (some shapes carry it on the paint instead). Same
+  // TEXT-node rule as above.
+  const fillProperty = node.type === "TEXT" ? "color" : "background-color";
+  if (!out[fillProperty]) {
     const fillAlias = node.fills?.[0]?.boundVariables?.color;
-    if (fillAlias) setBinding("background-color", fillAlias);
+    if (fillAlias) setBinding(fillProperty, fillAlias);
   }
 
   // Bubble TEXT-descendant bindings up to the variant root. Designers

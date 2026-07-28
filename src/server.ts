@@ -532,12 +532,26 @@ function mergeAutoBindings(
       Object.assign(bindings, resolution.bindings);
       Object.assign(classes, resolution.classes);
     } else if (resolution.kind === "ambiguous") {
-      // Two scanned components answer to the same name. Picking one would
-      // produce authoritative-looking bindings from the wrong file.
-      advisory =
-        `Tailwind bindings not derived: ${resolution.files.length} scanned components ` +
-        `answer to "${resolution.component}" (${resolution.files.join(", ")}). ` +
-        `Rename one, or narrow \`tsxEntries\` in design-sync.config.json.`;
+      // Several scanned class lists answer to the same name and none claims it
+      // specifically. Picking one would produce authoritative-looking bindings
+      // for an element it doesn't style.
+      //
+      // Two messages, because there are two situations and one piece of advice
+      // does not fit both. The old single wording said "rename one, or narrow
+      // `tsxEntries`" while printing the same file path three times — neither
+      // instruction can be carried out when there is only one file, so the
+      // report withheld half a component's token attribution and gave the reader
+      // nothing to do about it.
+      advisory = resolution.sameFile
+        ? `Tailwind bindings not derived: ${resolution.names.length} \`cva()\` class lists in ` +
+          `${resolution.files[0]} answer to "${resolution.component}" ` +
+          `(${resolution.names.join(", ")}), and none is named for it — they match on the ` +
+          `filename alone, so which one styles the component's root can't be told from the ` +
+          `code. Name the root's class list \`${resolution.component}Variants\` and the rest ` +
+          `will stop competing for it.`
+        : `Tailwind bindings not derived: ${resolution.files.length} files declare a \`cva()\` ` +
+          `answering to "${resolution.component}" (${resolution.files.join(", ")}). Rename one, ` +
+          `or narrow \`tsxEntries\` in design-sync.config.json so only the right one is scanned.`;
     }
   }
 

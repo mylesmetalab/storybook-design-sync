@@ -379,6 +379,7 @@ function readCvaCall(call: CallExpression, file: string): TailwindComponentScan 
   return {
     components: [...components],
     file,
+    ...(variableName ? { variableName } : {}),
     base,
     axes,
     defaultVariants,

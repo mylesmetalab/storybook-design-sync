@@ -105,6 +105,17 @@ export interface DimensionDiff {
    */
   codeClassName?: string;
   /**
+   * Something true about **where the Figma side's value came from** that is not a
+   * verdict on the row: the shared paint style that delivers the fill, or the
+   * fact that the bound variable is a single-mode palette primitive in a file
+   * that themes its colours elsewhere (so this fill cannot follow the theme).
+   *
+   * Kept out of `status` on purpose. It never accuses, never suppresses, and is
+   * shown on `match` rows too — a fill that matches today and cannot theme
+   * tomorrow is exactly the case a status-carrying signal would hide.
+   */
+  sourceAdvisory?: string;
+  /**
    * The declared child binding this row belongs to (the CSS selector, exactly
    * as written in the registry's `children` map). **Absent means the story
    * root** — every row produced before declared child bindings existed, and

@@ -762,6 +762,28 @@ row`, or any Figma `VERTICAL` against a grid — the alignment rows are reported
 `unresolved` with the reason instead of a coincidental match. A property the code
 leaves at its default (`justify-content: normal`) is `flag-only`, never drift.
 
+**Where a colour actually came from.** A fill delivered by a **shared paint
+style** is compared and attributed like any other: Figma flattens the style's
+paint into the node's own `fills` (variable binding included) and returns the
+style's name alongside the node in the same request, so no extra call is made and
+nothing is followed by hand. Three things are now said out loud:
+
+- the row names the paint style that delivers the fill, so a fix is made in the
+  style rather than on the node;
+- a style whose paint carries no variable is reported as the design naming no
+  token — not as a silent match;
+- a style whose paint yields no readable colour at all (a gradient or image-only
+  style) is `unresolved` with the reason, never `match` and never `flag-only`.
+
+**Token tier (colour only).** When a fill binds a variable whose collection has a
+single mode, **and** the same file themes colour in some other collection, the row
+says so: that colour cannot follow the theme, and any multi-mode variable that
+aliases it directly is named as the equivalent that can. Both halves are read from
+the variables response. Nothing is inferred from a variable's *name* — a
+single-mode collection is normal for Size, Radius and Typography, and normal for
+colour too in a single-theme system, so in a file that themes no colour the tier
+is undeterminable and nothing is said.
+
 **Compared only where you declare it.**
 
 - **Comparison is root-only until child bindings exist.** A drift check
@@ -769,6 +791,21 @@ leaves at its default (`justify-content: normal`) is `flag-only`, never drift.
   *header* padding drifts reports clean unless that header is bound — see
   [child bindings](#child-bindings--checking-the-whole-component-not-just-its-root). This is the single easiest way to get a
   clean report that means less than it appears to.
+- **Typography, `color` and copy are compared only on the element that renders
+  its own text.** A wrapper `div` inherits its font size from the page while
+  Figma answers from a TEXT node several levels down, so the two sides describe
+  different elements and every such row was fabricated — on a live Card, twelve
+  of sixteen rows. An element counts as text-bearing when it has a text node of
+  its own (text alongside element children counts — `<h3>Title <Badge/></h3>` is
+  compared, because its font properties cascade into the badge) or is a form
+  control. **Consequence:** a component whose text lives entirely in an
+  unbound child has no typography comparison at all — bind the text-bearing
+  element as a child. Everything a wrapper paints itself (background, borders,
+  radii, padding, gap, shadow, opacity) is compared exactly as before.
+- **A TEXT node's fill is its text colour, never a background.** Figma gives a
+  TEXT node no background paint, so `background-color` is not compared against
+  one — the code side reads transparent on any text element and the row could
+  only ever be drift. The `color` comparison is where that fill belongs.
 - **Portalled components need an explicit target.** Radix and Base UI render
   Dialog, Popover, Tooltip, Select and Dropdown outside `#storybook-root`. The
   addon finds portalled content, but when both a trigger and a popup are
@@ -830,7 +867,19 @@ leaves at its default (`justify-content: normal`) is `flag-only`, never drift.
 - **A stale preview bundle silently narrows coverage.** The layout comparison
   needs computed `display` in the snapshot, which older preview bundles don't
   send; without it the comparison emits nothing rather than guessing. Restart the
-  consumer's Storybook after upgrading the addon.
+  consumer's Storybook after upgrading the addon. The text-ownership check
+  fails the other way on a stale bundle: with no `ownText` in the snapshot it
+  cannot tell a wrapper from a heading, so it compares everything exactly as
+  v0.0.39 did rather than suppressing rows on a missing field.
+- **One `cva()` class list per component name.** A file with several `cva()`
+  calls has every one of them answering to the file's basename, so `card.tsx`
+  holding `cardVariants`, `cardHeaderVariants` and `cardTitleVariants` offers
+  three candidates for `card`. The one *named* for the component wins; if none
+  is, the bindings are withheld and the advisory names the identifiers and asks
+  for one to be called `<component>Variants`. Before v0.0.40 this case was
+  reported as a cross-file collision and advised renaming a file — advice that
+  could not be followed, while more than half the component's token attribution
+  went missing.
 - **Storybook 10 only.** The preset uses SB10 APIs; 8 and 9 are unsupported.
 - **Tailwind bindings need Tailwind v4's CSS-first `@theme`.** A v3
   `tailwind.config.js` scale is not evaluated. Utilities resolving against

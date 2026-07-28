@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DimensionDiff } from "../dimensions/types.js";
+import type { CodeSnapshot } from "./types.js";
 import { createFigmaRestEngine } from "./figma-rest.js";
 
 /**
@@ -170,14 +171,21 @@ async function check(opts: {
   mode?: string;
   variables?: unknown;
   node?: unknown;
+  /**
+   * Extra snapshot fields. Left off by default so every pre-existing case keeps
+   * sending a snapshot with no `ownText` — which the applicability predicate
+   * treats as "not probed" and therefore compares exactly as before.
+   */
+  snapshot?: Partial<CodeSnapshot>;
+  nodeId?: string;
 }): Promise<DimensionDiff[]> {
   installFetchStub({ variables: opts.variables, node: opts.node });
   // No `cachePath` — keeps the persistent cache out of the picture.
   const engine = createFigmaRestEngine({ figmaPat: "test-pat" });
   const report = await engine.checkDrift({
     storyId: "components-button--primary",
-    nodeRef: { fileKey: FILE_KEY, nodeId: NODE_ID },
-    snapshot: { styles: opts.styles },
+    nodeRef: { fileKey: FILE_KEY, nodeId: opts.nodeId ?? NODE_ID },
+    snapshot: { styles: opts.styles, ...opts.snapshot },
     ...(opts.mode ? { mode: opts.mode } : {}),
   });
   return report.dimensions;
@@ -1118,5 +1126,570 @@ describe("structure: Figma auto-layout vs computed layout", () => {
     const dimensions = await check({ styles: MATCHING_STYLES });
     expect(dimensions.find((d) => d.property === "story.structure")).toBeUndefined();
     expect(dimensions.find((d) => d.property === "story.motion")).toBeDefined();
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * F1 — a fill delivered by a shared paint style
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Figma flattens a paint style into the node's own `fills`, `boundVariables`
+ * included, and returns the style's *metadata* in a `styles` map alongside the
+ * `document` in the same `/nodes` response. Verified against the live SDS file:
+ * the Card's Image placeholder carries `styles: {fill, fills} → "293:27519"`,
+ * `fills[0].boundVariables.color → Slate/200`, and a top-level
+ * `boundVariables.fills`. So there is no indirection left to follow and no extra
+ * request to make — what was missing was that the report never *said* a style
+ * was involved, and never said the bound variable was a palette primitive that
+ * cannot theme.
+ */
+const PLACEHOLDER_STYLE_ID = "293:27519";
+const SLATE_200 = "VariableID:3919:36535";
+const SLATE_900 = "VariableID:3919:36542";
+const BACKGROUND_NEUTRAL_TERTIARY = "VariableID:106:12468";
+/** 227/255 — Slate/200, the live placeholder grey. */
+const SLATE_200_FLOAT = 0.8918150663375854;
+/** 48/255 — Slate/900, what the semantic token resolves to under SDS Dark. */
+const SLATE_900_FLOAT = 0.18823529411764706;
+
+const PLACEHOLDER_STYLE_META = {
+  [PLACEHOLDER_STYLE_ID]: {
+    key: "583a43e2ed38bcf2d7fa300cd60392ad7dfadfbd",
+    name: "Image Placeholder",
+    styleType: "FILL",
+    remote: false,
+    description: "",
+  },
+};
+
+/**
+ * The shared fixture plus the palette/semantic pair the tier check reads:
+ * `Slate/200` alone in single-mode `Color Primitives`, and
+ * `Background/Neutral/Tertiary` in two-mode `Color` aliasing it under SDS Light
+ * and `Slate/900` under SDS Dark.
+ */
+interface VariablesFixture {
+  meta: {
+    variableCollections: Record<string, unknown>;
+    variables: Record<string, unknown>;
+  };
+}
+
+function variablesWithPalette(): VariablesFixture {
+  const base = variablesResponse();
+  return {
+    meta: {
+      variableCollections: { ...base.meta.variableCollections },
+      variables: {
+        ...base.meta.variables,
+        [SLATE_200]: {
+          id: SLATE_200,
+          name: "Slate/200",
+          resolvedType: "COLOR",
+          variableCollectionId: PRIMITIVES_COLLECTION,
+          valuesByMode: {
+            "3919:2": { r: SLATE_200_FLOAT, g: SLATE_200_FLOAT, b: SLATE_200_FLOAT, a: 1 },
+          },
+        },
+        [SLATE_900]: {
+          id: SLATE_900,
+          name: "Slate/900",
+          resolvedType: "COLOR",
+          variableCollectionId: PRIMITIVES_COLLECTION,
+          valuesByMode: {
+            "3919:2": { r: SLATE_900_FLOAT, g: SLATE_900_FLOAT, b: SLATE_900_FLOAT, a: 1 },
+          },
+        },
+        [BACKGROUND_NEUTRAL_TERTIARY]: {
+          id: BACKGROUND_NEUTRAL_TERTIARY,
+          name: "Background/Neutral/Tertiary",
+          resolvedType: "COLOR",
+          variableCollectionId: COLOR_COLLECTION,
+          valuesByMode: {
+            "3919:21": { type: "VARIABLE_ALIAS", id: SLATE_200 },
+            "3919:22": { type: "VARIABLE_ALIAS", id: SLATE_900 },
+          },
+        },
+      },
+    },
+  };
+}
+
+/** Same file with its only multi-mode colour collection collapsed to one mode. */
+function variablesSingleTheme(): VariablesFixture {
+  const vars = variablesWithPalette();
+  const color = vars.meta.variableCollections[COLOR_COLLECTION] as Record<string, unknown>;
+  vars.meta.variableCollections[COLOR_COLLECTION] = {
+    ...color,
+    modes: [{ modeId: "3919:21", name: "SDS Light" }],
+  };
+  return vars;
+}
+
+const SLATE_200_PAINT = {
+  blendMode: "NORMAL",
+  type: "SOLID",
+  color: { r: SLATE_200_FLOAT, g: SLATE_200_FLOAT, b: SLATE_200_FLOAT, a: 1 },
+  boundVariables: { color: { type: "VARIABLE_ALIAS", id: SLATE_200 } },
+};
+
+function fillNode(
+  opts: {
+    fills?: unknown[];
+    styles?: Record<string, string>;
+    styleMeta?: Record<string, unknown>;
+    type?: string;
+  } = {},
+) {
+  return {
+    nodes: {
+      [NODE_ID]: {
+        document: {
+          id: NODE_ID,
+          name: "Image",
+          type: opts.type ?? "FRAME",
+          fills: opts.fills ?? [SLATE_200_PAINT],
+          strokes: [],
+          children: [],
+          ...(opts.styles ? { styles: opts.styles } : {}),
+        },
+        ...(opts.styleMeta ? { styles: opts.styleMeta } : {}),
+      },
+    },
+  };
+}
+
+const STYLE_DELIVERED = {
+  styles: { fill: PLACEHOLDER_STYLE_ID, fills: PLACEHOLDER_STYLE_ID },
+  styleMeta: PLACEHOLDER_STYLE_META,
+};
+
+describe("token-value: a fill delivered by a shared paint style", () => {
+  const PLACEHOLDER_STYLES = { "background-color": "rgb(227, 227, 227)" };
+
+  it("names the variable the style's paint binds", async () => {
+    const dimensions = await check({
+      styles: PLACEHOLDER_STYLES,
+      variables: variablesWithPalette(),
+      node: fillNode(STYLE_DELIVERED),
+    });
+    const background = row(dimensions, "background-color");
+
+    expect(background.status).toBe("match");
+    expect(background.figmaValue).toBe("rgb(227, 227, 227)");
+    // The whole point: a style-delivered binding is no longer untracked.
+    expect(background.tokenName).toBe("Slate/200");
+  });
+
+  it("says which paint style delivers it, and where a fix belongs", async () => {
+    const dimensions = await check({
+      styles: PLACEHOLDER_STYLES,
+      variables: variablesWithPalette(),
+      node: fillNode(STYLE_DELIVERED),
+    });
+    const background = row(dimensions, "background-color");
+
+    expect(background.sourceAdvisory).toContain('shared paint style "Image Placeholder"');
+    expect(background.sourceAdvisory).toContain("belongs in the style");
+  });
+
+  it("falls back to the style id when the response carries no style metadata", async () => {
+    const dimensions = await check({
+      styles: PLACEHOLDER_STYLES,
+      variables: variablesWithPalette(),
+      node: fillNode({ styles: STYLE_DELIVERED.styles }),
+    });
+    const background = row(dimensions, "background-color");
+
+    // An id is a worse answer than a name, and still the truth. Never a token.
+    expect(background.sourceAdvisory).toContain(PLACEHOLDER_STYLE_ID);
+    expect(background.tokenName).toBe("Slate/200");
+  });
+
+  it("leaves a node with a direct bound fill exactly as it was", async () => {
+    const dimensions = await check({
+      styles: PLACEHOLDER_STYLES,
+      variables: variablesWithPalette(),
+      node: fillNode(),
+    });
+    const background = row(dimensions, "background-color");
+
+    expect(background.status).toBe("match");
+    expect(background.tokenName).toBe("Slate/200");
+    // No style in play, so nothing is said about one.
+    expect(background.sourceAdvisory ?? "").not.toContain("paint style");
+    expect(background.note).toBeUndefined();
+  });
+
+  /**
+   * A gradient or image-only style: Figma has an opinion, we cannot read a
+   * colour from it. `flag-only` would claim Figma declares nothing and `match`
+   * would be a verdict on a comparison that never ran.
+   */
+  it("reports `unresolved` — never `match` — for a style with no readable paint", async () => {
+    const dimensions = await check({
+      styles: PLACEHOLDER_STYLES,
+      variables: variablesWithPalette(),
+      node: fillNode({
+        ...STYLE_DELIVERED,
+        fills: [{ blendMode: "NORMAL", type: "GRADIENT_LINEAR", gradientStops: [] }],
+      }),
+    });
+    const background = row(dimensions, "background-color");
+
+    expect(background.status).toBe("unresolved");
+    expect(background.figmaValue).toBeNull();
+    expect(background.note).toContain('"Image Placeholder"');
+    expect(background.note).toContain("no comparison was made");
+  });
+
+  it("compares a style whose paint binds nothing, and says the design names no token", async () => {
+    const { boundVariables: _dropped, ...unbound } = SLATE_200_PAINT;
+    const dimensions = await check({
+      styles: PLACEHOLDER_STYLES,
+      variables: variablesWithPalette(),
+      node: fillNode({ ...STYLE_DELIVERED, fills: [unbound] }),
+    });
+    const background = row(dimensions, "background-color");
+
+    expect(background.status).toBe("match");
+    expect(background.tokenName).toBeUndefined();
+    expect(background.note).toContain("not bound");
+    expect(background.note).toContain('"Image Placeholder"');
+  });
+});
+
+describe("token-value: palette-vs-semantic tier", () => {
+  const PLACEHOLDER_STYLES = { "background-color": "rgb(227, 227, 227)" };
+
+  it("flags a single-mode primitive in a file that themes colour elsewhere", async () => {
+    const dimensions = await check({
+      styles: PLACEHOLDER_STYLES,
+      variables: variablesWithPalette(),
+      node: fillNode(),
+    });
+    const background = row(dimensions, "background-color");
+
+    expect(background.sourceAdvisory).toContain('"Slate/200" is a single-mode variable');
+    expect(background.sourceAdvisory).toContain("cannot follow the theme");
+    // The semantic equivalent, established by the alias it actually holds — not
+    // by its name looking more semantic.
+    expect(background.sourceAdvisory).toContain('"Background/Neutral/Tertiary" (Color)');
+    // Information, never a verdict.
+    expect(background.status).toBe("match");
+  });
+
+  it("says nothing when the bound variable's own collection has modes", async () => {
+    const dimensions = await check({
+      styles: { "background-color": "rgb(227, 227, 227)" },
+      variables: variablesWithPalette(),
+      node: fillNode({
+        fills: [
+          {
+            type: "SOLID",
+            color: { r: SLATE_200_FLOAT, g: SLATE_200_FLOAT, b: SLATE_200_FLOAT, a: 1 },
+            boundVariables: {
+              color: { type: "VARIABLE_ALIAS", id: BACKGROUND_NEUTRAL_TERTIARY },
+            },
+          },
+        ],
+      }),
+    });
+    const background = row(dimensions, "background-color");
+
+    expect(background.tokenName).toBe("Background/Neutral/Tertiary");
+    expect(background.sourceAdvisory).toBeUndefined();
+  });
+
+  /**
+   * Tier is undeterminable in a single-theme file: one mode is the only tier
+   * there is, so calling `Slate/200` a bypassed primitive would be a claim about
+   * a themed layer that doesn't exist. No name heuristic stands in for it.
+   */
+  it("says nothing when the file themes no colour at all", async () => {
+    const dimensions = await check({
+      styles: PLACEHOLDER_STYLES,
+      variables: variablesSingleTheme(),
+      node: fillNode(),
+    });
+    const background = row(dimensions, "background-color");
+
+    expect(background.tokenName).toBe("Slate/200");
+    expect(background.sourceAdvisory).toBeUndefined();
+  });
+
+  it("says nothing about tier when the variables response is unavailable", async () => {
+    const dimensions = await check({
+      styles: PLACEHOLDER_STYLES,
+      // 404 on /variables/local → the engine runs with `variables: null`.
+      variables: null,
+      node: fillNode(),
+    });
+    const background = maybeRow(dimensions, "background-color");
+
+    expect(background?.sourceAdvisory).toBeUndefined();
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * F4 — a TEXT node's fill is its text colour, never a background
+ * ------------------------------------------------------------------------- */
+
+const TEXT_FILL = {
+  blendMode: "NORMAL",
+  type: "SOLID",
+  color: { r: SLATE_600_FLOAT, g: SLATE_600_FLOAT, b: SLATE_600_FLOAT, a: 1 },
+  boundVariables: { color: { type: "VARIABLE_ALIAS", id: BORDER_NEUTRAL_SECONDARY } },
+};
+
+const TEXT_STYLE = {
+  fontFamily: "Inter",
+  fontSize: 24,
+  fontWeight: 600,
+  lineHeightPx: 28.8,
+  lineHeightUnit: "PIXELS",
+};
+
+function textNodeResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    nodes: {
+      [NODE_ID]: {
+        document: {
+          id: NODE_ID,
+          name: "Title",
+          type: "TEXT",
+          characters: "Title",
+          style: TEXT_STYLE,
+          fills: [TEXT_FILL],
+          strokes: [],
+          boundVariables: { fills: [{ type: "VARIABLE_ALIAS", id: BORDER_NEUTRAL_SECONDARY }] },
+          ...overrides,
+        },
+      },
+    },
+  };
+}
+
+/**
+ * Live Card, `[data-slot=title]`: `background-color` rgba(0,0,0,0) vs
+ * rgb(30,30,30) → drift, and the very next row `color` rgb(30,30,30) vs
+ * rgb(30,30,30) → match. One Figma fill, compared twice, right once. A TEXT node
+ * has no background paint in Figma at all, so the code side reads transparent
+ * and the row could only ever be drift.
+ */
+describe("a TEXT node's fill is not a background", () => {
+  const TITLE_STYLES = {
+    "background-color": "rgba(0, 0, 0, 0)",
+    color: "rgb(118, 118, 118)",
+    "font-family": '"Inter", sans-serif',
+    "font-size": "24px",
+    "font-weight": "600",
+    "line-height": "28.8px",
+  };
+
+  it("emits no `background-color` row for a bound TEXT node", async () => {
+    const dimensions = await check({
+      styles: TITLE_STYLES,
+      snapshot: { ownText: "Title", tagName: "H3", texts: ["Title"] },
+      node: textNodeResponse(),
+    });
+
+    expect(maybeRow(dimensions, "background-color")).toBeUndefined();
+    expect(
+      dimensions.find((d) => d.kind === "token-binding" && d.property === "background-color"),
+    ).toBeUndefined();
+  });
+
+  it("keeps the `color` row, values and token name untouched", async () => {
+    const dimensions = await check({
+      styles: TITLE_STYLES,
+      snapshot: { ownText: "Title", tagName: "H3", texts: ["Title"] },
+      node: textNodeResponse(),
+    });
+    const color = row(dimensions, "color");
+
+    expect(color.status).toBe("match");
+    expect(color.codeValue).toBe("rgb(118, 118, 118)");
+    expect(color.figmaValue).toBe("rgb(118, 118, 118)");
+    expect(color.tokenName).toBe("Border/Neutral/Secondary");
+    // The TEXT node's `fills` binding lands on `color`, once.
+    const bindings = dimensions.filter(
+      (d) => d.kind === "token-binding" && d.property === "color",
+    );
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0]!.figmaValue).toBe("Border/Neutral/Secondary");
+  });
+
+  it("still compares `background-color` on a FRAME", async () => {
+    const dimensions = await check({
+      styles: { "background-color": "rgb(227, 227, 227)" },
+      variables: variablesWithPalette(),
+      node: fillNode({ type: "FRAME" }),
+    });
+
+    expect(row(dimensions, "background-color").status).toBe("match");
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * F3 — typography, colour and copy belong to the element that owns the text
+ * ------------------------------------------------------------------------- */
+
+/** A layout FRAME whose type lives on a TEXT descendant, as a Card's body does. */
+function frameWithTextChild() {
+  return {
+    nodes: {
+      [NODE_ID]: {
+        document: {
+          id: NODE_ID,
+          name: "Body",
+          type: "FRAME",
+          fills: [],
+          strokes: [],
+          paddingTop: 12,
+          boundVariables: { paddingTop: { type: "VARIABLE_ALIAS", id: SPACE_300 } },
+          children: [
+            {
+              id: "1:2",
+              name: "Title",
+              type: "TEXT",
+              characters: "Title",
+              style: TEXT_STYLE,
+              fills: [TEXT_FILL],
+              boundVariables: {},
+              children: [],
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+/**
+ * The container's computed values, as a browser reports them: a font size
+ * inherited from the page, a colour inherited from the page, and a subtree that
+ * contains the title's text. Every typography row built from these compares the
+ * wrapper's inheritance against a TEXT node several levels down.
+ */
+const CONTAINER_STYLES = {
+  "padding-top": "12px",
+  "background-color": "rgba(0, 0, 0, 0)",
+  color: "rgb(10, 10, 10)",
+  "font-family": '"Inter", sans-serif',
+  "font-size": "16px",
+  "font-weight": "400",
+  "line-height": "24px",
+};
+
+const TEXT_ROW_PROPERTIES = [
+  "color",
+  "font-family",
+  "font-size",
+  "font-weight",
+  "line-height",
+];
+
+function textRows(dimensions: DimensionDiff[]): DimensionDiff[] {
+  return dimensions.filter(
+    (d) =>
+      (d.kind === "token-value" || d.kind === "token-binding") &&
+      TEXT_ROW_PROPERTIES.includes(d.property),
+  );
+}
+
+function copyRows(dimensions: DimensionDiff[]): DimensionDiff[] {
+  return dimensions.filter((d) => d.kind === "copy");
+}
+
+describe("typography/colour/copy are compared on the element that owns the text", () => {
+  const cases: Array<{
+    what: string;
+    snapshot: Partial<CodeSnapshot>;
+    compared: boolean;
+  }> = [
+    {
+      what: "an element that renders its own text",
+      snapshot: { ownText: "Title", tagName: "H3", texts: ["Title"] },
+      compared: true,
+    },
+    {
+      what: "a wrapper whose only text lives in descendants",
+      snapshot: { ownText: "\n      \n    ", tagName: "DIV", texts: ["Title"] },
+      compared: false,
+    },
+    {
+      // The hazard the predicate must not be written as a leaf check: font
+      // properties declared here cascade into the badge, so the drift is real.
+      what: "a text-bearing container — own text alongside element children",
+      snapshot: { ownText: "Title ", tagName: "H3", texts: ["Title", "New"] },
+      compared: true,
+    },
+    {
+      what: "a form control, whose value never reaches textContent",
+      snapshot: { ownText: "", tagName: "INPUT", inputType: "text", texts: [] },
+      compared: true,
+    },
+    {
+      // An older preview bundle, or a snapshot replayed from its cache.
+      what: "a snapshot that never probed its own text",
+      snapshot: { texts: ["Title"] },
+      compared: true,
+    },
+  ];
+
+  for (const { what, snapshot, compared } of cases) {
+    it(`${compared ? "compares" : "skips"} typography and colour for ${what}`, async () => {
+      const dimensions = await check({
+        styles: CONTAINER_STYLES,
+        snapshot,
+        node: frameWithTextChild(),
+      });
+
+      if (compared) {
+        expect(textRows(dimensions).length).toBeGreaterThan(0);
+        expect(textRows(dimensions).map((d) => d.property)).toContain("font-size");
+      } else {
+        expect(textRows(dimensions)).toEqual([]);
+      }
+    });
+
+    it(`${compared ? "compares" : "skips"} copy for ${what}`, async () => {
+      const dimensions = await check({
+        styles: CONTAINER_STYLES,
+        snapshot,
+        node: frameWithTextChild(),
+      });
+
+      if (compared) expect(copyRows(dimensions).length).toBeGreaterThan(0);
+      else expect(copyRows(dimensions)).toEqual([]);
+    });
+  }
+
+  it("still compares everything the wrapper paints itself", async () => {
+    const dimensions = await check({
+      styles: CONTAINER_STYLES,
+      snapshot: { ownText: "   ", tagName: "DIV", texts: ["Title"] },
+      node: frameWithTextChild(),
+    });
+
+    // Suppressing box properties would be the mirror-image bug.
+    expect(row(dimensions, "padding-top").status).toBe("match");
+    expect(
+      dimensions.find((d) => d.kind === "token-binding" && d.property === "padding-top"),
+    ).toBeDefined();
+  });
+
+  it("does not suppress the `line-height` design-side prompt on a real text element", async () => {
+    // The row F3 reported as noise on three wrappers is a genuine finding on an
+    // element that owns its text — the suppression must not reach it.
+    const dimensions = await check({
+      styles: { ...CONTAINER_STYLES, "line-height": "20px" },
+      snapshot: { ownText: "Title", tagName: "H3", texts: ["Title"] },
+      node: frameWithTextChild(),
+    });
+
+    expect(row(dimensions, "line-height").status).toBe("drift");
   });
 });

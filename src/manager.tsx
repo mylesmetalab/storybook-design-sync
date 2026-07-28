@@ -1286,6 +1286,30 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
   const { bindingFixable, valueFixable } = tokenRowFixability(value, binding);
   const valueTokenName = value?.tokenName ?? null;
 
+  /**
+   * The Figma-side token name, shown under the value.
+   *
+   * The value cell wins the Figma column because a concrete `rgb()` is more use
+   * than a name — but that meant a colour row named no token at all: the numeric
+   * and typography rows embed "(token: …)" in their value string, colours don't,
+   * and the binding row that *does* carry the name loses the display to the value
+   * row. On the live Card the Image placeholder's fill read `background-color ·
+   * rgb(227, 227, 227) · match` with nothing to say it was bound to `Slate/200`,
+   * which is indistinguishable from a fill Figma had detached from its variable.
+   *
+   * Suppressed when the rendered value already contains it, so the rows that
+   * embed the name don't print it twice.
+   */
+  const figmaTokenName = value?.tokenName ?? binding?.figmaValue ?? null;
+  const figmaTokenLine =
+    typeof figmaTokenName === "string" &&
+    figmaTokenName !== "" &&
+    !String(figmaShown ?? "").includes(figmaTokenName)
+      ? figmaTokenName
+      : null;
+  /** Where the Figma value came from (paint style, palette tier). Never a verdict. */
+  const sourceAdvisory = value?.sourceAdvisory ?? binding?.sourceAdvisory;
+
   const valueTitle = value
     ? value.status === "match"
       ? `Code and Figma both resolve to ${stringifyValue(value.figmaValue)}.`
@@ -1302,9 +1326,15 @@ const TokenRow: React.FC<TokenRowProps> = ({ rowKey, property, value, binding, a
       </td>
       <td style={styles.td}>
         <ValueCell value={figmaShown} />
+        {figmaTokenLine && <div style={styles.modes}>token: {figmaTokenLine}</div>}
         {modes && (
           <div style={styles.modes}>
             light: {modes.light} · dark: {modes.dark}
+          </div>
+        )}
+        {sourceAdvisory && (
+          <div style={styles.modes} title={sourceAdvisory}>
+            {sourceAdvisory}
           </div>
         )}
       </td>

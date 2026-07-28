@@ -88,12 +88,24 @@ export function bindingScanEmpty(rows: GroupedRow[]): boolean {
 }
 
 /**
- * Whether a grouped row carries any drift. Drives the per-row
- * "Copy fix prompt" button (shown in both apply modes).
+ * Whether a grouped row carries drift worth offering a fix for. Drives the
+ * per-row "Copy fix prompt" button (shown in both apply modes).
+ *
+ * Value drift only. A binding-name difference whose *value* matches is not a
+ * defect: both sides are bound to a token and the component renders exactly
+ * what the design specifies — the two systems just spell the token
+ * differently (`primary` vs `color/background/brand/default`). Token-name
+ * matching is heuristic, so acting on a name mismatch alone would offer a
+ * "fix" for something that isn't wrong, on evidence we don't trust. Binding
+ * differences stay visible in the row and its advisory; they just don't get a
+ * button. When the value genuinely drifts, the fix prompt carries the binding
+ * detail with it.
  */
 export function rowHasDrift(row: GroupedRow): boolean {
   if (row.kind === "token") {
-    return row.value?.status === "drift" || row.binding?.status === "drift";
+    if (row.value) return row.value.status === "drift";
+    // No value comparison happened, so we cannot say the render is wrong.
+    return false;
   }
   return row.diff.status === "drift";
 }

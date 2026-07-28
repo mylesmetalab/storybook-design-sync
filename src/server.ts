@@ -130,8 +130,12 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       }
 
       if (isPending(entry)) {
+        // Not a failure: a pending stub is the registry deliberately recording
+        // "this story exists, its Figma counterpart doesn't yet". Flagged as
+        // informational so the panel doesn't paint it as an error.
         channel.emit(EVENTS.DriftError, {
           storyId,
+          severity: "info",
           message:
             `Pending — Figma binding not assigned. ` +
             `Set "nodeId" for "${storyId}" in ${config.registryPath} once the variant exists.`,

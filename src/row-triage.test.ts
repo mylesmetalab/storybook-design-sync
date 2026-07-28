@@ -202,7 +202,7 @@ describe("rowHasDrift — drives the Copy fix prompt button (both modes)", () =>
     expect(rowHasDrift(other({ kind: "copy", property: "text", status: "match" }))).toBe(false);
   });
 
-  it("token rows report drift when either value or binding drifted", () => {
+  it("token rows offer a fix only when the VALUE drifted", () => {
     const diff = (status: DimensionDiff["status"]): DimensionDiff => ({
       kind: "token-value",
       property: "gap",
@@ -211,9 +211,43 @@ describe("rowHasDrift — drives the Copy fix prompt button (both modes)", () =>
       status,
     });
     expect(rowHasDrift({ kind: "token", property: "gap", value: diff("drift") })).toBe(true);
-    expect(rowHasDrift({ kind: "token", property: "gap", binding: diff("drift") })).toBe(true);
     expect(rowHasDrift({ kind: "token", property: "gap", value: diff("match") })).toBe(false);
     expect(rowHasDrift({ kind: "token", property: "gap" })).toBe(false);
+  });
+
+  it("a binding-name difference whose value matches offers NO fix", () => {
+    // Both sides are bound to a token and the render is correct — the systems
+    // just spell the token differently (`primary` vs
+    // `color/background/brand/default`). Token-name matching is heuristic, so
+    // a name mismatch is not evidence of a defect and must not grow a button.
+    const value: DimensionDiff = {
+      kind: "token-value",
+      property: "background-color",
+      codeValue: "rgb(44, 44, 44)",
+      figmaValue: "rgb(44, 44, 44)",
+      status: "match",
+    };
+    const binding: DimensionDiff = {
+      kind: "token-binding",
+      property: "background-color",
+      codeValue: "primary",
+      figmaValue: "color/background/brand/default",
+      status: "drift",
+    };
+    expect(rowHasDrift({ kind: "token", property: "background-color", value, binding })).toBe(
+      false,
+    );
+  });
+
+  it("binding drift alone — with no value comparison — offers no fix either", () => {
+    const binding: DimensionDiff = {
+      kind: "token-binding",
+      property: "gap",
+      codeValue: "space-2",
+      figmaValue: "Space/200",
+      status: "drift",
+    };
+    expect(rowHasDrift({ kind: "token", property: "gap", binding })).toBe(false);
   });
 });
 

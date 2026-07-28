@@ -24,14 +24,19 @@ import type { ChildTarget, CodeSnapshot } from "./engines/types.js";
  */
 
 /**
- * Schema version. Bumped to 2 in v0.0.38: a cached report carries *verdicts*,
- * and the rules that produce them changed — a name-only binding divergence is now
- * an `advisory`, not `drift` (issue #57). Entries written by the old rules would
- * otherwise keep reporting 89 drift on a clean component until the Figma file's
- * `lastModified` happened to move. A version bump discards them once, on upgrade,
- * which is cheaper than being wrong.
+ * Schema version. Bump whenever an upgrade changes what a report *contains* or
+ * what its verdicts *mean*, because a cache hit serves the old report verbatim
+ * until the Figma file's `lastModified` happens to move.
+ *
+ *  - **2** (v0.0.38): a name-only binding divergence became an `advisory` rather
+ *    than `drift` (issue #57). Entries written under the old rules kept reporting
+ *    89 drift on a clean component.
+ *  - **3** (v0.0.39): reports gained `structure` (auto-layout) and `opacity`
+ *    comparisons. A v0.0.38 entry has neither, so a Card whose Figma direction
+ *    is Vertical while the code lays out in a row would keep reporting clean off
+ *    the cache — exactly the silent false-clean this release exists to remove.
  */
-export const CACHE_VERSION = 2;
+export const CACHE_VERSION = 3;
 
 export interface CacheFile {
   version: typeof CACHE_VERSION;

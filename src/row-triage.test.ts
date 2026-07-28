@@ -506,10 +506,27 @@ describe("explainInfo — advisory text is byte-identical to the pre-v0.0.37 wor
     );
   });
 
-  it("structure / motion", () => {
-    expect(explainInfo(other({ kind: "structure", property: "layout" }))).toBe(
-      "`structure` dimension is reserved for a future engine — surfaced for awareness only.",
+  it("structure names both layout values and says the fix is a human one", () => {
+    // v0.0.39: `structure` is a visible dimension with real values, so its
+    // advisory must describe the disagreement — the old "reserved for a future
+    // engine" line would be false on a row carrying two computed values.
+    expect(
+      explainInfo(
+        other({
+          kind: "structure",
+          property: "flex-direction",
+          codeValue: "row",
+          figmaValue: "column",
+        }),
+      ),
+    ).toBe(
+      "Figma's auto-layout implies `flex-direction: column`, the rendered element computes `row`. " +
+        "Decide which side is right: change the layout in code, or change the auto-layout in Figma. " +
+        "No auto-apply — a layout property is a component decision, and the addon will not rewrite one from a diff.",
     );
+  });
+
+  it("motion is still reserved", () => {
     expect(explainInfo(other({ kind: "motion", property: "transition" }))).toBe(
       "`motion` dimension is reserved for a future engine — surfaced for awareness only.",
     );

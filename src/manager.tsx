@@ -852,9 +852,12 @@ interface DiffTableProps {
  * to wire real comparison logic into; removed from this set the moment
  * an engine starts producing meaningful data. Don't delete the engine
  * code that emits these; just edit this set.
+ *
+ * `structure` left this set in v0.0.39: it compares Figma auto-layout against
+ * computed CSS layout (`engines/layout.ts`) and emits nothing at all unless both
+ * sides are genuinely laying out children, which is what it was missing.
  */
 const HIDDEN_DIMENSION_KINDS = new Set<DimensionDiff["kind"]>([
-  "structure",
   "motion",
 ]);
 

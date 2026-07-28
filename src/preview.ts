@@ -39,8 +39,17 @@ const SNAPSHOT_PROPERTIES = [
   "border-right-color",
   "border-bottom-color",
   "border-left-color",
-  // Layout
+  // Layout — compared against Figma auto-layout by the `structure` dimension
+  // (`engines/layout.ts`). `display` is not compared to anything itself: it is
+  // the *applicability* evidence, and without it the layout comparison refuses
+  // to run at all, because `flex-direction: row` is reported on every plain
+  // block element whether or not it lays out anything.
   "gap",
+  "display",
+  "flex-direction",
+  "justify-content",
+  "align-items",
+  "flex-wrap",
   // Typography — useful for components with text content. Inherited values
   // resolve on `getComputedStyle`, so a button with no inner text still
   // reports the cascaded font.
@@ -61,9 +70,8 @@ const SNAPSHOT_PROPERTIES = [
   "direction",
   // Effects
   "box-shadow",
-  // `opacity` has no Figma counterpart wired up yet (Figma's `node.opacity` is
-  // directly comparable — see the README's coverage list). Kept in the payload
-  // so adding the comparison needs no preview-bundle change in consumers.
+  // Compared against Figma's `node.opacity` since v0.0.39 (same 0..1 scale on
+  // both sides, so the comparison needs no conversion).
   "opacity",
 ] as const;
 

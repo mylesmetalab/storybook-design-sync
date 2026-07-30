@@ -886,6 +886,39 @@ is undeterminable and nothing is said.
   Tailwind's built-in defaults, and numeric spacing under the `--spacing`
   multiplier (`p-3`, `gap-2`), yield no binding by design — the addon will not
   name a token it cannot verify.
+- **"Both modes" does not compare a second mode yet** ([#69]). It switches theme
+  by setting an attribute (`data-theme` by default), so a consumer that themes
+  with a class — shadcn and Tailwind's `.dark` convention, which the reference
+  starter uses — never changes appearance and the run compares one mode twice.
+  Even where the switch does land, only the **Figma** side gains mode values: the
+  code side is snapshotted once, in the mode the story was rendered in, so a
+  dark-mode divergence is not drift-detectable. On the starter this hides a theme
+  where 18 of 24 `.dark` values disagree with the design source. Treat a clean
+  report as a statement about one mode until this lands.
+- **A rate-limited story can report a tick with its children uncompared, and the
+  result is cached** ([#73], [#74]). When child-binding fetches 429, the story
+  still returns `status: done` with a footnote (`5 child bindings not compared`)
+  rather than an error, and that partial report is persisted — so re-running
+  replays it instead of retrying, and only deleting `.design-sync/cache.json`
+  recovers. A per-story `Check drift` on the affected story can hang
+  indefinitely. Two full `Check all` runs in quick succession are enough to
+  provoke this.
+- **A story that exceeds the per-story budget leaves the totals quietly
+  smaller** ([#72]). Coverage reports `timedOut` honestly, but the drift count in
+  the header simply omits that story's rows, so a total compared against a known
+  baseline can differ with no visible cause. The 8s budget sits inside the
+  observed duration range for image-asset stories with five child bindings.
+- **Contract-declared siblings are invisible where a slot is unbound** ([#71]).
+  `contracts/*.spec.json` may record one Figma token driving several slots;
+  drift only compares the slots present in the registry. Fixing the reported row
+  can leave a declared pair split across two values, and nothing in the report
+  says the sibling exists.
+
+[#69]: https://github.com/mylesmetalab/storybook-design-sync/issues/69
+[#71]: https://github.com/mylesmetalab/storybook-design-sync/issues/71
+[#72]: https://github.com/mylesmetalab/storybook-design-sync/issues/72
+[#73]: https://github.com/mylesmetalab/storybook-design-sync/issues/73
+[#74]: https://github.com/mylesmetalab/storybook-design-sync/issues/74
 
 ## What this addon is NOT
 

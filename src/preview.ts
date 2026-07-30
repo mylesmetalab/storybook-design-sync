@@ -18,12 +18,19 @@ import {
   type ChildElementResolution,
 } from "./child-bindings.js";
 import {
+  MODE_SWITCH_PHASE_BUDGET_MS,
   applyMode,
+  createStyleFlusher,
+  fingerprint,
   parseModeSwitch,
   resolveModeSwitch,
+  staleModeReason,
+  switchUnavailableReason,
   type ModeSwitchElement,
   type ModeSwitchHosts,
+  type ModeSwitchRestore,
 } from "./mode-switch.js";
+import { withBudget } from "./bulk-run.js";
 
 const SNAPSHOT_PROPERTIES = [
   // Box / background
@@ -289,18 +296,32 @@ function suspendTransitions(): () => void {
   return () => style.remove();
 }
 
-/**
- * Wait for the browser to flush style + layout after a CSS-variable-driving
- * attribute change. Two rAFs ensures the next paint pass has run; reading
- * `offsetHeight` forces the synchronous part. Even when transitions are
- * suspended, browsers occasionally need this extra tick to settle.
- */
-function waitForStyleFlush(): Promise<void> {
+/** Read a layout property to force a synchronous style + layout recalculation. */
+function forceReflow(): void {
   void document.documentElement.offsetHeight;
-  return new Promise((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-  });
 }
+
+/**
+ * Wait for the browser to flush style + layout after a theme change.
+ *
+ * The frame callback is **raced against a timer** rather than awaited. This was a
+ * plain `requestAnimationFrame(() => requestAnimationFrame(resolve))`, and rAF does
+ * not fire in a document the browser considers hidden — a backgrounded tab, an
+ * inactive window. Measured live in the consumer: `visibilityState: "hidden"`,
+ * rAF never fired in 3s, `setTimeout` fired. So every dual-mode check parked on
+ * the first flush, before any comparison and upstream of every budget (issue #78).
+ *
+ * The policy and the race live in `mode-switch.ts` so they are unit-tested; this
+ * is only the wiring to the real DOM.
+ */
+const waitForStyleFlush = createStyleFlusher({
+  raf:
+    typeof requestAnimationFrame === "function"
+      ? (cb) => void requestAnimationFrame(cb)
+      : undefined,
+  setTimer: (cb, ms) => void setTimeout(cb, ms),
+  forceReflow,
+});
 
 /**
  * Ask the server which child elements the registry binds for this story. The
@@ -468,105 +489,198 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     const [modeA, modeB] = modes;
     const hosts = modeHosts();
     const evidence = modeEvidence(target, childResolutions);
+
+    /**
+     * Everything that mutated the document, newest first, plus the phase we are
+     * in. Both live out here because the *guarantees* live out here: whatever
+     * happens inside — a refusal, a throw, the phase budget expiring — the
+     * document is put back and exactly one snapshot payload is emitted.
+     *
+     * Issue #78 was the absence of both. The phase parked forever, so the theme
+     * was never restored (the story sat in `class="light"` with transitions
+     * permanently suspended) and no payload was ever sent, which left the panel's
+     * 65s ceiling as the only thing that ended the check — reporting "no reply"
+     * instead of a cause.
+     */
+    const undo: ModeSwitchRestore[] = [];
+    let phase = "detecting the theme mechanism";
+    let abandoned = false;
     const restoreTransitions = suspendTransitions();
-
-    // Which mechanism switches this project's theme, and — the part #69 was
-    // missing — whether it actually does. `modeAttribute` (or the newer
-    // `modeSwitch`) still wins when declared; with nothing declared, class and
-    // attribute forms are tried and the one that moves a computed colour is used.
-    const { spec: declared, problem } = parseModeSwitch({
-      modeSwitch: payload.modeSwitch,
-      // Only forward `modeAttribute` as a declaration when the story actually set
-      // it; the default would otherwise read as an explicit choice and suppress
-      // detection — which is how #69 stayed invisible.
-      ...(payload.modeAttribute ? { modeAttribute: payload.modeAttribute } : {}),
-    });
-    const switching = await resolveModeSwitch({
-      hosts,
-      evidence,
-      readStyles: readComputed,
-      modes: [modeA, modeB],
-      declared,
-      flush: waitForStyleFlush,
-    });
-
-    if (!switching.changed || !switching.spec) {
-      // One rendered state, not two. Snapshot it once and say the mode comparison
-      // did not happen. The alternative — two identical snapshots merged into a
-      // "both modes" report — is the false pass this whole release is about.
-      //
-      // Measured before transitions are re-enabled: detection has just restored
-      // the DOM, and re-enabling first would let the restore animate under the
-      // snapshot.
-      const single = snapshotElement(target);
-      if (payload.tokens) single.bindings = { ...(single.bindings ?? {}), ...payload.tokens };
-      const singleChildren = snapshotChildren(childResolutions);
-      const activeMode = readActiveMode(modeAttribute);
+    const restoreDocument = (): void => {
+      // Newest first: pass B's restore captured the state pass A had left.
+      while (undo.length > 0) undo.pop()!.apply();
       restoreTransitions();
-      const out: CodeSnapshotPayload = {
-        storyId: payload.storyId,
-        snapshot: single,
-        modeSwitch: {
-          requested: [modeA, modeB],
-          applied: false,
-          mechanism: switching.mechanism,
-          reason: [
-            switching.reason ?? "Not performed — no verified theme switch was found.",
-            problem,
-          ]
+      // The consumer saw a canvas still painted dark after the class was gone.
+      // Computed values were right; the paint had not caught up.
+      forceReflow();
+    };
+
+    type Outcome =
+      | { kind: "dual"; snapA: CodeSnapshot; snapB: CodeSnapshot; children: ChildSnapshotEntry[]; mechanism: string }
+      | {
+          kind: "single";
+          snapshot: CodeSnapshot;
+          children: ChildSnapshotEntry[];
+          mode: string | undefined;
+          mechanism: string;
+          reason: string;
+        };
+
+    const snapshotWithTokens = (): CodeSnapshot => {
+      const snap = snapshotElement(target);
+      if (payload.tokens) snap.bindings = { ...(snap.bindings ?? {}), ...payload.tokens };
+      return snap;
+    };
+
+    const refuse = (mechanism: string, reason: string): Outcome => ({
+      kind: "single",
+      snapshot: snapshotWithTokens(),
+      children: snapshotChildren(childResolutions),
+      mode: readActiveMode(modeAttribute),
+      mechanism,
+      reason,
+    });
+
+    const runSwitchingPhase = async (): Promise<Outcome> => {
+      // Which mechanism switches this project's theme, and — the part #69 was
+      // missing — whether it actually does. `modeAttribute` (or the newer
+      // `modeSwitch`) still wins when declared; with nothing declared, class and
+      // attribute forms are tried and the one that moves a computed colour is used.
+      const { spec: declared, problem } = parseModeSwitch({
+        modeSwitch: payload.modeSwitch,
+        // Only forward `modeAttribute` as a declaration when the story actually
+        // set it; the default would otherwise read as an explicit choice and
+        // suppress detection — which is how #69 stayed invisible.
+        ...(payload.modeAttribute ? { modeAttribute: payload.modeAttribute } : {}),
+      });
+      const switching = await resolveModeSwitch({
+        hosts,
+        evidence,
+        readStyles: readComputed,
+        modes: [modeA, modeB],
+        declared,
+        flush: waitForStyleFlush,
+      });
+      if (abandoned) throw new Error("abandoned");
+
+      if (!switching.changed || !switching.spec) {
+        // One rendered state, not two. Snapshot it once and say the mode
+        // comparison did not happen. The alternative — two identical snapshots
+        // merged into a "both modes" report — is the false pass v0.0.41 removed.
+        return refuse(
+          switching.mechanism,
+          [switching.reason ?? "Not performed — no verified theme switch was found.", problem]
             .filter((s): s is string => s !== undefined)
             .join(" "),
-        },
+        );
+      }
+
+      // Two passes, each measuring the code side in its own mode. The code-side
+      // re-snapshot is why this needs no second channel round trip: both modes are
+      // captured while the preview already holds the rendered story, so a bulk run
+      // pays one request per story whether or not both modes are asked for.
+      phase = `measuring "${modeA}"`;
+      undo.push(applyMode(hosts, switching.spec, modeA, modes, { forceReflow }));
+      await waitForStyleFlush();
+      if (abandoned) throw new Error("abandoned");
+      // The evidence, read at the same moment as the snapshot — not during an
+      // earlier probe. This is what makes "the mode had settled" a claim about
+      // the values actually being compared (#78).
+      const settledA = fingerprint(evidence, readComputed);
+      const snapA = snapshotWithTokens();
+      const childrenA = snapshotChildren(childResolutions);
+
+      phase = `measuring "${modeB}"`;
+      undo.push(applyMode(hosts, switching.spec, modeB, modes, { forceReflow }));
+      await waitForStyleFlush();
+      if (abandoned) throw new Error("abandoned");
+      const settledB = fingerprint(evidence, readComputed);
+      const snapB = snapshotWithTokens();
+      const childrenB = snapshotChildren(childResolutions);
+
+      if (settledA === settledB) {
+        // The mechanism was verified, yet the two passes read the same document.
+        // Deliberately checked on the document-level evidence, never on the
+        // story's own rows: a component that renders identically in both modes
+        // while Figma holds two values is a real dark-mode drift, and refusing
+        // there would discard the finding this feature exists to make.
+        return refuse(
+          switching.mechanism,
+          staleModeReason({ modeA, modeB, mechanism: switching.mechanism }),
+        );
+      }
+
+      attachChildMode(childrenA, childrenB, modeB);
+      return {
+        kind: "dual",
+        snapA,
+        snapB,
+        children: childrenA,
+        mechanism: switching.mechanism,
       };
-      if (activeMode) out.mode = activeMode;
-      if (payload.args) out.args = payload.args;
-      if (payload.target) out.target = payload.target;
-      if (payload.bulk) out.bulk = true;
-      if (singleChildren.length > 0) out.childSnapshots = singleChildren;
-      channel.emit(EVENTS.CodeSnapshot, out);
-      return;
+    };
+
+    let outcome: Outcome;
+    try {
+      // A ceiling inside the preview, before any snapshot leaves it. The server's
+      // budget cannot help here — it only starts once a snapshot arrives — so
+      // without this the panel ceiling is the only guard and the user gets "no
+      // reply" instead of a cause.
+      outcome = await withBudget(runSwitchingPhase(), {
+        budgetMs: MODE_SWITCH_PHASE_BUDGET_MS,
+        message: `mode-switch phase exceeded ${MODE_SWITCH_PHASE_BUDGET_MS}ms`,
+        onExpired: () => {
+          // Stop the abandoned phase from mutating the document after we restore.
+          abandoned = true;
+        },
+      });
+    } catch {
+      const spentPhase = phase;
+      restoreDocument();
+      outcome = {
+        kind: "single",
+        snapshot: snapshotWithTokens(),
+        children: snapshotChildren(childResolutions),
+        mode: readActiveMode(modeAttribute),
+        mechanism: spentPhase,
+        reason: switchUnavailableReason(spentPhase, `${MODE_SWITCH_PHASE_BUDGET_MS}ms`),
+      };
     }
 
-    // Two passes, each measuring the code side in its own mode. The code-side
-    // re-snapshot is why this needs no second channel round trip: both modes are
-    // captured while the preview already holds the rendered story, so a bulk run
-    // pays one request per story whether or not both modes are asked for.
-    const restoreA = applyMode(hosts, switching.spec, modeA, modes);
-    await waitForStyleFlush();
-    const snapA = snapshotElement(target);
-    if (payload.tokens) snapA.bindings = { ...(snapA.bindings ?? {}), ...payload.tokens };
-    const childrenA = snapshotChildren(childResolutions);
+    // Restore before emitting, always. Measurements are already taken, and the
+    // user is looking at this story.
+    restoreDocument();
 
-    const restoreB = applyMode(hosts, switching.spec, modeB, modes);
-    await waitForStyleFlush();
-    const snapB = snapshotElement(target);
-    if (payload.tokens) snapB.bindings = { ...(snapB.bindings ?? {}), ...payload.tokens };
-    const childrenB = snapshotChildren(childResolutions);
-
-    // Restore, innermost first, so the story is left in the theme the user had.
-    restoreB.apply();
-    restoreA.apply();
-    restoreTransitions();
-
-    attachChildMode(childrenA, childrenB, modeB);
-
-    const out: CodeSnapshotPayload = {
-      storyId: payload.storyId,
-      snapshot: snapA,
-      mode: modeA,
-      additionalSnapshots: [{ mode: modeB, snapshot: snapB }],
-      modeSwitch: {
-        requested: [modeA, modeB],
-        applied: true,
-        mechanism: switching.mechanism,
-      },
-    };
+    const out: CodeSnapshotPayload =
+      outcome.kind === "dual"
+        ? {
+            storyId: payload.storyId,
+            snapshot: outcome.snapA,
+            mode: modeA,
+            additionalSnapshots: [{ mode: modeB, snapshot: outcome.snapB }],
+            modeSwitch: {
+              requested: [modeA, modeB],
+              applied: true,
+              mechanism: outcome.mechanism,
+            },
+          }
+        : {
+            storyId: payload.storyId,
+            snapshot: outcome.snapshot,
+            ...(outcome.mode ? { mode: outcome.mode } : {}),
+            modeSwitch: {
+              requested: [modeA, modeB],
+              applied: false,
+              mechanism: outcome.mechanism,
+              reason: outcome.reason,
+            },
+          };
     if (payload.args) out.args = payload.args;
     if (payload.target) out.target = payload.target;
     // Relayed so the server knows whether this was a bulk run's story or a
     // deliberate single check (which must not be answered from a cache).
     if (payload.bulk) out.bulk = true;
-    if (childrenA.length > 0) out.childSnapshots = childrenA;
+    if (outcome.children.length > 0) out.childSnapshots = outcome.children;
     channel.emit(EVENTS.CodeSnapshot, out);
     return;
   }

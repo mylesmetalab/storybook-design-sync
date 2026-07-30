@@ -177,14 +177,27 @@ export interface ModeSwitchRestore {
  * shadcn consumer has `.dark` and *no* class for light, so switching to light
  * means removing `.dark` — adding a harmless `.light` alongside costs nothing and
  * supports consumers who do name both.
+ *
+ * **Restore puts back the captured `class` attribute verbatim** (issue #78), it
+ * does not reconstruct it from the mode names it happens to know about. The
+ * starter's root class was empty, so a reconstruction looked correct there and
+ * would have quietly destroyed `class="theme-brand dark"` or a framework's
+ * `class="js"` on any consumer that has one. A drift check must leave the document
+ * exactly as it found it: this is a read-only tool holding a write for ~100ms.
+ *
+ * `forceReflow` is invoked after restoring. The consumer showed a canvas still
+ * painted dark after the class was gone — computed values were correct, the paint
+ * had not caught up — so the restore ends by making the browser do the work.
  */
 export function applyMode(
   hosts: ModeSwitchHosts,
   spec: ModeSwitchSpec,
   mode: string,
   allModes: readonly string[],
+  opts: { forceReflow?: () => void } = {},
 ): ModeSwitchRestore {
   const el = hosts[spec.on];
+  const finish = (): void => opts.forceReflow?.();
   if (spec.kind === "attribute") {
     const previous = el.getAttribute(spec.attribute);
     el.setAttribute(spec.attribute, mode);
@@ -192,18 +205,131 @@ export function applyMode(
       apply: () => {
         if (previous === null) el.removeAttribute(spec.attribute);
         else el.setAttribute(spec.attribute, previous);
+        finish();
       },
     };
   }
-  const had = allModes.filter((m) => el.classList.contains(m));
+  // The whole attribute, exactly as the consumer's app wrote it.
+  const previousClass = el.getAttribute("class");
   el.classList.remove(...allModes);
   el.classList.add(mode);
   return {
     apply: () => {
-      el.classList.remove(...allModes);
-      if (had.length > 0) el.classList.add(...had);
+      if (previousClass === null) el.removeAttribute("class");
+      else el.setAttribute("class", previousClass);
+      finish();
     },
   };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Flushing
+ * ------------------------------------------------------------------------- */
+
+/**
+ * How long to wait for a frame callback before proceeding without one.
+ * One frame at 60Hz is ~16ms; 32ms is two, comfortably past a real paint.
+ */
+export const STYLE_FLUSH_FALLBACK_MS = 32;
+
+/**
+ * Wait for the browser to settle style and layout after a theme change.
+ *
+ * **This function exists in this shape because of issue #78.** It used to be two
+ * nested `requestAnimationFrame`s and nothing else. Instrumenting the live
+ * consumer found:
+ *
+ *     document.visibilityState  →  "hidden"
+ *     requestAnimationFrame     →  never fired (3s probe, top frame and iframe)
+ *     setTimeout                →  fired
+ *
+ * A hidden document does not run frame callbacks — a backgrounded tab, an
+ * inactive window, an automated session. So the promise never settled and the
+ * whole check parked on the first flush, before any comparison, upstream of every
+ * budget: the server's budget cannot start, because no snapshot is ever sent, and
+ * the user got the panel's generic "no reply after 65s".
+ *
+ * A frame callback is a nice-to-have; never waiting forever is not. So the frame
+ * is *raced* against a timer, and whichever arrives first wins. The timer path
+ * loses nothing that matters: every measurement here goes through
+ * `getComputedStyle`, which recalculates style synchronously on read, and the
+ * reflow is forced explicitly.
+ */
+export function createStyleFlusher(deps: {
+  /** Frame callback, when the environment has one. */
+  raf?: ((cb: () => void) => void) | undefined;
+  setTimer: (cb: () => void, ms: number) => void;
+  /** Read a layout property to force a synchronous reflow. */
+  forceReflow?: (() => void) | undefined;
+  fallbackMs?: number | undefined;
+}): () => Promise<void> {
+  const fallbackMs = deps.fallbackMs ?? STYLE_FLUSH_FALLBACK_MS;
+  return () =>
+    new Promise<void>((resolve) => {
+      deps.forceReflow?.();
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      // Two frames means "a paint has happened". Requested when available, never
+      // depended on.
+      if (deps.raf) deps.raf(() => deps.raf!(done));
+      deps.setTimer(done, fallbackMs);
+    });
+}
+
+/**
+ * How long the whole theme-switching phase may take before the check gives up on
+ * two modes and reports one honestly. A ceiling here — inside the preview, before
+ * any snapshot is sent — is what turns #78's silent 65s park into a stated cause.
+ */
+export const MODE_SWITCH_PHASE_BUDGET_MS = 6_000;
+
+/**
+ * The reason a **Both modes** check fell back to one mode because the switching
+ * phase itself did not finish. Distinct from `noChangeReason`: there the switch
+ * worked and moved nothing, here we never got a verdict at all.
+ */
+export function switchUnavailableReason(phase: string, spent: string): string {
+  return (
+    `Not performed — the theme switch did not complete within ${spent} while ${phase}, so ` +
+    `the story was measured in one mode only. The rows below describe one mode and no ` +
+    `two-mode comparison was made. This is a bug in the addon, not your project: please ` +
+    `report it with your theming setup.`
+  );
+}
+
+/**
+ * The switching mechanism was verified, but the two measurement passes read the
+ * same document state — so the mode had not actually settled when the snapshots
+ * were taken, and both may describe one mode.
+ *
+ * This is the gap #78 identified in the v0.0.41 verification: detection asserted
+ * that *something changed* during a probe, not that the change had **settled at
+ * the moment the compared snapshots were read**. So the evidence is re-read at
+ * snapshot time, on the same elements, and a pair that cannot be told apart is
+ * refused rather than compared.
+ *
+ * Deliberately based on the document-level evidence (which includes `<html>` and
+ * `<body>`), NOT on whether the story's own rows differ: a component that renders
+ * identically in both modes while Figma holds two different values is a **real
+ * dark-mode drift**, and refusing there would throw away the finding this feature
+ * exists to make.
+ */
+export function staleModeReason(opts: {
+  modeA: string;
+  modeB: string;
+  mechanism: string;
+}): string {
+  return (
+    `Not performed — ${opts.mechanism} was verified to switch this project's theme, but the ` +
+    `two measurement passes read the same computed state, so "${opts.modeB}" had not settled ` +
+    `when its snapshot was taken. Both snapshots may describe "${opts.modeA}", and comparing ` +
+    `them would report a two-mode check over one rendered state. Re-run the check; if it ` +
+    `persists, please report it.`
+  );
 }
 
 /* ------------------------------------------------------------------------- *

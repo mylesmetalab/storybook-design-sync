@@ -48,6 +48,13 @@ import { buildFixPrompt, buildBulkFixPrompt, type FixPromptInput } from "./fix-p
 import { driftedSiblings } from "./property-families.js";
 import { runBulkCheck, type WarmOutcome } from "./bulk-run.js";
 import { coverageLabel, summarizeBulk, type BulkSummaryRow } from "./bulk-summary.js";
+import { panelBudgetMs, panelTimeoutMessage } from "./check-budget.js";
+import {
+  cacheNoticeText,
+  staleVersionMessage,
+  versionIsStale,
+  versionLabel,
+} from "./version-notice.js";
 
 const STORY_RENDERED_EVENT = "storyRendered";
 
@@ -318,6 +325,8 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     target?: string;
     tokens?: Record<string, string>;
     modeAttribute?: string;
+    /** How this project switches theme — see `mode-switch.ts` (#69). */
+    modeSwitch?: unknown;
     pipelineUrl?: string;
   }>("designSync", {}) ?? {};
   const [args] = useArgs();
@@ -343,9 +352,23 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   // In-flight pre-loop warm-up for a Check-all run (one at a time by construction
   // — the run is sequential).
   const pendingWarmRef = useRef<((payload: WarmCacheDonePayload) => void) | null>(null);
+  /**
+   * The panel's own ceiling on an explicit check (#74). The server has one too;
+   * this is the outer guarantee that "Checking…" always ends, including when the
+   * server never answers at all — a wedged dev server, a dropped channel reply, a
+   * preview that emitted no snapshot. Cleared by whichever reply arrives first.
+   */
+  const checkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearCheckTimer = useCallback((): void => {
+    if (checkTimerRef.current !== null) {
+      clearTimeout(checkTimerRef.current);
+      checkTimerRef.current = null;
+    }
+  }, []);
 
   const emit = useChannel({
     [EVENTS.DriftReport]: (payload: DriftReportPayload) => {
+      clearCheckTimer();
       const pending = pendingResolversRef.current;
       if (pending && pending.storyId === payload.report.storyId) {
         pending.resolve(payload.report);
@@ -355,6 +378,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       setState({ loading: false, report: payload.report, error: null });
     },
     [EVENTS.DriftError]: (payload: DriftErrorPayload) => {
+      clearCheckTimer();
       const pending = pendingResolversRef.current;
       if (pending && pending.storyId === payload.storyId) {
         pending.reject(payload.message);
@@ -436,10 +460,15 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     [emit, designSync.pipelineUrl],
   );
 
-  // Reset when the story changes.
+  // Reset when the story changes. The pending-check timer goes with it: it belongs
+  // to the check for the story we just left.
   useEffect(() => {
     setState(initialState);
-  }, [storyId]);
+    clearCheckTimer();
+  }, [storyId, clearCheckTimer]);
+
+  // …and on unmount, so a closed panel leaves no timer to fire into a dead state.
+  useEffect(() => clearCheckTimer, [clearCheckTimer]);
 
   // Ask the server for the config surface (apply gating, fileKey,
   // codeTarget paths) once the channel is up.
@@ -459,10 +488,29 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       warnTokensDeprecated(storyId);
     }
     if (designSync.modeAttribute) payload.modeAttribute = designSync.modeAttribute;
+    // Relayed even when absent-shaped, so the preview can tell "declared" from
+    // "detect it" — the distinction #69 turned on.
+    if (designSync.modeSwitch !== undefined) payload.modeSwitch = designSync.modeSwitch;
     if (args && Object.keys(args).length > 0) payload.args = args as Record<string, unknown>;
     if (dualMode) payload.dualMode = true;
+    clearCheckTimer();
+    const budgetMs = panelBudgetMs(dualMode);
+    checkTimerRef.current = setTimeout(() => {
+      checkTimerRef.current = null;
+      setState({ loading: false, report: null, error: panelTimeoutMessage(budgetMs) });
+    }, budgetMs);
     emit(EVENTS.CheckDriftRequest, payload);
-  }, [emit, storyId, designSync.target, designSync.tokens, designSync.modeAttribute, args, dualMode]);
+  }, [
+    emit,
+    storyId,
+    designSync.target,
+    designSync.tokens,
+    designSync.modeAttribute,
+    designSync.modeSwitch,
+    args,
+    dualMode,
+    clearCheckTimer,
+  ]);
 
   /**
    * Ask the server to pre-fetch what the whole run shares (Figma variables + file
@@ -525,7 +573,11 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     await runBulkCheck<DriftReport>({
       storyIds: stories.map((s) => s.storyId),
       warm: warmSharedCaches,
-      check: (storyId) => checkOneStory(storyId, sbApi, emit, pendingResolversRef, { dualMode }),
+      check: (storyId) =>
+        checkOneStory(storyId, sbApi, emit, pendingResolversRef, {
+          dualMode,
+          ...(designSync.modeSwitch !== undefined ? { modeSwitch: designSync.modeSwitch } : {}),
+        }),
       // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
       budgetMs: dualMode ? 16000 : 8000,
       onBudgetExpired: () => {
@@ -551,9 +603,14 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
             rows: prev.rows.map((r, j) => {
               if (j !== i) return r;
               if (outcome.report) {
+                // A report whose Figma side was partly unreadable is NOT done
+                // (#73). Its rows are shown — they are real — but it does not
+                // count as checked and it never renders as a tick.
+                const incomplete = outcome.report.incomplete;
                 return {
                   ...r,
-                  status: "done",
+                  status: incomplete ? "incomplete" : "done",
+                  ...(incomplete ? { incompleteReason: incomplete.reason } : {}),
                   durationMs: outcome.durationMs,
                   ...countRows(outcome.report),
                   report: outcome.report,
@@ -693,7 +750,14 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         >
           {bulk?.running ? "Running…" : "Check all"}
         </button>
-        <label style={styles.checkboxLabel}>
+        <label
+          style={styles.checkboxLabel}
+          title={
+            "Snapshot the story in both modes and compare each against its own Figma mode value. " +
+            "The switch is verified: if flipping the theme changes nothing on screen, the panel " +
+            "says the comparison was not performed rather than comparing one mode twice."
+          }
+        >
           <input
             type="checkbox"
             checked={dualMode}
@@ -702,8 +766,26 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
           Both modes
         </label>
         {storyId && <span style={styles.storyId}>{storyId}</span>}
+        {/* Which addon this Storybook is actually running (#62). The panel knew
+            this number all along and said nothing, so an upgraded checkout could
+            be read through a stale bundle for an hour. */}
+        {configInfo?.addonVersion && (
+          <span
+            style={styles.version}
+            title={`design-sync ${versionLabel(configInfo.addonVersion)} — the version this Storybook process loaded at startup.`}
+          >
+            {versionLabel(configInfo.addonVersion)}
+          </span>
+        )}
       </div>
 
+      {/* The tell that a restart is needed. Loud, because every report in the
+          session is coming from the older code. */}
+      {versionIsStale(configInfo?.addonVersion, configInfo?.installedVersion) && (
+        <div style={styles.error}>
+          {staleVersionMessage(configInfo!.addonVersion!, configInfo!.installedVersion!)}
+        </div>
+      )}
       {configInfo?.error && (
         <div style={styles.error}>
           Configuration error: {configInfo.error}
@@ -1050,12 +1132,51 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
           {report.timing && (
             <> · {report.timing.totalMs}ms (fetch {report.timing.figmaFetchMs}ms · {report.timing.cacheHits} cache hits / {report.timing.cacheMisses} misses)</>
           )}
+          {/* What the persistent cache did. A version-mismatch wipe used to be
+              silent, and silence looks exactly like a clean cold run (#62). */}
+          {cacheNoticeText(report.cacheStatus) && (
+            <> · cache: {cacheNoticeText(report.cacheStatus)}</>
+          )}
         </span>
       </h3>
+
+      {/* Part of what this report covers could not be READ from Figma (#73). It
+          goes above everything, in error styling, and says plainly that the rows
+          below are not a verdict: a rate-limited story used to show a tick with
+          five children uncompared, and then cache that tick. */}
+      {report.incomplete && (
+        <div style={styles.error}>
+          <strong>Incomplete — {report.incomplete.reason}</strong>
+          <div style={styles.muted}>
+            {report.incomplete.detail} Not cached, so re-running will retry. The rows
+            below are real; the silences are not results.
+          </div>
+        </div>
+      )}
+
+      {/* The two-mode comparison was asked for and did not happen (#69). Reported
+          rather than papered over — the failure this replaces was a ticked
+          checkbox above a report that compared one mode twice. */}
+      {report.modeComparison && !report.modeComparison.performed && (
+        <div style={styles.error}>
+          <strong>
+            Both modes ({report.modeComparison.requested.join(" / ")}) was not compared
+          </strong>
+          <div style={styles.muted}>{report.modeComparison.reason}</div>
+        </div>
+      )}
+
       <div style={styles.legend}>
         <span>
           <strong>Value</strong> — does it look right today (px, color match)?
         </span>
+        {/* Said on the success path too: a reader who ticked the box deserves to
+            know which mechanism produced the second state. */}
+        {report.modeComparison?.performed && (
+          <span style={styles.muted}>
+            Both modes compared via {report.modeComparison.mechanism}.
+          </span>
+        )}
       </div>
 
       {/* The scanner declined to derive bindings and the reason is actionable
@@ -1708,7 +1829,7 @@ function checkOneStory(
     reject: (err: string) => void;
     storyId: string;
   } | null>,
-  opts: { dualMode?: boolean } = {},
+  opts: { dualMode?: boolean; modeSwitch?: unknown } = {},
 ): Promise<DriftReport> {
   return new Promise<DriftReport>((resolve, reject) => {
     if (!sbApi) {
@@ -1728,6 +1849,10 @@ function checkOneStory(
       // from the active story's parameters, so we don't need to pass them.
       const payload: CheckDriftRequestPayload = { storyId };
       if (opts.dualMode) payload.dualMode = true;
+      // The story's own declared mechanism, read from the story we just navigated
+      // to. Without it, a bulk dual-mode run would fall back to detection on a
+      // project that had already told us how it themes.
+      if (opts.modeSwitch !== undefined) payload.modeSwitch = opts.modeSwitch;
       // This is one story of a Check-all run: the engine's caches are what make
       // the run affordable (one variables fetch for every story instead of one
       // per story, which hits Figma's rate limits). A single explicit check
@@ -2130,6 +2255,19 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
                       </span>
                     );
                   })()}
+                {r.status === "incomplete" && (
+                  // Never a tick. The rows are real, the coverage isn't, and the
+                  // summary counts this separately from checked (#73).
+                  <span
+                    style={{ color: "#92610a", fontWeight: 600 }}
+                    title={
+                      (r.incompleteReason ?? "Part of this story could not be read from Figma.") +
+                      "\n\nNot cached — re-running will retry."
+                    }
+                  >
+                    ⚠ incomplete — Figma unread
+                  </span>
+                )}
                 {r.status === "error" && r.timedOut && (
                   // Said plainly, because the summary no longer counts it as
                   // checked: this story contributed nothing to the numbers.
@@ -2184,13 +2322,23 @@ function buildMarkdownReport(bulk: BulkState): string {
   const skippedChildren = bulk.rows.flatMap((r) =>
     unresolvedChildBindings(r.report?.children).map((c) => ({ storyId: r.storyId, child: c })),
   );
+  // Stories whose Figma side was partly unreadable (#73), and stories where a
+  // requested two-mode comparison did not happen (#69). Both are shortfalls in
+  // what the run covered, so they must appear even when nothing drifted —
+  // "No drift detected" over them is the claim this release exists to stop.
+  const incompleteStories = bulk.rows.filter((r) => r.report?.incomplete);
+  const unmatchedModes = bulk.rows.filter(
+    (r) => r.report?.modeComparison && !r.report.modeComparison.performed,
+  );
 
   if (
     driftedStories.length === 0 &&
     advisoryStories.length === 0 &&
     flaggedStories.length === 0 &&
     errorStories.length === 0 &&
-    skippedChildren.length === 0
+    skippedChildren.length === 0 &&
+    incompleteStories.length === 0 &&
+    unmatchedModes.length === 0
   ) {
     lines.push(`No drift detected.`);
     return lines.join("\n");
@@ -2240,6 +2388,32 @@ function buildMarkdownReport(bulk: BulkState): string {
     lines.push("");
     for (const { storyId, child } of skippedChildren) {
       lines.push(`- \`${storyId}\` · \`${child.selector}\` — ${child.message ?? child.status}`);
+    }
+    lines.push("");
+  }
+  if (incompleteStories.length > 0) {
+    lines.push(`## Incomplete — Figma could not be read`);
+    lines.push("");
+    lines.push(
+      `These stories produced rows, but part of what they cover could not be read from Figma, so ` +
+        `they are not clean results and are not counted as checked. Nothing was cached; re-running retries.`,
+    );
+    lines.push("");
+    for (const row of incompleteStories) {
+      lines.push(`- \`${row.storyId}\` — ${row.report!.incomplete!.reason}`);
+    }
+    lines.push("");
+  }
+  if (unmatchedModes.length > 0) {
+    lines.push(`## Both modes — not compared`);
+    lines.push("");
+    lines.push(
+      `A two-mode comparison was requested for these stories and did not happen. Their rows ` +
+        `describe one mode.`,
+    );
+    lines.push("");
+    for (const row of unmatchedModes) {
+      lines.push(`- \`${row.storyId}\` — ${row.report!.modeComparison!.reason ?? "not performed"}`);
     }
     lines.push("");
   }
@@ -2396,6 +2570,13 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
   },
   storyId: { color: "#7a7a7a", fontFamily: "monospace" },
+  /** Running addon version, pushed to the right of the header (#62). */
+  version: {
+    marginLeft: "auto",
+    color: "#7a7a7a",
+    fontFamily: "monospace",
+    fontSize: 11,
+  },
   storyLink: { color: "#1f2937", textDecoration: "none" },
   checkboxLabel: { display: "flex", alignItems: "center", gap: 4, color: "#525252", fontSize: 12 },
   applyButtons: { display: "flex", flexDirection: "column", gap: 4 },

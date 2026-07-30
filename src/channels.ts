@@ -72,6 +72,17 @@ export interface CheckDriftRequestPayload {
   tokens?: Record<string, string>;
   /** Element attribute (on `<html>`) that carries the active mode name. */
   modeAttribute?: string;
+  /**
+   * How this project switches theme, from `parameters.designSync.modeSwitch`.
+   * `"class"` / `"attribute"`, or the object form
+   * `{ kind, attribute?, on? }` — see `mode-switch.ts` for the accepted shapes.
+   *
+   * Exists because `modeAttribute` cannot express a class-based mechanism at all:
+   * `setAttribute` can't set a class, and Tailwind's `.dark` convention is what
+   * most consumers of this addon use (issue #69). Left unset, the preview detects
+   * the mechanism and verifies it actually changes the rendered state.
+   */
+  modeSwitch?: unknown;
   /** Storybook story args at request time (used by the props dimension). */
   args?: Record<string, unknown>;
   /**
@@ -171,6 +182,23 @@ export interface CodeSnapshotPayload {
    * and set `CheckDriftInput.trigger` accordingly. Absent = explicit.
    */
   bulk?: boolean;
+  /**
+   * Present only when the request asked for two modes. Says which mechanism the
+   * preview used to switch theme and **whether it actually changed the rendered
+   * state** — the evidence the dual-mode path had no notion of before issue #69.
+   *
+   * `applied: false` means one rendered state was found where two were requested,
+   * so only `snapshot` is present and the server must not report a two-mode
+   * comparison.
+   */
+  modeSwitch?: {
+    requested: [string, string];
+    applied: boolean;
+    /** e.g. "class `.dark` on <html>", or every mechanism tried when refused. */
+    mechanism: string;
+    /** Why the switch produced nothing. Present when `applied` is false. */
+    reason?: string;
+  };
 }
 
 /**
@@ -239,6 +267,24 @@ export interface ConfigInfoPayload {
   codeTargetPaths: string[];
   /** Present when design-sync.config.json failed to load or validate. */
   error?: string;
+  /**
+   * The version of the addon **this Storybook process is running** — read from the
+   * package's own `package.json` when the server module was first loaded, which is
+   * when the dev server started.
+   *
+   * Shown in the panel header (issue #62). A running Storybook keeps serving the
+   * bundle it started with, so after an upgrade the panel can report an older
+   * version's rows against a newer checkout with nothing in the UI to say so. It
+   * cost an hour of debugging three already-fixed bugs; the only tell was
+   * `"version": 3` inside `.design-sync/cache.json`.
+   */
+  addonVersion?: string;
+  /**
+   * The version currently on disk, re-read at request time. When it differs from
+   * `addonVersion`, the package was updated while Storybook was running and the
+   * process is a version behind — restart it.
+   */
+  installedVersion?: string;
 }
 
 /**

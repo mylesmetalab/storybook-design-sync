@@ -23,6 +23,9 @@ import { getAutoScan, getAutoTokenMap } from "./auto-tokens.js";
 import { lookupBindings } from "./scan-css.js";
 import { resolveComponentBindings } from "./tailwind-components.js";
 import { componentNameFromStoryId } from "./fix-prompt.js";
+import { versionInfo } from "./addon-version.js";
+import { checkTimeoutMessage, explicitBudgetMs } from "./check-budget.js";
+import { withBudget } from "./bulk-run.js";
 
 /**
  * Storybook 10 server channel. Registered via the addon's preset.
@@ -56,6 +59,13 @@ function getEngine(name: string, fileKey: string, ctx: EngineContext): Engine {
 
 export async function registerServerChannel(channel: ChannelLike): Promise<ChannelLike> {
   channel.on(EVENTS.ConfigRequest, async () => {
+    // Versions are reported whether or not the config loads: "which addon am I
+    // running" is exactly the question a broken config makes urgent (#62).
+    const versions = await versionInfo();
+    const versionFields = {
+      ...(versions.loaded !== undefined ? { addonVersion: versions.loaded } : {}),
+      ...(versions.installed !== undefined ? { installedVersion: versions.installed } : {}),
+    };
     try {
       const config = await loadConfig();
       const payload: ConfigInfoPayload = {
@@ -67,6 +77,7 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         // glob-string shorthand, which then shipped into fix prompts as a file
         // named `undefined`. See `config.ts`.
         codeTargetPaths: config.codeTargetPaths,
+        ...versionFields,
       };
       channel.emit(EVENTS.ConfigInfo, payload);
     } catch (err: unknown) {
@@ -76,6 +87,7 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         fileKey: "",
         codeTargetPaths: [],
         error: message,
+        ...versionFields,
       };
       channel.emit(EVENTS.ConfigInfo, payload);
     }
@@ -189,8 +201,17 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
   });
 
   channel.on(EVENTS.CodeSnapshot, async (payload: unknown) => {
-    const { storyId, snapshot, mode, args, additionalSnapshots, target, childSnapshots, bulk } =
-      payload as CodeSnapshotPayload;
+    const {
+      storyId,
+      snapshot,
+      mode,
+      args,
+      additionalSnapshots,
+      target,
+      childSnapshots,
+      bulk,
+      modeSwitch,
+    } = payload as CodeSnapshotPayload;
     try {
       // Each snapshot carries its own mode, so each gets its own resolution —
       // a `dark:` class applies in the dark pass and not the light one.
@@ -281,26 +302,35 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       });
       if (childTargets.length > 0) baseInput.children = childTargets;
 
+      const dualMode = Boolean(additionalSnapshots && additionalSnapshots.length > 0);
+
+      const runCheck = (): Promise<DriftReport> =>
+        runModePasses({
+          engine,
+          baseInput,
+          mode,
+          additionalSnapshots,
+          childTargets,
+          childSnapshots,
+        });
+
+      // A ceiling on an explicit check, so the panel always leaves "Checking…"
+      // (#74). Bulk stories are already budgeted by `runBulkCheck` in the manager;
+      // budgeting them again here would race two timers for one story and report
+      // whichever fired first.
       let report: DriftReport;
-      if (additionalSnapshots && additionalSnapshots.length > 0) {
-        const reports: Array<{ mode: string; report: DriftReport }> = [];
-        const primary = await engine.checkDrift(baseInput);
-        reports.push({ mode: mode ?? "primary", report: primary });
-        for (const extra of additionalSnapshots) {
-          const extraInput: import("./engines/types.js").CheckDriftInput = {
-            ...baseInput,
-            snapshot: extra.snapshot,
-            mode: extra.mode,
-          };
-          if (childTargets.length > 0) {
-            extraInput.children = childTargetsForMode(childTargets, childSnapshots, extra.mode);
-          }
-          reports.push({ mode: extra.mode, report: await engine.checkDrift(extraInput) });
-        }
-        report = mergeReports(reports);
+      if (bulk) {
+        report = await runCheck();
       } else {
-        report = await engine.checkDrift(baseInput);
+        const budgetMs = explicitBudgetMs(dualMode);
+        report = await withBudget(runCheck(), {
+          budgetMs,
+          message: checkTimeoutMessage(budgetMs),
+        });
       }
+
+      const modeComparison = describeModeComparison(modeSwitch, dualMode);
+      if (modeComparison) report.modeComparison = modeComparison;
 
       annotateClassHints(report, autoBindings.classes);
       if (autoBindings.advisory) {
@@ -317,6 +347,89 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
   });
 
   return channel;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Mode passes
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Run the engine once per mode the preview snapshotted, and merge.
+ *
+ * **One engine pass per (mode, code snapshot) pair.** Issue #69 claimed the code
+ * side was snapshotted once and only Figma gained mode values; it isn't — the
+ * preview captures the rendered story separately in each mode and sends both, and
+ * each pass here compares that mode's *code* snapshot against that mode's *Figma*
+ * value. The bug was upstream: the theme switch didn't work on a class-themed
+ * project, so the two snapshots were identical and the two passes measured the
+ * same state. Fixing the switch is what makes these passes mean anything, which is
+ * why the preview now refuses to send two snapshots it can't tell apart.
+ *
+ * Extracted from the channel handler so that invariant is testable with a fake
+ * engine instead of a live Figma file.
+ */
+export async function runModePasses(opts: {
+  engine: Pick<import("./engines/index.js").Engine, "checkDrift">;
+  baseInput: import("./engines/types.js").CheckDriftInput;
+  /** Mode of `baseInput.snapshot`. */
+  mode: string | undefined;
+  additionalSnapshots:
+    | Array<{ mode: string; snapshot: import("./engines/types.js").CodeSnapshot }>
+    | undefined;
+  childTargets: ChildTarget[];
+  childSnapshots: ChildSnapshotEntry[] | undefined;
+}): Promise<DriftReport> {
+  const { engine, baseInput, mode, additionalSnapshots, childTargets, childSnapshots } = opts;
+  if (!additionalSnapshots || additionalSnapshots.length === 0) {
+    return engine.checkDrift(baseInput);
+  }
+  const reports: Array<{ mode: string; report: DriftReport }> = [];
+  const primary = await engine.checkDrift(baseInput);
+  reports.push({ mode: mode ?? "primary", report: primary });
+  for (const extra of additionalSnapshots) {
+    const extraInput: import("./engines/types.js").CheckDriftInput = {
+      ...baseInput,
+      snapshot: extra.snapshot,
+      mode: extra.mode,
+    };
+    if (childTargets.length > 0) {
+      extraInput.children = childTargetsForMode(childTargets, childSnapshots, extra.mode);
+    }
+    reports.push({ mode: extra.mode, report: await engine.checkDrift(extraInput) });
+  }
+  return mergeReports(reports);
+}
+
+/**
+ * Turn the preview's mode-switch outcome into the report's `modeComparison`.
+ *
+ * Returns undefined when two modes were never requested: the field is a statement
+ * about a *request*, and minting one for every single-mode check would make "not
+ * performed" the normal state and drain the word of meaning.
+ *
+ * `applied && dualMode` is deliberately an AND. Either half being false means one
+ * rendered state, and a report over one state must not say two were compared —
+ * that is the whole of #69.
+ */
+export function describeModeComparison(
+  modeSwitch: CodeSnapshotPayload["modeSwitch"],
+  dualMode: boolean,
+): DriftReport["modeComparison"] {
+  if (!modeSwitch) return undefined;
+  const performed = modeSwitch.applied && dualMode;
+  return {
+    performed,
+    requested: modeSwitch.requested,
+    ...(modeSwitch.mechanism ? { mechanism: modeSwitch.mechanism } : {}),
+    ...(performed
+      ? {}
+      : {
+          reason:
+            modeSwitch.reason ??
+            `Not performed — the preview reported one snapshot for a two-mode request, so ` +
+              `there was a single rendered state to measure.`,
+        }),
+  };
 }
 
 /* ------------------------------------------------------------------------- *
@@ -650,7 +763,7 @@ type ChildBindingReportList = NonNullable<DriftReport["children"]>;
  *
  * The merged report's `mode` field is the joined list of modes ("light+dark").
  */
-function mergeReports(entries: Array<{ mode: string; report: DriftReport }>): DriftReport {
+export function mergeReports(entries: Array<{ mode: string; report: DriftReport }>): DriftReport {
   if (entries.length === 0) {
     throw new Error("[design-sync] mergeReports called with no entries");
   }
@@ -729,5 +842,36 @@ function mergeReports(entries: Array<{ mode: string; report: DriftReport }>): Dr
   };
   const children = mergeChildReports(entries);
   if (children) result.children = children;
+  // Unread in either mode is unread for the merged report. Dropping it because
+  // the *other* pass read fine would let a rate-limited dark pass be cached and
+  // counted as checked — the exact shape of #73, one layer up.
+  const incomplete = mergeIncomplete(entries.map((e) => e.report));
+  if (incomplete) result.incomplete = incomplete;
+  const cacheStatus = entries.map((e) => e.report.cacheStatus).find((c) => c !== undefined);
+  if (cacheStatus) result.cacheStatus = cacheStatus;
   return result;
+}
+
+/**
+ * Union the per-mode `incomplete` records. Targets are deduplicated (the same
+ * child failing in both modes is one gap, not two) and the longest retry-after
+ * wins, so the panel quotes a wait that is actually long enough.
+ */
+export function mergeIncomplete(
+  reports: readonly DriftReport[],
+): DriftReport["incomplete"] {
+  const present = reports.map((r) => r.incomplete).filter((i) => i !== undefined);
+  if (present.length === 0) return undefined;
+  if (present.length === 1) return present[0];
+  const targets = [...new Set(present.flatMap((i) => i!.targets))];
+  const retryAfterMs = present
+    .map((i) => i!.retryAfterMs)
+    .filter((ms): ms is number => ms !== undefined)
+    .reduce<number | undefined>((max, ms) => (max === undefined || ms > max ? ms : max), undefined);
+  return {
+    reason: present[0]!.reason,
+    targets,
+    detail: [...new Set(present.map((i) => i!.detail))].join(" "),
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+  };
 }

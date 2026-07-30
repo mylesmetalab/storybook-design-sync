@@ -163,11 +163,84 @@ export interface ChildBindingReport {
   rowCount?: number;
 }
 
+/**
+ * Set when part of what this report claims to cover **could not be read from
+ * Figma** — a rate limit, a network failure, an HTTP error on the nodes or
+ * variables endpoint. Its presence means the report is not a verdict: absence of
+ * drift here is absence of evidence (issue #73).
+ *
+ * Deliberately NOT used for a comparison that legitimately did not apply, or for
+ * a declared child whose selector matched nothing: those are findings about the
+ * consumer's code or registry, they are stable across runs, and they are already
+ * reported per child. This field is only for "we could not look".
+ *
+ * Consequences wherever it is set, all of them load-bearing:
+ *   - the report is **never persisted** to `.design-sync/cache.json`, so the next
+ *     run retries instead of replaying (`cache.ts`);
+ *   - the bulk row's terminal state is `incomplete`, not `done`, and the summary
+ *     counts it separately from checked (`bulk-summary.ts`);
+ *   - the panel says so above the table.
+ */
+export interface ReportIncomplete {
+  /** Short, human phrase for a header or a table cell. */
+  reason: string;
+  /**
+   * What could not be read — `"root"`, `"file variables"`, or a declared child's
+   * CSS selector. Never empty when `incomplete` is present.
+   */
+  targets: string[];
+  /** Longest `Retry-After` Figma asked for, when it supplied one. */
+  retryAfterMs?: number;
+  /** The full failure text, including the retry advice. */
+  detail: string;
+}
+
+/**
+ * Whether the two-mode comparison the user asked for actually happened.
+ *
+ * Present only on a report produced with **Both modes** ticked. `performed:
+ * false` means the preview could not make the rendered story change appearance
+ * between the two modes, so there was one rendered state, not two — issue #69,
+ * where an attribute-based switch on a class-themed project produced two
+ * byte-identical passes and a run that reported a completed two-mode comparison.
+ *
+ * A single-mode report carries no `modeComparison` at all: the field says
+ * something about a *request* for two modes, and inventing one for every check
+ * would make "not performed" the normal state.
+ */
+export interface ModeComparison {
+  performed: boolean;
+  /** The two modes requested, in order. */
+  requested: [string, string];
+  /** How the preview switched theme, e.g. "class `.dark` on <html>". */
+  mechanism?: string;
+  /** Why the comparison did not happen. Always set when `performed` is false. */
+  reason?: string;
+}
+
+/** What the persistent cache did, surfaced so silence isn't mistaken for a cold run. */
+export interface CacheStatus {
+  /**
+   * Entries found on disk and discarded because an older addon wrote them
+   * (`CACHE_VERSION` mismatch). Silence here is indistinguishable from a clean
+   * cold start, which is what cost a wrong baseline in issue #62.
+   */
+  discardedByVersion?: number;
+  /** Set when this report was deliberately not written to the cache, and why. */
+  notPersisted?: string;
+}
+
 export interface DriftReport {
   storyId: string;
   nodeId: string;
   dimensions: DimensionDiff[];
   generatedAt: string;
+  /** Present when something this report covers could not be read from Figma. */
+  incomplete?: ReportIncomplete;
+  /** Present only when the check was asked for two modes. */
+  modeComparison?: ModeComparison;
+  /** Persistent-cache bookkeeping worth showing (discards, refusals). */
+  cacheStatus?: CacheStatus;
   /**
    * Present only when the registry entry declared `children`. Absent for every
    * legacy entry, so nothing downstream changes for them.

@@ -17,6 +17,13 @@ import {
   type ChildBindingDeclaration,
   type ChildElementResolution,
 } from "./child-bindings.js";
+import {
+  applyMode,
+  parseModeSwitch,
+  resolveModeSwitch,
+  type ModeSwitchElement,
+  type ModeSwitchHosts,
+} from "./mode-switch.js";
 
 const SNAPSHOT_PROPERTIES = [
   // Box / background
@@ -389,6 +396,43 @@ function attachChildMode(
   }
 }
 
+/**
+ * The elements whose computed styles count as evidence that a theme switch
+ * landed. The story root and its bound children first — they are what the report
+ * is about — then `<body>` and `<html>`, which catch a theme that works but whose
+ * effect on this particular component is nil.
+ */
+function modeEvidence(target: HTMLElement, children: readonly ChildElementResolution[]): Element[] {
+  const out: Element[] = [target];
+  for (const child of children) if (child.kind === "found") out.push(child.element);
+  if (document.body) out.push(document.body);
+  out.push(document.documentElement);
+  return out;
+}
+
+function readComputed(el: unknown): Record<string, string> {
+  const cs = window.getComputedStyle(el as Element);
+  const out: Record<string, string> = {};
+  for (const prop of [
+    "background-color",
+    "color",
+    "border-top-color",
+    "border-bottom-color",
+    "box-shadow",
+    "outline-color",
+  ]) {
+    out[prop] = cs.getPropertyValue(prop).trim();
+  }
+  return out;
+}
+
+/** `<html>` and `<body>` as the mode-switch module's minimal element shape. */
+function modeHosts(): ModeSwitchHosts {
+  const html = document.documentElement as unknown as ModeSwitchElement;
+  const body = (document.body ?? document.documentElement) as unknown as ModeSwitchElement;
+  return { html, body };
+}
+
 channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) => {
   const resolution = resolveStoryRoot({
     doc: document,
@@ -420,28 +464,88 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     declarations.length > 0 ? resolveChildElements(target, declarations) : [];
 
   if (payload.dualMode) {
-    const [modeA, modeB] = payload.dualModes ?? ["light", "dark"];
-    const root = document.documentElement;
-    const original = root.getAttribute(modeAttribute);
+    const modes = payload.dualModes ?? ["light", "dark"];
+    const [modeA, modeB] = modes;
+    const hosts = modeHosts();
+    const evidence = modeEvidence(target, childResolutions);
     const restoreTransitions = suspendTransitions();
 
-    // Pass A
-    root.setAttribute(modeAttribute, modeA);
+    // Which mechanism switches this project's theme, and — the part #69 was
+    // missing — whether it actually does. `modeAttribute` (or the newer
+    // `modeSwitch`) still wins when declared; with nothing declared, class and
+    // attribute forms are tried and the one that moves a computed colour is used.
+    const { spec: declared, problem } = parseModeSwitch({
+      modeSwitch: payload.modeSwitch,
+      // Only forward `modeAttribute` as a declaration when the story actually set
+      // it; the default would otherwise read as an explicit choice and suppress
+      // detection — which is how #69 stayed invisible.
+      ...(payload.modeAttribute ? { modeAttribute: payload.modeAttribute } : {}),
+    });
+    const switching = await resolveModeSwitch({
+      hosts,
+      evidence,
+      readStyles: readComputed,
+      modes: [modeA, modeB],
+      declared,
+      flush: waitForStyleFlush,
+    });
+
+    if (!switching.changed || !switching.spec) {
+      // One rendered state, not two. Snapshot it once and say the mode comparison
+      // did not happen. The alternative — two identical snapshots merged into a
+      // "both modes" report — is the false pass this whole release is about.
+      //
+      // Measured before transitions are re-enabled: detection has just restored
+      // the DOM, and re-enabling first would let the restore animate under the
+      // snapshot.
+      const single = snapshotElement(target);
+      if (payload.tokens) single.bindings = { ...(single.bindings ?? {}), ...payload.tokens };
+      const singleChildren = snapshotChildren(childResolutions);
+      const activeMode = readActiveMode(modeAttribute);
+      restoreTransitions();
+      const out: CodeSnapshotPayload = {
+        storyId: payload.storyId,
+        snapshot: single,
+        modeSwitch: {
+          requested: [modeA, modeB],
+          applied: false,
+          mechanism: switching.mechanism,
+          reason: [
+            switching.reason ?? "Not performed — no verified theme switch was found.",
+            problem,
+          ]
+            .filter((s): s is string => s !== undefined)
+            .join(" "),
+        },
+      };
+      if (activeMode) out.mode = activeMode;
+      if (payload.args) out.args = payload.args;
+      if (payload.target) out.target = payload.target;
+      if (payload.bulk) out.bulk = true;
+      if (singleChildren.length > 0) out.childSnapshots = singleChildren;
+      channel.emit(EVENTS.CodeSnapshot, out);
+      return;
+    }
+
+    // Two passes, each measuring the code side in its own mode. The code-side
+    // re-snapshot is why this needs no second channel round trip: both modes are
+    // captured while the preview already holds the rendered story, so a bulk run
+    // pays one request per story whether or not both modes are asked for.
+    const restoreA = applyMode(hosts, switching.spec, modeA, modes);
     await waitForStyleFlush();
     const snapA = snapshotElement(target);
     if (payload.tokens) snapA.bindings = { ...(snapA.bindings ?? {}), ...payload.tokens };
     const childrenA = snapshotChildren(childResolutions);
 
-    // Pass B
-    root.setAttribute(modeAttribute, modeB);
+    const restoreB = applyMode(hosts, switching.spec, modeB, modes);
     await waitForStyleFlush();
     const snapB = snapshotElement(target);
     if (payload.tokens) snapB.bindings = { ...(snapB.bindings ?? {}), ...payload.tokens };
     const childrenB = snapshotChildren(childResolutions);
 
-    // Restore
-    if (original === null) root.removeAttribute(modeAttribute);
-    else root.setAttribute(modeAttribute, original);
+    // Restore, innermost first, so the story is left in the theme the user had.
+    restoreB.apply();
+    restoreA.apply();
     restoreTransitions();
 
     attachChildMode(childrenA, childrenB, modeB);
@@ -451,6 +555,11 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
       snapshot: snapA,
       mode: modeA,
       additionalSnapshots: [{ mode: modeB, snapshot: snapB }],
+      modeSwitch: {
+        requested: [modeA, modeB],
+        applied: true,
+        mechanism: switching.mechanism,
+      },
     };
     if (payload.args) out.args = payload.args;
     if (payload.target) out.target = payload.target;

@@ -129,8 +129,12 @@ for binding writes, REST for variable values).
       drift check so subsequent clicks operate on current data.
     - **Preview all (dry-run)** / **Apply for real** bulk actions on the
       Check-all summary.
-- **Both modes** checkbox runs dual-mode comparison; rows where light
-  and dark agree are still fixable.
+- **Both modes** checkbox runs dual-mode comparison: the story is snapshotted
+  once per mode and each snapshot is compared against that mode's Figma value.
+  Rows where light and dark agree are still fixable. The theme switch is
+  verified — if flipping it changes nothing on screen, the panel says the
+  comparison was **not performed** instead of comparing one mode twice. See
+  [`modeSwitch`](#per-story-configuration).
 - Listens for `storybook-design-inspector` `STYLE_UPDATE` events and
   surfaces them in the **Staged edits** panel. The section is part of the
   write surface, so it only renders with `apply: "experimental"` — in
@@ -366,8 +370,25 @@ Fields the addon reads from `parameters.designSync`:
   (`parameters: { designSync: { pipelineUrl: "http://127.0.0.1:7099" } }`)
   if your pipeline runs on a non-default port.
 - `modeAttribute` *(string, default `data-theme`)* — attribute on `<html>`
-  that carries the active theme mode name, used by mode-aware and
-  dual-mode checks.
+  that carries the active theme mode name. Read on every check to resolve
+  mode-aware Figma values, and treated as a declared switching mechanism for
+  **Both modes** when you set it explicitly.
+- `modeSwitch` — how **Both modes** flips the theme. `"class"`, `"attribute"`,
+  or the object form `{ kind: "class" | "attribute", attribute?: string, on?:
+  "html" | "body" }`. Set it when your project themes by class:
+
+  ```ts
+  // Tailwind v4 / shadcn: `@custom-variant dark (&:is(.dark *))`
+  parameters: { designSync: { modeSwitch: { kind: "class", on: "html" } } }
+  ```
+
+  Leave it unset and the preview tries a mode-named class on `<html>` then
+  `<body>`, then `data-theme` / `data-mode` / `data-color-scheme`, and uses
+  whichever actually changes a computed colour. Whether declared or detected, a
+  switch that changes nothing is reported as a mode comparison that did **not**
+  happen (issue [#69]) — the run never compares one mode twice and calls it two.
+  `setAttribute` cannot set a class, which is why `modeAttribute` alone could not
+  cover this.
 - `tokens` — deprecated, see below.
 
 `target` is the only field most stories need. The addon's PostCSS scanner
@@ -422,7 +443,8 @@ state the story renders in, because that is what the snapshot measures:
   `PrimaryDisabled` story reports `background-color → disabled` via
   `data-disabled:bg-disabled`, not `primary`.
 - `dark:` — resolved from the active mode when your stories set one
-  (`modeAttribute`); left unbound when they don't.
+  (`modeAttribute`, or the mode a **Both modes** pass is measuring); left unbound
+  when they don't.
 - breakpoints, `[&_svg]:`, other `data-*`/`aria-*` hooks — unknowable, so the
   property is left unbound rather than answered from the unmodified class.
 
@@ -861,9 +883,11 @@ is undeterminable and nothing is said.
   on drift itself.
 - **Upgrading invalidates the drift cache.** `.design-sync/cache.json` carries a
   schema version, bumped whenever a release changes what a report contains or
-  what its verdicts mean (v0.0.39 added the layout and opacity comparisons). The
-  first check after an upgrade re-fetches rather than replaying a report that
-  predates the new rows.
+  what its verdicts mean (v0.0.39 added the layout and opacity comparisons;
+  v0.0.41 drops the generation that could contain partial passes). The first check
+  after an upgrade re-fetches rather than replaying a report that predates the new
+  rows, and the panel's counters line says how many entries were discarded —
+  silence there used to be indistinguishable from a clean cold run.
 - **A stale preview bundle silently narrows coverage.** The layout comparison
   needs computed `display` in the snapshot, which older preview bundles don't
   send; without it the comparison emits nothing rather than guessing. Restart the
@@ -886,6 +910,59 @@ is undeterminable and nothing is said.
   Tailwind's built-in defaults, and numeric spacing under the `--spacing`
   multiplier (`p-3`, `gap-2`), yield no binding by design — the addon will not
   name a token it cannot verify.
+- **"Both modes" needs a theme switch that visibly works, and says so when it
+  doesn't** ([#69], fixed in v0.0.41). The mechanism is a *class* named for the
+  mode (Tailwind/shadcn `.dark`) or an *attribute*, on `<html>` or `<body>`;
+  declare it with `parameters.designSync.modeSwitch`
+  (`{ kind: "class", on: "html" }`, or `{ kind: "attribute", attribute:
+  "data-theme" }`) or leave it unset and let the preview detect it. Either way it
+  is **verified**: the story is measured in both modes and, if flipping the theme
+  moves no computed colour on the story, its bound children, `<body>` or
+  `<html>`, the report says the mode comparison was **not performed** and shows
+  one mode's rows. Before v0.0.41 the switch was attribute-only, so a
+  class-themed project produced two byte-identical passes and a completed
+  two-mode comparison over one rendered state. Both sides are per-mode: the code
+  snapshot is retaken in each mode and compared against that mode's Figma value.
+  A declared mechanism that produces no change is reported, not silently replaced
+  by one that works — a report against a mechanism you didn't declare is its own
+  kind of wrong.
+- **A story whose Figma side could not be read is `incomplete`, not checked**
+  ([#73], [#74], fixed in v0.0.41). When a node or the file's variables 429s (two
+  `Check all` runs in quick succession will do it), the story is given its own
+  terminal state — never a ✓ — counted separately from `checked` in the coverage
+  line, and **not written to `.design-sync/cache.json`**, so the next run retries
+  instead of replaying it. Before v0.0.41 such a story returned `status: done`
+  with a footnote and that partial report was persisted, so the only recovery was
+  deleting the cache file by hand. A node Figma confirms is *absent* is treated
+  differently: that is a stable finding about the registry, and it stays
+  cacheable. Retry waits are bounded per request and surfaced ("retry in 27s")
+  rather than slept through in silence, and an explicit `Check drift` now has a
+  ceiling (30s, 60s for both modes) so the panel always leaves "Checking…".
+- **A story that exceeds the per-story budget leaves the totals quietly
+  smaller** ([#72]). Coverage reports `timedOut` honestly, but the drift count in
+  the header simply omits that story's rows, so a total compared against a known
+  baseline can differ with no visible cause. The 8s budget sits inside the
+  observed duration range for image-asset stories with five child bindings.
+- **Contract-declared siblings are invisible where a slot is unbound** ([#71]).
+  `contracts/*.spec.json` may record one Figma token driving several slots;
+  drift only compares the slots present in the registry. Fixing the reported row
+  can leave a declared pair split across two values, and nothing in the report
+  says the sibling exists.
+- **The panel reports the version it is running, but cannot reload it** ([#62],
+  reported since v0.0.41). The header shows the addon version this Storybook
+  process loaded, the counters line says how many cache entries an upgrade
+  discarded, and a banner appears when the installed version differs from the
+  running one — the tell that a restart is needed. It remains a *notice*: the
+  running bundle cannot be swapped under a live dev server, so the fix is still
+  to restart Storybook (and clear `node_modules/.cache/storybook` if the manager
+  bundle is cached).
+
+[#62]: https://github.com/mylesmetalab/storybook-design-sync/issues/62
+[#69]: https://github.com/mylesmetalab/storybook-design-sync/issues/69
+[#71]: https://github.com/mylesmetalab/storybook-design-sync/issues/71
+[#72]: https://github.com/mylesmetalab/storybook-design-sync/issues/72
+[#73]: https://github.com/mylesmetalab/storybook-design-sync/issues/73
+[#74]: https://github.com/mylesmetalab/storybook-design-sync/issues/74
 
 ## What this addon is NOT
 

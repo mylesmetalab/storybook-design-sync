@@ -230,6 +230,118 @@ describe("CACHE_VERSION — verdicts written by older rules are discarded", () =
     const cache = new PersistentCache(path);
     await cache.load();
     expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot)).toBeNull();
-    expect(CACHE_VERSION).toBe(4);
+    expect(CACHE_VERSION).toBe(5);
+  });
+
+  /**
+   * Issue #62: `load()` dropped a mismatched cache without a word, and a silent
+   * wipe is indistinguishable from a clean cold run. It cost a wrong baseline —
+   * a panel reporting an older version's rows for an hour, with the only tell
+   * being `"version": 3` inside a file no designer opens.
+   */
+  it("reports how many entries it discarded, so a wipe is not silent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "design-sync-cache-"));
+    dirs.push(dir);
+    const path = join(dir, "cache.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: CACHE_VERSION - 1,
+        fileLastModified: LAST_MODIFIED,
+        stories: {
+          "ui-card--a": { snapshotHash: "x", report: report() },
+          "ui-card--b": { snapshotHash: "y", report: report() },
+          "ui-card--c": { snapshotHash: "z", report: report() },
+        },
+      }),
+      "utf8",
+    );
+    const cache = new PersistentCache(path);
+    await cache.load();
+    expect(cache.status().discardedByVersion).toBe(3);
+  });
+
+  it("reports zero discards on a genuine cold start", async () => {
+    const cache = await freshCache();
+    expect(cache.status().discardedByVersion).toBe(0);
+    expect(cache.status().notPersisted).toBeUndefined();
+  });
+
+  it("reports zero discards when the file is current", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "design-sync-cache-"));
+    dirs.push(dir);
+    const path = join(dir, "cache.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: CACHE_VERSION,
+        fileLastModified: LAST_MODIFIED,
+        stories: { [STORY]: { snapshotHash: "x", report: report() } },
+      }),
+      "utf8",
+    );
+    const cache = new PersistentCache(path);
+    await cache.load();
+    expect(cache.status().discardedByVersion).toBe(0);
+  });
+});
+
+/**
+ * Issue #73. A story whose child nodes 429'd was stored `status: done` with a
+ * footnote and replayed forever: `generatedAt` frozen, byte-identical totals on
+ * every re-run, and no recovery short of deleting the file by hand.
+ *
+ * The engine marks such a report `incomplete`; the cache's job is to refuse it.
+ */
+describe("PersistentCache — a result that rests on unread data is never persisted", () => {
+  const incompleteReport = (): DriftReport => ({
+    ...report(),
+    incomplete: {
+      reason: "5 child bindings could not be read from Figma (rate limited)",
+      targets: ["[data-slot=header]"],
+      detail: "Rate limited by Figma (HTTP 429) — retry in 12s.",
+    },
+  });
+
+  it("refuses to store an incomplete report", async () => {
+    const cache = await freshCache();
+    expect(cache.set(STORY, LAST_MODIFIED, rootSnapshot, incompleteReport())).toBe(false);
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot)).toBeNull();
+  });
+
+  it("says why it refused, so the panel can show it", async () => {
+    const cache = await freshCache();
+    cache.set(STORY, LAST_MODIFIED, rootSnapshot, incompleteReport());
+    expect(cache.status().notPersisted).toContain("rate limited");
+    expect(cache.status().notPersisted).toContain("retry");
+  });
+
+  it("does not evict a previously good entry when it refuses", async () => {
+    const cache = await freshCache();
+    cache.set(STORY, LAST_MODIFIED, rootSnapshot, report());
+    cache.set("ui-card--other", LAST_MODIFIED, rootSnapshot, incompleteReport());
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot)).not.toBeNull();
+  });
+
+  it("writes nothing to disk for an incomplete-only run", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "design-sync-cache-"));
+    dirs.push(dir);
+    const path = join(dir, "cache.json");
+    const cache = new PersistentCache(path);
+    await cache.load();
+    cache.set(STORY, LAST_MODIFIED, rootSnapshot, incompleteReport());
+    await cache.flush();
+    // Nothing was stored, so re-loading finds no entry to replay.
+    const reloaded = new PersistentCache(path);
+    await reloaded.load();
+    expect(reloaded.get(STORY, LAST_MODIFIED, rootSnapshot)).toBeNull();
+  });
+
+  it("still stores a complete report, and clears the refusal note", async () => {
+    const cache = await freshCache();
+    cache.set(STORY, LAST_MODIFIED, rootSnapshot, incompleteReport());
+    expect(cache.set(STORY, LAST_MODIFIED, rootSnapshot, report())).toBe(true);
+    expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot)).not.toBeNull();
+    expect(cache.status().notPersisted).toBeUndefined();
   });
 });

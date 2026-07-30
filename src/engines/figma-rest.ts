@@ -34,6 +34,14 @@ import {
   type FigmaComponentPropertyDefinition,
   type FigmaComponentPropertyValue,
 } from "./component-properties.js";
+import {
+  FigmaRateLimitError,
+  describeFetchFailure,
+  isRateLimitError,
+  isRetryableStatus,
+  parseRetryAfter,
+  retryDecision,
+} from "./rate-limit.js";
 
 const FIGMA_API = "https://api.figma.com/v1";
 
@@ -42,6 +50,24 @@ interface FigmaNodesResponse {
     string,
     { document: FigmaNode; styles?: Record<string, FigmaStyleMeta> } | null
   >;
+}
+
+/**
+ * Why one requested node produced nothing.
+ *
+ *  - `"fetch-failed"` — Figma could not be read (429, 5xx, network). No
+ *    comparison happened and the next attempt may well succeed, so a report
+ *    containing one of these is `incomplete`: not cached, not counted as checked.
+ *  - `"absent"` — Figma answered and the id is not in the file. A stable finding
+ *    about the registry, not a hole in the run.
+ *
+ * Issue #73 was the two being indistinguishable at this boundary.
+ */
+interface NodeFailure {
+  kind: "fetch-failed" | "absent";
+  detail: string;
+  retryAfterMs?: number;
+  rateLimited?: boolean;
 }
 
 /**
@@ -206,13 +232,17 @@ class TtlCache<V> {
  *   - Cap in-flight requests at MAX_CONCURRENT (4).
  *   - On 429 or 5xx, honor `Retry-After` (or fall back to a capped
  *     exponential backoff with jitter), retry up to MAX_RETRIES (3).
- *   - Token-bucket-style: a global rate-limited gate also throttles
- *     to RPS_LIMIT to avoid bursting even within the concurrency cap.
+ *   - **Bound the total sleeping** per request. Beyond that, throw a
+ *     `FigmaRateLimitError` carrying the wait Figma asked for.
+ *
+ * The last rule is issue #74. Four attempts each honouring a 30s `Retry-After`
+ * is over 90 seconds in which this function knows exactly what is wrong and
+ * says nothing; the per-story check that a reviewer reaches for was the one path
+ * with no ceiling on it, so it sat in "Checking…" indefinitely. The policy —
+ * including the "would this wait push us over budget?" decision — lives in
+ * `rate-limit.ts` where it is unit-tested.
  */
 const MAX_CONCURRENT = 4;
-const MAX_RETRIES = 3;
-const RETRY_BASE_MS = 1000;
-const RETRY_MAX_MS = 30_000;
 
 let inflight = 0;
 const waiters: Array<() => void> = [];
@@ -240,52 +270,47 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function throttledFetch(url: string, init: RequestInit): Promise<Response> {
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+/**
+ * `what` names the thing being fetched ("node 2142:11381", "file variables") so a
+ * rate-limit refusal can say which read failed. Purely for wording.
+ */
+async function throttledFetch(
+  url: string,
+  init: RequestInit,
+  what?: string,
+): Promise<Response> {
+  let spentBackoffMs = 0;
+  for (let attempt = 0; ; attempt++) {
     await acquireSlot();
     let res: Response;
     try {
       res = await fetch(url, init);
     } catch (err) {
       releaseSlot();
-      if (attempt === MAX_RETRIES) throw err;
-      await sleep(backoffMs(attempt));
+      const decision = retryDecision({ attempt, retryAfterMs: null, spentBackoffMs });
+      if (decision.action === "give-up") throw err;
+      spentBackoffMs += decision.waitMs;
+      await sleep(decision.waitMs);
       continue;
     }
     releaseSlot();
 
-    if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
-      if (attempt === MAX_RETRIES) return res;
-      const retryAfter = parseRetryAfter(res.headers.get("Retry-After"));
-      const wait = retryAfter ?? backoffMs(attempt);
-      await sleep(wait);
-      continue;
+    if (!isRetryableStatus(res.status)) return res;
+
+    const retryAfterMs = parseRetryAfter(res.headers?.get?.("Retry-After") ?? null);
+    const decision = retryDecision({ attempt, retryAfterMs, spentBackoffMs });
+    if (decision.action === "give-up") {
+      // The status is knowable, the wait is knowable, and waiting it out is what
+      // produced a silent 90-second stall. Fail with both (#74).
+      throw new FigmaRateLimitError({
+        status: res.status,
+        retryAfterMs,
+        ...(what ? { what } : {}),
+      });
     }
-
-    return res;
+    spentBackoffMs += decision.waitMs;
+    await sleep(decision.waitMs);
   }
-  // unreachable — loop returns or throws first
-  throw new Error("throttledFetch exhausted retries");
-}
-
-function parseRetryAfter(header: string | null): number | null {
-  if (!header) return null;
-  const seconds = Number(header);
-  if (Number.isFinite(seconds)) {
-    return Math.min(seconds * 1000, RETRY_MAX_MS);
-  }
-  // HTTP-date form — uncommon from Figma but spec-correct.
-  const ts = Date.parse(header);
-  if (Number.isFinite(ts)) {
-    return Math.min(Math.max(ts - Date.now(), 0), RETRY_MAX_MS);
-  }
-  return null;
-}
-
-function backoffMs(attempt: number): number {
-  const base = Math.min(RETRY_BASE_MS * 2 ** attempt, RETRY_MAX_MS);
-  const jitter = Math.random() * base * 0.25;
-  return base + jitter;
 }
 
 class FigmaRestEngine implements Engine {
@@ -397,7 +422,20 @@ class FigmaRestEngine implements Engine {
 
     const figmaT0 = Date.now();
     const node = await this.fetchNodeWithInheritedBindings(fileKey, nodeId);
-    const variables = await this.fetchLocalVariables(fileKey).catch(() => null);
+    // A variables fetch that FAILED and one that legitimately returns nothing
+    // (a non-Enterprise file, 403/404 — handled inside `fetchLocalVariables`)
+    // both arrive here as `null`, and the consequence is the same either way:
+    // every token-bound property resolves to no Figma value, so nothing can
+    // drift. That is fine when the file has no variables to read and a lie when
+    // we were rate-limited out of reading them — every row silently degrades to
+    // flag-only and the story reports zero drift. So the failure is kept.
+    let variables: FigmaLocalVariablesResponse | null = null;
+    let variablesFailure: unknown;
+    try {
+      variables = await this.fetchLocalVariables(fileKey);
+    } catch (err: unknown) {
+      variablesFailure = err;
+    }
     const figmaFetchMs = Date.now() - figmaT0;
 
     const dimensions: DimensionDiff[] = [];
@@ -429,6 +467,7 @@ class FigmaRestEngine implements Engine {
     // the report — when the registry entry has no `children` key, which is what
     // keeps legacy entries byte-identical.
     let childReports: ChildBindingReport[] | undefined;
+    let childFetchFailures: Array<{ selector: string; failure: NodeFailure }> = [];
     if (input.children && input.children.length > 0) {
       const outcome = await this.diffChildren(
         {
@@ -443,6 +482,7 @@ class FigmaRestEngine implements Engine {
       );
       dimensions.push(...outcome.dimensions);
       childReports = outcome.reports;
+      childFetchFailures = outcome.fetchFailures;
     }
 
     // Reserved kinds — engine fills as flag-only placeholders. `structure` left
@@ -466,7 +506,13 @@ class FigmaRestEngine implements Engine {
     if (activeMode) report.mode = activeMode;
     if (childReports) report.children = childReports;
 
-    // Stash for future short-circuits.
+    // Anything this report claims to cover that could not be READ. Set before the
+    // cache write, because the cache's refusal is keyed on it (#73).
+    const incomplete = summarizeIncomplete(childFetchFailures, variablesFailure);
+    if (incomplete) report.incomplete = incomplete;
+
+    // Stash for future short-circuits. `set` refuses an incomplete report, so a
+    // rate-limited run is retried next time instead of replayed.
     if (this.persistentCache) {
       const fileLastModified = await this.fetchFileLastModified(fileKey).catch(() => "");
       if (fileLastModified) {
@@ -478,6 +524,18 @@ class FigmaRestEngine implements Engine {
           input.children,
           aliasKey,
         );
+      }
+      // Cache bookkeeping worth saying out loud: entries discarded on a version
+      // mismatch (silence there looks exactly like a cold run — #62) and a refusal
+      // to persist this report (#73).
+      const status = this.persistentCache.status();
+      if (status.discardedByVersion > 0 || status.notPersisted !== undefined) {
+        report.cacheStatus = {
+          ...(status.discardedByVersion > 0
+            ? { discardedByVersion: status.discardedByVersion }
+            : {}),
+          ...(status.notPersisted !== undefined ? { notPersisted: status.notPersisted } : {}),
+        };
       }
     }
 
@@ -617,7 +675,7 @@ class FigmaRestEngine implements Engine {
     if (cached) return cached;
 
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/nodes?ids=${encodeURIComponent(nodeId)}`;
-    const res = await throttledFetch(url, { headers: this.headers() });
+    const res = await throttledFetch(url, { headers: this.headers() }, `node ${nodeId}`);
     if (!res.ok) {
       throw new Error(`[design-sync] Figma REST ${res.status} for node ${nodeId}.`);
     }
@@ -641,13 +699,26 @@ class FigmaRestEngine implements Engine {
    * Ids the response doesn't contain are reported back as unreachable rather
    * than thrown: one bad child binding must not abort the whole report, and it
    * must not vanish either.
+   *
+   * Each failure carries **why**, and the distinction is load-bearing (issue #73):
+   *
+   *  - `"fetch-failed"` — we could not read Figma (rate limit, network, HTTP
+   *    error). The comparison did not happen and might well succeed next time, so
+   *    the report is marked `incomplete`, is not cached, and does not count as a
+   *    checked story.
+   *  - `"absent"` — Figma answered, and the node genuinely isn't in the file. That
+   *    is a finding about the registry, stable across runs, already reported per
+   *    child, and legitimately cacheable.
+   *
+   * Collapsing the two is what let a transient 429 be stored as a permanent green
+   * tick.
    */
   private async fetchNodesBatch(
     fileKey: string,
     nodeIds: readonly string[],
-  ): Promise<{ nodes: Map<string, FigmaNode>; unreachable: Map<string, string> }> {
+  ): Promise<{ nodes: Map<string, FigmaNode>; unreachable: Map<string, NodeFailure> }> {
     const nodes = new Map<string, FigmaNode>();
-    const unreachable = new Map<string, string>();
+    const unreachable = new Map<string, NodeFailure>();
     const misses: string[] = [];
     for (const id of new Set(nodeIds)) {
       const cached = this.nodeCache.get(`${fileKey}:${id}`);
@@ -660,14 +731,27 @@ class FigmaRestEngine implements Engine {
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/nodes?ids=${ids}`;
     let res: Response;
     try {
-      res = await throttledFetch(url, { headers: this.headers() });
+      res = await throttledFetch(
+        url,
+        { headers: this.headers() },
+        misses.length === 1 ? `node ${misses[0]}` : `${misses.length} child nodes`,
+      );
     } catch (err: unknown) {
-      const detail = err instanceof Error ? err.message : String(err);
-      for (const id of misses) unreachable.set(id, detail);
+      const failure: NodeFailure = {
+        kind: "fetch-failed",
+        detail: describeFetchFailure(err),
+        ...(isRateLimitError(err) && err.retryAfterMs !== null
+          ? { retryAfterMs: err.retryAfterMs }
+          : {}),
+        ...(isRateLimitError(err) ? { rateLimited: true } : {}),
+      };
+      for (const id of misses) unreachable.set(id, failure);
       return { nodes, unreachable };
     }
     if (!res.ok) {
-      for (const id of misses) unreachable.set(id, `Figma REST ${res.status}`);
+      for (const id of misses) {
+        unreachable.set(id, { kind: "fetch-failed", detail: `Figma REST ${res.status}` });
+      }
       return { nodes, unreachable };
     }
     const data = (await res.json()) as FigmaNodesResponse;
@@ -678,7 +762,10 @@ class FigmaRestEngine implements Engine {
         this.nodeCache.set(`${fileKey}:${id}`, document);
         nodes.set(id, document);
       } else {
-        unreachable.set(id, `no node with that id in file ${fileKey}`);
+        unreachable.set(id, {
+          kind: "absent",
+          detail: `no node with that id in file ${fileKey}`,
+        });
       }
     }
     return { nodes, unreachable };
@@ -709,10 +796,16 @@ class FigmaRestEngine implements Engine {
     variables: FigmaLocalVariablesResponse | null,
     activeMode: string | undefined,
     aliases: TokenAliasMap,
-  ): Promise<{ dimensions: DimensionDiff[]; reports: ChildBindingReport[] }> {
+  ): Promise<{
+    dimensions: DimensionDiff[];
+    reports: ChildBindingReport[];
+    /** Children whose Figma node could not be READ (not merely absent). */
+    fetchFailures: Array<{ selector: string; failure: NodeFailure }>;
+  }> {
     const { fileKey } = ctx;
     const dimensions: DimensionDiff[] = [];
     const reports: ChildBindingReport[] = [];
+    const fetchFailures: Array<{ selector: string; failure: NodeFailure }> = [];
 
     const comparable = children.filter((c) => !c.problem && c.snapshot && c.nodeId);
     const { nodes, unreachable } =
@@ -721,7 +814,7 @@ class FigmaRestEngine implements Engine {
             fileKey,
             comparable.map((c) => c.nodeId),
           )
-        : { nodes: new Map<string, FigmaNode>(), unreachable: new Map<string, string>() };
+        : { nodes: new Map<string, FigmaNode>(), unreachable: new Map<string, NodeFailure>() };
 
     for (const child of children) {
       // Resolution already failed upstream (bad selector, no/ambiguous match,
@@ -746,6 +839,10 @@ class FigmaRestEngine implements Engine {
         node = await this.fetchNodeWithInheritedBindings(fileKey, child.nodeId).catch(() => node!);
       }
       if (!node) {
+        const failure = unreachable.get(child.nodeId);
+        if (failure?.kind === "fetch-failed") {
+          fetchFailures.push({ selector: child.selector, failure });
+        }
         reports.push({
           selector: child.selector,
           nodeId: child.nodeId,
@@ -756,7 +853,10 @@ class FigmaRestEngine implements Engine {
             storyId: ctx.storyId,
             registryPath: ctx.registryPath,
             nodeId: child.nodeId,
-            detail: unreachable.get(child.nodeId),
+            detail: failure?.detail,
+            // A rate limit is not a mis-typed node id, and telling the user to
+            // check the id would send them after the wrong thing.
+            transient: failure?.kind === "fetch-failed",
           }),
           rowCount: 0,
         });
@@ -790,7 +890,7 @@ class FigmaRestEngine implements Engine {
       reports.push(report);
     }
 
-    return { dimensions, reports };
+    return { dimensions, reports, fetchFailures };
   }
 
   /**
@@ -827,7 +927,7 @@ class FigmaRestEngine implements Engine {
     if (cached) return cached;
 
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}/variables/local`;
-    const res = await throttledFetch(url, { headers: this.headers() });
+    const res = await throttledFetch(url, { headers: this.headers() }, "the file's variables");
     if (res.status === 404 || res.status === 403) return null; // not enterprise / no access
     if (!res.ok) {
       throw new Error(`[design-sync] Figma variables ${res.status} for ${fileKey}.`);
@@ -2060,6 +2160,65 @@ function parseStoryVariantSuffix(
     result[key] = joined === "True" ? "true" : joined === "False" ? "false" : joined;
   }
   return result;
+}
+
+/**
+ * Turn the reads that failed into the report's `incomplete` record, or return
+ * undefined when everything this report covers was actually read.
+ *
+ * The verdict this produces is what stops a rate limit becoming a cached green
+ * tick (#73): `incomplete` set means not cached, not counted as checked, and said
+ * out loud in the panel. Only *unread* data qualifies — a node Figma confirms is
+ * absent is a finding, not a hole.
+ */
+export function summarizeIncomplete(
+  childFailures: ReadonlyArray<{ selector: string; failure: NodeFailure }>,
+  variablesFailure: unknown,
+): DriftReport["incomplete"] {
+  if (childFailures.length === 0 && variablesFailure === undefined) return undefined;
+
+  const targets: string[] = [];
+  const details: string[] = [];
+  let retryAfterMs: number | undefined;
+  let rateLimited = false;
+
+  if (variablesFailure !== undefined) {
+    targets.push("the file's variables");
+    details.push(describeFetchFailure(variablesFailure));
+    if (isRateLimitError(variablesFailure)) {
+      rateLimited = true;
+      if (variablesFailure.retryAfterMs !== null) {
+        retryAfterMs = Math.max(retryAfterMs ?? 0, variablesFailure.retryAfterMs);
+      }
+    }
+  }
+
+  const seenDetails = new Set<string>();
+  for (const { selector, failure } of childFailures) {
+    targets.push(selector);
+    if (!seenDetails.has(failure.detail)) {
+      seenDetails.add(failure.detail);
+      details.push(failure.detail);
+    }
+    if (failure.rateLimited) rateLimited = true;
+    if (failure.retryAfterMs !== undefined) {
+      retryAfterMs = Math.max(retryAfterMs ?? 0, failure.retryAfterMs);
+    }
+  }
+
+  const what =
+    childFailures.length > 0 && variablesFailure !== undefined
+      ? `${childFailures.length} child binding${childFailures.length === 1 ? "" : "s"} and the file's variables`
+      : childFailures.length > 0
+        ? `${childFailures.length} child binding${childFailures.length === 1 ? "" : "s"}`
+        : "the file's variables";
+  const cause = rateLimited ? "rate limited by Figma" : "the Figma read failed";
+  return {
+    reason: `${what} could not be read — ${cause}`,
+    targets,
+    detail: details.join(" "),
+    ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+  };
 }
 
 /**

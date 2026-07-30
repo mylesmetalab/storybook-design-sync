@@ -231,6 +231,14 @@ export interface ChildProblemContext {
   detail?: string | undefined;
   /** True when the story root itself matches a selector that found nothing. */
   rootMatches?: boolean | undefined;
+  /**
+   * `node-unreachable` only: the Figma read **failed** (rate limit, network, HTTP
+   * error) rather than Figma confirming the node isn't in the file. The advice is
+   * different and the old wording gave the wrong one — telling a user to re-check
+   * a node id they typed correctly, when the answer is "you were rate limited,
+   * wait N seconds" (issue #73).
+   */
+  transient?: boolean | undefined;
 }
 
 /**
@@ -280,6 +288,18 @@ export function formatChildProblem(ctx: ChildProblemContext): string {
         `the preview bundle is older than the server (restart Storybook).`
       );
     case "node-unreachable":
+      if (ctx.transient) {
+        // The id is fine and the registry is fine; the request failed. Sending
+        // the reader to re-check the node id would waste their time, and (worse)
+        // invite them to "fix" a binding that was never broken.
+        return (
+          `Not compared — the Figma read for ${where} failed, so node ` +
+          `\`${ctx.nodeId ?? "?"}\` was never looked at` +
+          (ctx.detail ? `: ${ctx.detail}` : ".") +
+          ` The selector resolved and the binding is fine — nothing to change here. ` +
+          `Re-run the check once the wait is over; this result is not cached, so it will retry.`
+        );
+      }
       return (
         `Not compared — Figma node \`${ctx.nodeId ?? "?"}\` declared for ${where} could not be read` +
         (ctx.detail ? ` (${ctx.detail})` : "") +

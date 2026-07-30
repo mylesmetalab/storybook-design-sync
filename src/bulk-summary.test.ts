@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { coverageLabel, summarizeBulk, type BulkSummaryRow } from "./bulk-summary.js";
+import {
+  coverageLabel,
+  runHasGaps,
+  summarizeBulk,
+  type BulkSummaryRow,
+} from "./bulk-summary.js";
 import { EMPTY_STATUS_COUNTS } from "./row-triage.js";
 
 const row = (over: Partial<BulkSummaryRow> = {}): BulkSummaryRow => ({
@@ -84,5 +89,80 @@ describe("summarizeBulk — checked, timed out and errored are different things"
     expect(s.checked).toBe(0);
     expect(s.avgMs).toBe(0);
     expect(s.complete).toBe(false);
+  });
+});
+
+/**
+ * Issue #73. A story whose child nodes 429'd produced a report, so it was `done`,
+ * so it was counted as checked — `18/18 stories checked` over a run where one
+ * story compared 2 properties out of ~37 and showed a tick. An incomplete story is
+ * a fourth outcome, not a variety of success.
+ */
+describe("summarizeBulk — a story with unread Figma data is not checked", () => {
+  const incomplete = (over: Partial<BulkSummaryRow> = {}): BulkSummaryRow =>
+    row({
+      status: "incomplete",
+      incompleteReason: "5 child bindings could not be read — rate limited by Figma",
+      match: 2,
+      ...over,
+    });
+
+  it("counts it separately and keeps it out of the coverage claim", () => {
+    const s = summarizeBulk([incomplete(), row({ match: 15 }), row({ match: 15 })]);
+    expect(s.stories).toBe(3);
+    expect(s.checked).toBe(2);
+    expect(s.incomplete).toBe(1);
+    expect(s.errored).toBe(0);
+    expect(s.timedOut).toBe(0);
+    expect(coverageLabel(s)).toBe("2/3 stories checked · 1 incomplete (Figma unread)");
+  });
+
+  it("still totals the rows it did produce — they are real", () => {
+    const s = summarizeBulk([incomplete({ match: 2, drift: 1 }), row({ match: 10 })]);
+    expect(s.match).toBe(12);
+    expect(s.drift).toBe(1);
+  });
+
+  it("is terminal — the run is complete with one in it", () => {
+    const s = summarizeBulk([incomplete(), row()]);
+    expect(s.pending).toBe(0);
+    expect(s.complete).toBe(true);
+  });
+
+  it("is not counted in the average's denominator", () => {
+    const s = summarizeBulk([
+      row({ durationMs: 1000 }),
+      row({ durationMs: 2000 }),
+      incomplete({ durationMs: 6000 }),
+    ]);
+    // Same rule the timed-out case follows: the run really spent the time, so it
+    // stays in the total, but only stories that completed divide it.
+    expect(s.totalEngineMs).toBe(9000);
+    expect(s.avgMs).toBe(4500);
+  });
+
+  it("names all three shortfalls at once when a run manages it", () => {
+    const s = summarizeBulk([
+      row(),
+      incomplete(),
+      row({ status: "error", timedOut: true }),
+      row({ status: "error", error: "Not registered." }),
+    ]);
+    expect(coverageLabel(s)).toBe(
+      "1/4 stories checked · 1 timed out · 1 incomplete (Figma unread) · 1 errored",
+    );
+  });
+});
+
+describe("runHasGaps — whether the numbers describe the whole registry", () => {
+  it("is false only for a run where every story was checked", () => {
+    expect(runHasGaps(summarizeBulk([row(), row()]))).toBe(false);
+  });
+
+  it("is true for an incomplete, a timeout, an error, or an unfinished run", () => {
+    expect(runHasGaps(summarizeBulk([row(), row({ status: "incomplete" })]))).toBe(true);
+    expect(runHasGaps(summarizeBulk([row(), row({ status: "error", timedOut: true })]))).toBe(true);
+    expect(runHasGaps(summarizeBulk([row(), row({ status: "error" })]))).toBe(true);
+    expect(runHasGaps(summarizeBulk([row(), row({ status: "pending" })]))).toBe(true);
   });
 });

@@ -35,6 +35,13 @@ import type { ChildTarget, CodeSnapshot } from "./engines/types.js";
  *    comparisons. A v0.0.38 entry has neither, so a Card whose Figma direction
  *    is Vertical while the code lays out in a row would keep reporting clean off
  *    the cache — exactly the silent false-clean this release exists to remove.
+ *  - **5** (v0.0.41): entries written before issue #73 was fixed can be *partial
+ *    passes* — a story whose child nodes 429'd was stored with `status: done` and
+ *    a footnote, and replayed on every subsequent run, so the only recovery was
+ *    deleting this file by hand. Those entries are indistinguishable from real
+ *    ones by inspection (the missing children left no trace in the report's
+ *    dimensions), so the whole generation is dropped. `set` now refuses a report
+ *    marked `incomplete`, which is what stops new ones being written.
  *  - **4** (v0.0.40): three changes to which rows exist at all. Typography,
  *    `color` and `copy` are no longer compared on an element that owns no text; a
  *    TEXT node no longer gets a `background-color` row; and a fill delivered by a
@@ -43,7 +50,7 @@ import type { ChildTarget, CodeSnapshot } from "./engines/types.js";
  *    Card story and a guaranteed-drift `background-color` on every bound TEXT
  *    node, which is the report this release exists to stop producing.
  */
-export const CACHE_VERSION = 4;
+export const CACHE_VERSION = 5;
 
 export interface CacheFile {
   version: typeof CACHE_VERSION;
@@ -68,6 +75,16 @@ export class PersistentCache {
   private dirty = false;
   /** Debounce concurrent writes — bulk runs hit cache.set N times in a few seconds. */
   private writeTimer: NodeJS.Timeout | null = null;
+  /**
+   * Entries found on disk and thrown away because an older addon wrote them.
+   * Counted rather than discarded silently: a version-mismatch wipe and a genuine
+   * cold start produce identical panels, and telling them apart is the whole of
+   * issue #62's second half. Read once by the first report after a load, so the
+   * number appears where a user is looking.
+   */
+  private discardedByVersion = 0;
+  /** Reports `set` refused to persist, with the reason (issue #73). */
+  private lastRefusal: string | undefined;
 
   constructor(private readonly cachePath: string) {}
 
@@ -78,11 +95,27 @@ export class PersistentCache {
       const parsed = JSON.parse(raw) as Partial<CacheFile>;
       if (parsed.version === CACHE_VERSION && typeof parsed.fileLastModified === "string" && parsed.stories) {
         this.cache = parsed as CacheFile;
+      } else if (parsed.stories && typeof parsed.stories === "object") {
+        // A readable cache from a different schema generation. Dropping it is
+        // correct — its verdicts were produced under other rules — but doing it
+        // without a word is how a stale baseline survives an upgrade.
+        this.discardedByVersion = Object.keys(parsed.stories).length;
       }
     } catch {
       // File missing or unreadable — start fresh.
     }
     this.loaded = true;
+  }
+
+  /**
+   * How many entries the last `load` discarded on a version mismatch, and
+   * whether the most recent `set` was refused. Reported on the DriftReport so it
+   * reaches the panel; see `CacheStatus`.
+   */
+  status(): { discardedByVersion: number; notPersisted?: string } {
+    return this.lastRefusal === undefined
+      ? { discardedByVersion: this.discardedByVersion }
+      : { discardedByVersion: this.discardedByVersion, notPersisted: this.lastRefusal };
   }
 
   /**
@@ -112,6 +145,14 @@ export class PersistentCache {
    * Store a DriftReport. If `fileLastModified` differs from what's cached,
    * everything else is wiped — the file changed, every story is potentially
    * stale.
+   *
+   * **Refuses any report marked `incomplete`** (issue #73). A story whose child
+   * nodes 429'd used to be written here with `status: done` and a footnote, which
+   * made a transient rate limit permanent: every later run hit the cache, replayed
+   * the partial result, never retried the failed fetches, and only deleting
+   * `.design-sync/cache.json` by hand recovered. A result that rests on data we
+   * could not read is not a result to remember — the next run must go and look
+   * again. Returns whether it stored anything, so callers can say what happened.
    */
   set(
     storyId: string,
@@ -120,7 +161,14 @@ export class PersistentCache {
     report: DriftReport,
     children?: readonly ChildTarget[] | undefined,
     configSignature?: string | undefined,
-  ): void {
+  ): boolean {
+    if (report.incomplete) {
+      this.lastRefusal =
+        `Not cached — ${report.incomplete.reason}. The next run will retry ` +
+        `instead of replaying this result.`;
+      return false;
+    }
+    this.lastRefusal = undefined;
     if (this.cache.fileLastModified !== fileLastModified) {
       this.cache = { version: CACHE_VERSION, fileLastModified, stories: {} };
     }
@@ -130,6 +178,7 @@ export class PersistentCache {
     };
     this.dirty = true;
     this.scheduleWrite();
+    return true;
   }
 
   /** Force a synchronous flush. Useful in tests; not normally called. */

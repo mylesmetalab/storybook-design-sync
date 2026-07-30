@@ -13,13 +13,27 @@ import { EMPTY_STATUS_COUNTS, type StatusCounts } from "./row-triage.js";
  *  2. `149 match · 89 drift · 75 flag-only` where 80 of the "drift" were
  *     name-only binding divergences whose values matched. `advisory` and
  *     `unverified` are their own totals — see `row-triage.ts`' `countStatuses`.
+ *
+ * And a third, same shape, from issue #73: a story whose child nodes could not be
+ * fetched produced a report, so it was `done` and counted as checked — a green
+ * tick over five uncompared children. A report that rests on data we could not
+ * read gets its own terminal state (`incomplete`) and its own count. The rule is
+ * the one this file already enforced: **only `checked` may be reported as
+ * coverage.**
  */
 
 export interface BulkSummaryRow extends StatusCounts {
-  status: "pending" | "running" | "done" | "error";
+  /**
+   * `incomplete` — the check produced a report, but part of what it covers could
+   * not be read from Figma (see `DriftReport.incomplete`). Terminal, and
+   * deliberately not `done`: its rows are real, its silences are not.
+   */
+  status: "pending" | "running" | "done" | "incomplete" | "error";
   error?: string | undefined;
   /** True when the row failed by running out of its per-story budget. */
   timedOut?: boolean | undefined;
+  /** Why the report is incomplete. Present when `status === "incomplete"`. */
+  incompleteReason?: string | undefined;
   durationMs: number;
 }
 
@@ -30,6 +44,11 @@ export interface BulkSummary extends StatusCounts {
   checked: number;
   /** Stories that ran out of their per-story budget. Not checked. */
   timedOut: number;
+  /**
+   * Stories that produced a report resting on data that could not be read from
+   * Figma (#73). Not checked: their rows are shown, their coverage is not claimed.
+   */
+  incomplete: number;
   /** Stories that failed for any other reason. Not checked. */
   errored: number;
   /** Stories not yet reached. */
@@ -48,6 +67,7 @@ export function summarizeBulk(rows: readonly BulkSummaryRow[]): BulkSummary {
     stories: rows.length,
     checked: 0,
     timedOut: 0,
+    incomplete: 0,
     errored: 0,
     pending: 0,
     totalEngineMs: 0,
@@ -63,14 +83,32 @@ export function summarizeBulk(rows: readonly BulkSummaryRow[]): BulkSummary {
     totals.unresolved += row.unresolved;
     totals.totalEngineMs += row.durationMs;
     if (row.status === "done") totals.checked++;
+    else if (row.status === "incomplete") totals.incomplete++;
     else if (row.status === "error") {
       if (row.timedOut) totals.timedOut++;
       else totals.errored++;
     } else totals.pending++;
   }
+  // Mean over checked stories only. An incomplete story's duration is in
+  // `totalEngineMs` (the run really did spend it) but dividing by stories that
+  // didn't complete would understate what a full check costs.
   totals.avgMs = totals.checked > 0 ? Math.round(totals.totalEngineMs / totals.checked) : 0;
   totals.complete = totals.pending === 0 && rows.length > 0;
   return totals;
+}
+
+/**
+ * True when the run's numbers describe less than the whole registry. The panel
+ * uses it to decide whether a green header is allowed to read as a clean bill of
+ * health: with any of these present, "no drift" is a statement about a subset.
+ */
+export function runHasGaps(summary: BulkSummary): boolean {
+  return (
+    summary.timedOut > 0 ||
+    summary.incomplete > 0 ||
+    summary.errored > 0 ||
+    summary.pending > 0
+  );
 }
 
 /**
@@ -81,6 +119,10 @@ export function summarizeBulk(rows: readonly BulkSummaryRow[]): BulkSummary {
 export function coverageLabel(summary: BulkSummary): string {
   const parts = [`${summary.checked}/${summary.stories} stories checked`];
   if (summary.timedOut > 0) parts.push(`${summary.timedOut} timed out`);
+  // Named as its own outcome. "Incomplete" is the word for a story that produced
+  // rows but could not read part of what it covers — folding it into `checked`
+  // is precisely how a rate-limited story came to read as a pass (#73).
+  if (summary.incomplete > 0) parts.push(`${summary.incomplete} incomplete (Figma unread)`);
   if (summary.errored > 0) parts.push(`${summary.errored} errored`);
   if (summary.pending > 0) parts.push(`${summary.pending} not yet run`);
   return parts.join(" · ");

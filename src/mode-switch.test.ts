@@ -1,10 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   applyMode,
+  createStyleFlusher,
   describeModeSwitch,
   fingerprint,
   parseModeSwitch,
   resolveModeSwitch,
+  staleModeReason,
+  switchUnavailableReason,
   type ModeSwitchElement,
   type ModeSwitchHosts,
   type ModeSwitchSpec,
@@ -23,21 +26,33 @@ import {
  *     reported as *not performed* rather than compared twice.
  */
 
-/** Minimal stand-in for an element. jsdom resolves neither CSS variables nor
- *  Tailwind variants, so a real DOM could not express these cases. */
+/**
+ * Minimal stand-in for an element. jsdom resolves neither CSS variables nor
+ * Tailwind variants, so a real DOM could not express these cases.
+ *
+ * `classList` and the `class` attribute are backed by **one** store, as on a real
+ * element — the restore path reads the attribute and writes through classList, so
+ * a fake where those two disagree would pass tests the browser fails.
+ */
 function element(): ModeSwitchElement & { classes: Set<string>; attrs: Map<string, string> } {
-  const classes = new Set<string>();
   const attrs = new Map<string, string>();
+  const tokens = (): string[] => (attrs.get("class") ?? "").split(/\s+/).filter(Boolean);
+  const writeTokens = (list: string[]): void => {
+    if (list.length === 0) attrs.delete("class");
+    else attrs.set("class", list.join(" "));
+  };
   return {
-    classes,
+    get classes() {
+      return new Set(tokens());
+    },
     attrs,
     getAttribute: (name) => attrs.get(name) ?? null,
     setAttribute: (name, value) => void attrs.set(name, value),
     removeAttribute: (name) => void attrs.delete(name),
     classList: {
-      add: (...tokens) => tokens.forEach((t) => classes.add(t)),
-      remove: (...tokens) => tokens.forEach((t) => classes.delete(t)),
-      contains: (token) => classes.has(token),
+      add: (...add) => writeTokens([...tokens(), ...add.filter((t) => !tokens().includes(t))]),
+      remove: (...drop) => writeTokens(tokens().filter((t) => !drop.includes(t))),
+      contains: (token) => tokens().includes(token),
     },
   };
 }
@@ -270,5 +285,203 @@ describe("describeModeSwitch", () => {
     expect(describeModeSwitch({ kind: "attribute", attribute: "data-theme", on: "body" })).toBe(
       "attribute `data-theme` on <body>",
     );
+  });
+});
+
+/**
+ * Issue #78, the hang. Measured in a real consumer: with **Both modes** ticked,
+ * the check parked with `<html class="light">` and "Checking…" indefinitely, past
+ * 65s, never reaching the dark pass. Instrumenting the live preview iframe found
+ * the cause and it is not Figma:
+ *
+ *     document.visibilityState  →  "hidden"
+ *     requestAnimationFrame     →  NEVER-FIRED-in-3000ms   (top frame and iframe)
+ *     setTimeout                →  fired
+ *
+ * `requestAnimationFrame` does not fire in a document the browser considers
+ * hidden — a backgrounded tab, an inactive window, an automated session. The
+ * flush helper awaited two nested rAFs, so its promise never settled: the whole
+ * check parked on the FIRST flush, before any comparison, upstream of every
+ * budget (the server's budget can't start, because no snapshot is ever sent).
+ *
+ * v0.0.40 had the same unbounded await in its dual path with 2 calls; v0.0.41
+ * added detection, taking it to ~20, and moved the first one before any snapshot.
+ * So this was latent and is now certain: a designer who switches tabs during a
+ * 7-second check — likely, *because* it is slow — parks it forever.
+ *
+ * A frame callback is a nice-to-have. Never waiting forever is not.
+ */
+describe("style flushing survives a hidden document (#78)", () => {
+  it("resolves via the timer when rAF never fires", async () => {
+    const raf = vi.fn(); // hidden document: registered, never called back
+    const flush = createStyleFlusher({
+      raf,
+      setTimer: (cb, ms) => void setTimeout(cb, ms),
+      fallbackMs: 5,
+    });
+    await expect(flush()).resolves.toBeUndefined();
+    expect(raf).toHaveBeenCalled();
+  });
+
+  it("resolves promptly when rAF does fire, without waiting out the fallback", async () => {
+    const flush = createStyleFlusher({
+      raf: (cb) => cb(),
+      setTimer: (cb, ms) => void setTimeout(cb, ms),
+      fallbackMs: 10_000,
+    });
+    const startedAt = Date.now();
+    await flush();
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+  });
+
+  it("settles exactly once when both the frame and the timer arrive", async () => {
+    let resolutions = 0;
+    const timers: Array<() => void> = [];
+    const flush = createStyleFlusher({
+      raf: (cb) => cb(),
+      setTimer: (cb) => void timers.push(cb),
+      fallbackMs: 0,
+    });
+    await flush().then(() => resolutions++);
+    for (const t of timers) t(); // the late timer must not re-resolve
+    expect(resolutions).toBe(1);
+  });
+
+  it("forces a synchronous reflow before measuring", async () => {
+    // getComputedStyle recalculates style on read, but the reflow is what makes
+    // the *paint* keep up — the starter showed a canvas still painted dark after
+    // the class was gone.
+    const forceReflow = vi.fn();
+    const flush = createStyleFlusher({
+      raf: (cb) => cb(),
+      setTimer: (cb, ms) => void setTimeout(cb, ms),
+      forceReflow,
+      fallbackMs: 5,
+    });
+    await flush();
+    expect(forceReflow).toHaveBeenCalled();
+  });
+
+  it("never leaves a detection sweep unbounded: 6 candidates × 3 flushes terminate", async () => {
+    // The end-to-end property: with rAF dead, a full detection sweep still ends.
+    const flush = createStyleFlusher({
+      raf: vi.fn(),
+      setTimer: (cb, ms) => void setTimeout(cb, ms),
+      fallbackMs: 1,
+    });
+    const w = world("nothing");
+    const result = await resolveModeSwitch({
+      hosts: w.hosts,
+      evidence: [w.storyRoot],
+      readStyles: w.readStyles,
+      modes: ["light", "dark"],
+      flush,
+    });
+    expect(result.changed).toBe(false);
+    expect(result.reason).toContain("Not performed");
+  });
+});
+
+/**
+ * Issue #78, second half: "the mode is cleared, not restored". On the starter the
+ * original root class was empty so the damage was invisible, but a consumer whose
+ * `<html>` carries `class="theme-brand dark"` or a framework's `class="js"` would
+ * have unrelated classes destroyed by running a drift check.
+ */
+describe("restoring the theme puts back exactly what was there (#78)", () => {
+  const spec: ModeSwitchSpec = { kind: "class", on: "html" };
+
+  it("preserves classes that have nothing to do with theming", () => {
+    const w = world("class-html");
+    w.html.setAttribute("class", "theme-brand js dark");
+    const restore = applyMode(w.hosts, spec, "light", ["light", "dark"]);
+    restore.apply();
+    expect(w.html.getAttribute("class")).toBe("theme-brand js dark");
+  });
+
+  it("restores the original string verbatim, not a reconstruction", () => {
+    const w = world("class-html");
+    w.html.setAttribute("class", "dark theme-brand");
+    const a = applyMode(w.hosts, spec, "light", ["light", "dark"]);
+    const b = applyMode(w.hosts, spec, "dark", ["light", "dark"]);
+    b.apply();
+    a.apply();
+    // Order and spacing included: this is what the consumer's app wrote.
+    expect(w.html.getAttribute("class")).toBe("dark theme-brand");
+  });
+
+  it("leaves no class attribute behind when there was none", () => {
+    const w = world("class-html");
+    const restore = applyMode(w.hosts, spec, "dark", ["light", "dark"]);
+    restore.apply();
+    expect(w.html.getAttribute("class")).toBeNull();
+  });
+
+  it("forces a reflow on restore, so the canvas repaints in the restored theme", () => {
+    const w = world("class-html");
+    const forceReflow = vi.fn();
+    const restore = applyMode(w.hosts, spec, "dark", ["light", "dark"], { forceReflow });
+    restore.apply();
+    expect(forceReflow).toHaveBeenCalled();
+  });
+
+  it("still restores an absent attribute for the attribute mechanism", () => {
+    const w = world("attr-html");
+    const restore = applyMode(
+      w.hosts,
+      { kind: "attribute", attribute: "data-theme", on: "html" },
+      "dark",
+      ["light", "dark"],
+    );
+    restore.apply();
+    expect(w.html.getAttribute("data-theme")).toBeNull();
+  });
+});
+
+describe("switchUnavailableReason — a refusal that names the phase (#78)", () => {
+  it("says the switch could not be completed and refuses a verdict", () => {
+    const reason = switchUnavailableReason("detecting the theme mechanism", "4000ms");
+    expect(reason).toContain("Not performed");
+    expect(reason).toContain("detecting the theme mechanism");
+    expect(reason).toContain("4000ms");
+    // The user gets a cause instead of the panel's generic "no reply".
+    expect(reason).toContain("one mode");
+  });
+});
+
+describe("staleModeReason — the evidence is re-read at snapshot time (#78)", () => {
+  it("names the mechanism, the unsettled mode, and refuses the comparison", () => {
+    const reason = staleModeReason({
+      modeA: "light",
+      modeB: "dark",
+      mechanism: "class `.dark` on <html>",
+    });
+    expect(reason).toContain("Not performed");
+    expect(reason).toContain("class `.dark` on <html>");
+    expect(reason).toContain("had not settled");
+    expect(reason).toContain("one rendered state");
+  });
+
+  it("is about the document, not the component — a mode-invariant story is NOT refused", () => {
+    // The trap: a button whose background is a fixed brand colour renders
+    // identically in both modes. If Figma holds two different values for it, that
+    // IS dark-mode drift and is exactly what this feature exists to find.
+    // The settled-ness check therefore reads <html>/<body>, which any real
+    // theming setup moves, and never the story's own rows.
+    const w = world("class-html");
+    const invariantStory = { id: "story-root" };
+    const readInvariant = (el: unknown): Record<string, string> =>
+      el === invariantStory ? { "background-color": "rgb(44, 44, 44)" } : w.readStyles(el);
+
+    const before = fingerprint([invariantStory], readInvariant);
+    w.html.classList.add("dark");
+    const after = fingerprint([invariantStory], readInvariant);
+    expect(after).toBe(before); // the story did not change…
+
+    // …while the document did, which is what the passes compare.
+    w.html.classList.remove("dark");
+    const docBefore = fingerprint([w.hosts.html, w.hosts.body], w.readStyles);
+    w.html.classList.add("dark");
+    expect(fingerprint([w.hosts.html, w.hosts.body], w.readStyles)).not.toBe(docBefore);
   });
 });

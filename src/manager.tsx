@@ -49,6 +49,7 @@ import { driftedSiblings } from "./property-families.js";
 import { runBulkCheck, type WarmOutcome } from "./bulk-run.js";
 import { coverageLabel, summarizeBulk, type BulkSummaryRow } from "./bulk-summary.js";
 import { panelBudgetMs, panelTimeoutMessage } from "./check-budget.js";
+import { createLiveValue } from "./live-value.js";
 import {
   cacheNoticeText,
   staleVersionMessage,
@@ -359,6 +360,26 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
    * preview that emitted no snapshot. Cleared by whichever reply arrives first.
    */
   const checkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * Check-all options read at **run** time, not at capture time.
+   *
+   * Storybook's `useChannel(eventMap, deps = [])` registers this panel's channel
+   * handlers once on mount and never again, so the `RegisteredStories` handler
+   * that starts a bulk run keeps the `runBulk` closure from the first render —
+   * the one where `dualMode` was still `false`. Ticking **Both modes** and
+   * pressing **Check all** therefore ran the whole registry in single mode while
+   * the checkbox said otherwise, and the summary reported a completed run
+   * (issue #78; also the other half of why #69's two runs came back identical).
+   *
+   * Assigned during render on purpose: an effect would land *after* a handler
+   * that fires in the same tick, which is precisely the race being closed.
+   */
+  const liveCheckOptions = useRef(
+    createLiveValue<{ dualMode: boolean; modeSwitch: unknown }>({
+      dualMode: false,
+      modeSwitch: undefined,
+    }),
+  ).current;
   const clearCheckTimer = useCallback((): void => {
     if (checkTimerRef.current !== null) {
       clearTimeout(checkTimerRef.current);
@@ -478,6 +499,10 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
 
   const applyEnabled = applyControlsEnabled(configInfo?.apply);
 
+  // Keep the run-time view of the check options current. One assignment per
+  // render; the box is what a once-registered channel handler reads through.
+  liveCheckOptions.set({ dualMode, modeSwitch: designSync.modeSwitch });
+
   const onCheck = useCallback(() => {
     if (!storyId) return;
     setState({ loading: true, report: null, error: null });
@@ -573,13 +598,16 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     await runBulkCheck<DriftReport>({
       storyIds: stories.map((s) => s.storyId),
       warm: warmSharedCaches,
-      check: (storyId) =>
-        checkOneStory(storyId, sbApi, emit, pendingResolversRef, {
-          dualMode,
-          ...(designSync.modeSwitch !== undefined ? { modeSwitch: designSync.modeSwitch } : {}),
-        }),
+      check: (storyId) => {
+        // Read per story, at run time. See `liveCheckOptions`.
+        const live = liveCheckOptions.get();
+        return checkOneStory(storyId, sbApi, emit, pendingResolversRef, {
+          dualMode: live.dualMode,
+          ...(live.modeSwitch !== undefined ? { modeSwitch: live.modeSwitch } : {}),
+        });
+      },
       // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
-      budgetMs: dualMode ? 16000 : 8000,
+      budgetMs: liveCheckOptions.get().dualMode ? 16000 : 8000,
       onBudgetExpired: () => {
         // Drop the resolver for the abandoned check so a late report can't be
         // mistaken for the next story's.
@@ -630,7 +658,10 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     });
 
     setBulk((prev) => (prev ? { ...prev, running: false, finishedAt: Date.now() } : prev));
-  }, [emit, sbApi, dualMode, warmSharedCaches]);
+    // `dualMode` is deliberately NOT a dependency: it is read through
+    // `liveCheckOptions` at run time, because this callback outlives the render
+    // that a once-registered channel handler captured (#78).
+  }, [emit, sbApi, liveCheckOptions, warmSharedCaches]);
 
   const onCheckAll = useCallback(() => {
     setBulk(null);

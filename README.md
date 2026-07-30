@@ -911,7 +911,7 @@ is undeterminable and nothing is said.
   multiplier (`p-3`, `gap-2`), yield no binding by design — the addon will not
   name a token it cannot verify.
 - **"Both modes" needs a theme switch that visibly works, and says so when it
-  doesn't** ([#69], fixed in v0.0.41). The mechanism is a *class* named for the
+  doesn't** ([#69], fixed in v0.0.41; completion fixed in v0.0.42 — [#78]). The mechanism is a *class* named for the
   mode (Tailwind/shadcn `.dark`) or an *attribute*, on `<html>` or `<body>`;
   declare it with `parameters.designSync.modeSwitch`
   (`{ kind: "class", on: "html" }`, or `{ kind: "attribute", attribute:
@@ -926,6 +926,28 @@ is undeterminable and nothing is said.
   A declared mechanism that produces no change is reported, not silently replaced
   by one that works — a report against a mechanism you didn't declare is its own
   kind of wrong.
+- **Check all honours the Both modes checkbox** ([#78], fixed in v0.0.42). It
+  didn't before: Storybook's `useChannel(eventMap, deps = [])` registers a
+  panel's channel handlers once on mount, so the handler that starts a bulk run
+  held the callback from the first render — the one where the checkbox was still
+  unticked. Ticking it and pressing **Check all** ran the whole registry in
+  single mode and reported a completed run. Together with the switch being
+  attribute-only, this is the second reason #69's "both modes" and "single mode"
+  runs came back byte-identical. Check-all options are now read per story, at run
+  time.
+- **A drift check never waits on a frame callback** ([#78]). Theme switching used
+  to await two nested `requestAnimationFrame`s, and a document the browser
+  considers hidden — a backgrounded tab, an inactive window — never runs them. A
+  **Both modes** check started and then parked indefinitely, leaving the story in
+  the switched theme with transitions suspended. Frame callbacks are now raced
+  against a timer, the switching phase has its own 6s ceiling *inside the
+  preview*, and the document is restored (to the exact `class` attribute it had,
+  not an empty one) and a snapshot always emitted — so the worst case is a stated
+  refusal, never a spinner. Settled-ness is re-checked at snapshot time on
+  `<html>`/`<body>`, not during an earlier probe: if the two passes read the same
+  document state, the comparison is refused rather than reported. That check
+  deliberately ignores the story's own values, because a component that renders
+  identically in both modes while Figma holds two is a real dark-mode drift.
 - **A story whose Figma side could not be read is `incomplete`, not checked**
   ([#73], [#74], fixed in v0.0.41). When a node or the file's variables 429s (two
   `Check all` runs in quick succession will do it), the story is given its own
@@ -963,6 +985,7 @@ is undeterminable and nothing is said.
 [#72]: https://github.com/mylesmetalab/storybook-design-sync/issues/72
 [#73]: https://github.com/mylesmetalab/storybook-design-sync/issues/73
 [#74]: https://github.com/mylesmetalab/storybook-design-sync/issues/74
+[#78]: https://github.com/mylesmetalab/storybook-design-sync/issues/78
 
 ## What this addon is NOT
 

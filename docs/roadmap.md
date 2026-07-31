@@ -167,7 +167,7 @@ CSS-in-JS runtime themes.
 | ----- | ---------------------------------- | -------------------------------------------------------------------- | ------ |
 | P5.1  | Tailwind engine                    | Drift Apply works on a Tailwind-class project, no `.css` files needed. | 2–3d  |
 | P5.2  | CSS-in-JS engine                   | JS AST rewrites styled-components / emotion / vanilla-extract calls. | 3–4d   |
-| P5.3  | Documented setup for new projects  | README walkthrough — install, seed, configure, point pipeline.       | 1d     |
+| ~~P5.3~~ | ~~Documented setup for new projects~~ | ✅ Shipped — v0.0.46, and as a command rather than a walkthrough. `design-sync init` detects the project (Storybook version, Tailwind generation, the `@theme` file, the component directory, the project's own story globs), registers both addons by **merging** into `main.*`, writes a config with `apply: "off"`, gitignores the cache, and copies the six workflow skills where absent. It refuses to invent a `fileKey`, to overwrite anything the user wrote, to generate the inspector's manifest, or to make the token-alignment and `copy` judgements — and it always ends with the steps that remain, numbered and in order, because a partial init reported as success is the failure mode. | 1d |
 | P5.4  | Tokens.json roundtrip              | Watch local tokens file → push value changes back to Figma variables. | 2d    |
 
 ## Totals

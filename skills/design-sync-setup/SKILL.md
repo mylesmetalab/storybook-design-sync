@@ -23,13 +23,24 @@ When run on a project that already has `.claude/skills/`, compare each local ski
 
 ## Steps
 
-### 1. Install
+### 1. Run `design-sync init`
 
 ```bash
-npm install --save-dev "github:mylesmetalab/storybook-design-sync#v0.0.45" "github:mylesmetalab/storybook-design-inspector#v0.2.5"
+npm install --save-dev "github:mylesmetalab/storybook-design-sync#v0.0.46" "github:mylesmetalab/storybook-design-inspector#v0.2.5"
+npx design-sync init --file-key <your Figma file key>
 ```
 
-Add both to `.storybook/main.ts` `addons` array: `"@metalab/storybook-design-sync"`, `"storybook-design-inspector"`.
+Since addon v0.0.46 `init` does every mechanical step: it registers both addons by merging into `main.*` (preserving quote style and indentation), writes `design-sync.config.json` with `apply: "off"`, derives `cssEntries`/`tsxEntries`/`storyGlobs` from the project's real layout — including **which CSS file holds `@theme`**, which is the difference between a working binding dimension and an empty one — gitignores `.design-sync/cache.json`, and copies these six skills into `.claude/skills/` where they are absent.
+
+**Read its output rather than assuming success.** It is built to refuse rather than guess, and what it refuses is what you still have to do:
+
+- **It never invents a `fileKey`.** Pass `--file-key`, answer the prompt, or it writes a loud placeholder.
+- **It never overwrites a user-authored file** — not even with `--force`, which only rewrites its own config. If it can't describe an edit to `main.*` character for character (a comment or a spread in the `addons` array), it prints the snippet instead and says so.
+- **It leaves `copy` unset**, because a written default would read as a decision. Step 2 is where you make it.
+- **It does not generate the inspector's manifest, align tokens, run `register`, or add CI.** Steps 3–6 below.
+- **Exit 0 does not mean "done".** Remaining steps always exist by design; the `NOT DONE` block is the real output.
+
+Re-running is safe and idempotent: it reports what it skipped, keeps the existing config's `fileKey`, and for each skill prints both `revised:` dates and flags a stale local copy **without overwriting it** — an edited convention is yours, and being out of date is better than being silently replaced.
 
 **Upgrading an existing install: bumping the pin is not enough.** `npm install` does not refetch a git dep whose ref moved, and the Storybook manager bundle is built at server start, so a running dev server keeps serving the old addon. After any version change: reinstall the dep by ref, fully restart Storybook, `rm -rf node_modules/.cache/storybook` if the panel still shows the old version, and check the version the panel header prints. It banners on a mismatch with the installed one — treat that banner as "every report in this session is suspect", including the one on screen.
 
@@ -109,7 +120,20 @@ Bind each story to its Figma node id. `registry.json` lives in `.design-sync/` a
 
 Add `npx design-sync audit` to the project's PR checks (whatever CI the project uses). It needs no `FIGMA_PAT`.
 
-**`audit` gates the registry, not drift.** Be explicit with the user about this, because the opposite is the natural assumption: the CLI is `audit`, `register`, `ls`, `export-graph` — there is no `check`. Drift comparison needs rendered DOM and runs only in the Storybook panel, so **CI cannot gate on drift**. What `audit` catches is a story that drifted out of the registry, an unreadable story file, and malformed child-binding shapes.
+**`audit` gates the registry, not drift.** What it catches is a story that drifted out of the registry, an unreadable story file, and malformed child-binding shapes.
+
+**Drift itself can also be gated, since addon v0.0.45:**
+
+```bash
+npx design-sync check            # every registered story
+npx design-sync check --json     # machine-readable, for a report artifact
+```
+
+`check` is not a second implementation — it opens the project's own Storybook preview in headless Chromium, so the same code measures the same DOM against the same engine and triage. It is verified row-for-row identical to a panel **Check all**; that parity is its acceptance test, so re-establish it after any change to the snapshot, engine or triage.
+
+Two prerequisites to state plainly when you wire it up: it needs **`storybook dev` running** (a static build has no server channel, so no engine — `check` cannot audit a deployed static site), and **Playwright**, an optional peer dependency that only `check` requires.
+
+Exit codes are ordered so a gap in coverage can never read as a pass: `0` clean and everything checked · `1` drift with complete coverage · `2` **coverage incomplete** (Figma unread, a timeout, an error, or a mode comparison requested but unverifiable) · `3` could not run. **`2` outranks `1`** — never treat a non-zero exit as merely "drift found" without reading which.
 
 ### 7. Verify end-to-end (mandatory)
 

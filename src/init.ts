@@ -1,5 +1,5 @@
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { glob } from "tinyglobby";
 
@@ -1069,10 +1069,10 @@ export async function applyPlan(
         // The .gitignore append — the only action whose content depends on the
         // file as it is at write time.
         const existing = await readFile(full, "utf8");
-        const sep = existing.endsWith("\n") || existing === "" ? "" : "\n";
+        const gap = existing.endsWith("\n") || existing === "" ? "" : "\n";
         await writeFile(
           full,
-          `${existing}${sep}\n# Design Sync — the drift-report cache is a local derivative.\n` +
+          `${existing}${gap}\n# Design Sync — the drift-report cache is a local derivative.\n` +
             `# .design-sync/registry.json (story ↔ Figma bindings) IS committed.\n` +
             `${CACHE_IGNORE_LINE}\n`,
           "utf8",
@@ -1191,6 +1191,3 @@ export async function runInit(opts: InitOptions, deps: InitDeps = {}): Promise<n
   for (const line of report.lines) log(line);
   return report.exitCode;
 }
-
-/** Unused re-export kept so `relative`/`resolve`/`sep` stay available to tests. */
-export const __pathHelpers = { relative, resolve, sep };

@@ -23,6 +23,7 @@ import {
 } from "./story-discovery.js";
 import { parseCheckArgs, runCheck } from "./check-command.js";
 import { CHECK_EXIT } from "./check-report.js";
+import { INIT_EXIT, parseInitArgs, runInit } from "./init.js";
 
 interface CommonOptions {
   cwd: string;
@@ -51,6 +52,16 @@ async function main(argv: string[]): Promise<number> {
     return cmd ? 0 : 1;
   }
   switch (cmd) {
+    case "init":
+      // Same shape as `check`: a usage error must not be reported as a
+      // half-completed init, so parsing happens inside the try and maps to the
+      // refusal code rather than falling through to the top-level catch.
+      try {
+        return await runInit(parseInitArgs(rest), { promptFileKey: promptForFileKey });
+      } catch (err: unknown) {
+        console.error(err instanceof Error ? err.message : String(err));
+        return INIT_EXIT.Refused;
+      }
     case "audit":
       return audit(parseCommon(rest));
     case "ls":
@@ -77,12 +88,45 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
+/**
+ * Ask for the Figma file key, but only when there is a human to ask.
+ *
+ * Off a TTY this returns undefined immediately, so a scripted or CI run gets the
+ * placeholder plus a loud step-one instead of hanging on stdin forever. The key
+ * is the one thing only the user knows, so it is prompted for or left visibly
+ * blank — never derived.
+ */
+async function promptForFileKey(): Promise<string | undefined> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return undefined;
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log(
+      "\nYour Figma file key is in the file URL: figma.com/design/<FILE_KEY>/…\n" +
+        "Leave blank to write a placeholder and fill it in later.",
+    );
+    const answer = await rl.question("Figma file key: ");
+    return answer.trim() || undefined;
+  } finally {
+    rl.close();
+  }
+}
+
 function printHelp(): void {
   console.log(
     [
       "design-sync — Storybook ↔ Figma drift CLI",
       "",
       "Usage:",
+      "  design-sync init                        Set up the suite in this project: register the addons,",
+      "                                          write design-sync.config.json from what it detects, and",
+      "                                          report every step it could NOT do, in order.",
+      "                                          Never overwrites a file you wrote; safe to re-run.",
+      "                                          --file-key <key> (never guessed), --yes (no prompt),",
+      "                                          --no-skills, --force (rewrite only files init authors),",
+      "                                          --dry-run",
+      "                                          Exit: 0 init did its part · 1 refused, nothing written ·",
+      "                                          2 a write failed",
       "  design-sync check [--url http://localhost:6006]",
       "                                          Run the panel's drift check headlessly against a RUNNING",
       "                                          `storybook dev`, over every registered story.",

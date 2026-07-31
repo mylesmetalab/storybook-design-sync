@@ -49,8 +49,17 @@ import type { ChildTarget, CodeSnapshot } from "./engines/types.js";
  *    unreadable, `unresolved`). A v0.0.39 entry replays twelve fabricated rows per
  *    Card story and a guaranteed-drift `background-color` on every bound TEXT
  *    node, which is the report this release exists to stop producing.
+ *  - **6** (v0.0.43): every entry a **Check all** wrote before issue #80 was
+ *    fixed rests on a request that carried none of the story's context — no
+ *    `args`, so no `cva()` variant resolution; no `target`, so no CSS-scanner
+ *    bindings and a story root found by fallback. Those reports are real reports
+ *    of the wrong thing (three fewer matches and an extra unresolved binding per
+ *    button variant in the consumer we measured), and only a `Check drift` on the
+ *    same story would ever have overwritten one. Explicit entries are unaffected,
+ *    but nothing in a stored entry says which trigger wrote it, so the generation
+ *    goes as a whole.
  */
-export const CACHE_VERSION = 5;
+export const CACHE_VERSION = 6;
 
 export interface CacheFile {
   version: typeof CACHE_VERSION;

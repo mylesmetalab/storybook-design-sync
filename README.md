@@ -890,7 +890,9 @@ is undeterminable and nothing is said.
 - **Upgrading invalidates the drift cache.** `.design-sync/cache.json` carries a
   schema version, bumped whenever a release changes what a report contains or
   what its verdicts mean (v0.0.39 added the layout and opacity comparisons;
-  v0.0.41 drops the generation that could contain partial passes). The first check
+  v0.0.41 drops the generation that could contain partial passes; v0.0.43 drops
+  the generation whose `Check all` entries were written from requests carrying
+  none of the story's context — [#80]). The first check
   after an upgrade re-fetches rather than replaying a report that predates the new
   rows, and the panel's counters line says how many entries were discarded —
   silence there used to be indistinguishable from a clean cold run.

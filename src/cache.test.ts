@@ -230,7 +230,9 @@ describe("CACHE_VERSION — verdicts written by older rules are discarded", () =
     const cache = new PersistentCache(path);
     await cache.load();
     expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot)).toBeNull();
-    expect(CACHE_VERSION).toBe(5);
+    // v0.0.43 (#80): entries a Check all wrote before the bulk path sent the
+    // story's args and target are reports of the wrong thing.
+    expect(CACHE_VERSION).toBe(6);
   });
 
   /**

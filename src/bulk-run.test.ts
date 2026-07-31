@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isTimeoutError, runBulkCheck, timeoutMessage, withBudget } from "./bulk-run.js";
+import {
+  isTimeoutError,
+  planBulkNavigation,
+  runBulkCheck,
+  timeoutMessage,
+  withBudget,
+} from "./bulk-run.js";
 
 /**
  * Issue #56, reproduced as arithmetic.
@@ -247,5 +253,55 @@ describe("withBudget / isTimeoutError", () => {
     expect(isTimeoutError(undefined)).toBe(false);
     expect(isTimeoutError("Storybook API unavailable")).toBe(false);
     expect(isTimeoutError("Pipeline unreachable (timed out)")).toBe(false);
+  });
+});
+
+/**
+ * The story on screen was the one story a run could not check.
+ *
+ * Reproduced from the live measurement that found it: comparing the panel's
+ * `Check all` against `design-sync check` over the reference consumer's ten
+ * registered Button stories, the panel reported `9/10 stories checked · 1 timed
+ * out` and the timed-out story was `ui-button--primary` — the story the panel
+ * happened to be showing. The nine they shared were identical row for row, so the
+ * loop was fine and the navigation was not: `selectStory` on the current story is
+ * answered with STORY_UNCHANGED and no re-render, so the wait for STORY_RENDERED
+ * ran the whole 8s budget over a story that was rendered the entire time.
+ */
+describe("planBulkNavigation — the story already on screen", () => {
+  it("marks the current story as already rendered and every other story as not", () => {
+    expect(planBulkNavigation(["a", "b", "c"], "b")).toEqual([
+      { storyId: "a", alreadyRendered: false },
+      { storyId: "b", alreadyRendered: true },
+      { storyId: "c", alreadyRendered: false },
+    ]);
+  });
+
+  it("navigates to every story when nothing is on screen", () => {
+    // A headless run before its first page load, and a panel whose state has no
+    // story yet. Neither may assume something is rendered.
+    for (const current of [undefined, ""]) {
+      expect(planBulkNavigation(["a", "b"], current).every((s) => !s.alreadyRendered)).toBe(true);
+    }
+  });
+
+  it("does not match a story that is not in the run", () => {
+    expect(planBulkNavigation(["a", "b"], "z").some((s) => s.alreadyRendered)).toBe(false);
+  });
+
+  it("claims the current story at most once", () => {
+    // A registry binding the same id twice would otherwise skip navigation on the
+    // second visit, by which point the loop has moved on and it really does need
+    // navigating back to.
+    expect(planBulkNavigation(["a", "a"], "a")).toEqual([
+      { storyId: "a", alreadyRendered: true },
+      { storyId: "a", alreadyRendered: false },
+    ]);
+  });
+
+  it("preserves the run's order and length", () => {
+    const ids = ["x", "y", "z"];
+    expect(planBulkNavigation(ids, "z").map((s) => s.storyId)).toEqual(ids);
+    expect(planBulkNavigation([], "z")).toEqual([]);
   });
 });

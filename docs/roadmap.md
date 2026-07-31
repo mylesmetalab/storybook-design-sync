@@ -151,7 +151,7 @@ Things the intent calls for that aren't here yet.
 
 | #     | Title                          | Done when                                                                | Effort |
 | ----- | ------------------------------ | ------------------------------------------------------------------------ | ------ |
-| P4.1  | CI integration                 | `design-sync check` CLI exits non-zero on drift, outputs PR-comment-shaped markdown. | 1.5d |
+| ~~P4.1~~ | ~~CI integration~~          | ✅ Shipped — v0.0.45. `design-sync check` drives the consumer's own Storybook preview in headless Chromium and reuses the panel's request builder, engine, triage and budgets; verified row-for-row identical to a panel `Check all` over the reference consumer. Four exit codes (`0` clean / `1` drift / `2` coverage incomplete / `3` could not run), `--json` + `--out`, `--story`/`--component`/`--both-modes`. PR-comment-shaped **markdown** is still panel-only (`Export markdown`); the CLI emits JSON. | 1.5d |
 | P4.2  | Edit audit log                 | `.design-sync/audit.json` persists every Apply. `design-sync undo --last` works. | 1d |
 | P4.3  | Multi-file CSS / glob targets  | PostCSS engine handles multiple parse units; `codeTargets` accepts globs. | 1d     |
 | P4.4  | Coverage matrix view           | Panel tab showing all registered stories × last drift status.            | 1d     |

@@ -36,6 +36,7 @@ import {
   countRowStatuses,
   fixLayer,
   codeTokenName,
+  visibleDimensions,
   EMPTY_STATUS_COUNTS,
   type BindingAdvisory,
   type ElementGroup,
@@ -50,10 +51,15 @@ import {
   type PromptProvenance,
 } from "./fix-prompt.js";
 import { driftedSiblings } from "./property-families.js";
-import { runBulkCheck, type WarmOutcome } from "./bulk-run.js";
+import { planBulkNavigation, runBulkCheck, type WarmOutcome } from "./bulk-run.js";
 import { variantScopeFor, type SiblingStoryRows } from "./variant-scope.js";
 import { coverageLabel, summarizeBulk, type BulkSummaryRow } from "./bulk-summary.js";
-import { panelBudgetMs, panelTimeoutMessage } from "./check-budget.js";
+import {
+  bulkBudgetMs,
+  panelBudgetMs,
+  panelTimeoutMessage,
+  WARM_BUDGET_MS,
+} from "./check-budget.js";
 import {
   readStoryDesignSync,
   requestStoryCheck,
@@ -68,8 +74,11 @@ import {
   versionIsStale,
   versionLabel,
 } from "./version-notice.js";
+import { STORY_RENDERED } from "./storybook-events.js";
 
-const STORY_RENDERED_EVENT = "storyRendered";
+// One definition of Storybook's own channel event names, shared with the
+// headless check so both bulk loops wait on the same event.
+const STORY_RENDERED_EVENT = STORY_RENDERED;
 
 interface PanelState {
   loading: boolean;
@@ -145,13 +154,8 @@ interface ApplyResult {
 
 const PIPELINE_DEFAULT_URL = "http://127.0.0.1:7099";
 
-/**
- * Budget for the run's shared Figma fetch (#56). Generous on purpose: this is the
- * multi-second `/variables/local` call on a large library, and the entire point of
- * hoisting it is that its cost belongs to the run instead of to whichever story
- * happened to be first.
- */
-const WARM_BUDGET_MS = 30000;
+// `WARM_BUDGET_MS` and the per-story bulk budget moved to `check-budget.ts` in
+// v0.0.45, so `design-sync check` runs on the panel's numbers rather than its own.
 
 /**
  * POST a single drift row to the design-sync-pipeline. Returns an
@@ -363,8 +367,15 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
    * Assigned during render on purpose: an effect would land *after* a handler
    * that fires in the same tick, which is precisely the race being closed.
    */
+  // Read at run time rather than captured at render time: this callback outlives
+  // the render a once-registered channel handler closed over (#78). `storyId` is
+  // here for the same reason — a bulk run has to know which story is already on
+  // screen, and that is a fact about *now*, not about the render that started it.
   const liveCheckOptions = useRef(
-    createLiveValue<{ dualMode: boolean }>({ dualMode: false }),
+    createLiveValue<{ dualMode: boolean; storyId: string | undefined }>({
+      dualMode: false,
+      storyId: undefined,
+    }),
   ).current;
   const clearCheckTimer = useCallback((): void => {
     if (checkTimerRef.current !== null) {
@@ -489,7 +500,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   // render; the box is what a once-registered channel handler reads through.
   // Only the panel-level controls live here — per-story context is read from the
   // story being checked, by `requestStoryCheck`.
-  liveCheckOptions.set({ dualMode });
+  liveCheckOptions.set({ dualMode, storyId });
 
   const onCheck = useCallback(() => {
     if (!storyId) return;
@@ -563,6 +574,16 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       })),
     });
 
+    // Which stories need navigating to, and which one is already on screen. The
+    // story showing when the run starts cannot be navigated to — see
+    // `planBulkNavigation` for the timeout that cost it a place in the summary.
+    const plan = new Map(
+      planBulkNavigation(
+        stories.map((s) => s.storyId),
+        liveCheckOptions.get().storyId,
+      ).map((step) => [step.storyId, step.alreadyRendered]),
+    );
+
     await runBulkCheck<DriftReport>({
       storyIds: stories.map((s) => s.storyId),
       warm: warmSharedCaches,
@@ -570,9 +591,10 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         // `dualMode` is read per story, at run time. See `liveCheckOptions`.
         checkOneStory(storyId, sbApi, emit, pendingResolversRef, {
           dualMode: liveCheckOptions.get().dualMode,
+          alreadyRendered: plan.get(storyId) === true,
         }),
       // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
-      budgetMs: liveCheckOptions.get().dualMode ? 16000 : 8000,
+      budgetMs: bulkBudgetMs(liveCheckOptions.get().dualMode),
       onBudgetExpired: () => {
         // Drop the resolver for the abandoned check so a late report can't be
         // mistaken for the next story's.
@@ -963,31 +985,9 @@ interface DiffTableProps {
   onUndo: (key: string, scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-/**
- * Dimensions the diff engine still emits as placeholders but the UI
- * deliberately hides — they have no payload, no engine, and no near-term
- * roadmap engine. Kept in the engine so future work has a single place
- * to wire real comparison logic into; removed from this set the moment
- * an engine starts producing meaningful data. Don't delete the engine
- * code that emits these; just edit this set.
- *
- * `structure` left this set in v0.0.39: it compares Figma auto-layout against
- * computed CSS layout (`engines/layout.ts`) and emits nothing at all unless both
- * sides are genuinely laying out children, which is what it was missing.
- */
-const HIDDEN_DIMENSION_KINDS = new Set<DimensionDiff["kind"]>([
-  "motion",
-]);
-
-/**
- * Apply the hidden-kinds filter at every consumer of `report.dimensions`
- * (table render, bulk apply, summary counts, markdown/json exports). Going
- * through this one helper means turning a dimension back on is a one-line
- * change to `HIDDEN_DIMENSION_KINDS` rather than a hunt across the file.
- */
-function visibleDimensions(report: DriftReport): DimensionDiff[] {
-  return report.dimensions.filter((d) => !HIDDEN_DIMENSION_KINDS.has(d.kind));
-}
+// `HIDDEN_DIMENSION_KINDS` and `visibleDimensions` moved to `row-triage.ts` in
+// v0.0.45, when `design-sync check` became a second reader of the same reports.
+// Turning a dimension back on is still a one-line change — just in that file.
 
 const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext, applyResults, onApply, onUndo }) => {
   // Rows with neither a code value nor a Figma value carry no information
@@ -1919,7 +1919,7 @@ function checkOneStory(
     reject: (err: string) => void;
     storyId: string;
   } | null>,
-  opts: { dualMode: boolean },
+  opts: { dualMode: boolean; alreadyRendered: boolean },
 ): Promise<DriftReport> {
   return new Promise<DriftReport>((resolve, reject) => {
     if (!sbApi) {
@@ -1928,16 +1928,29 @@ function checkOneStory(
     }
     pendingRef.current = { storyId, resolve, reject };
 
+    // The snapshot comes from the rendered story, and its args and `designSync`
+    // params are readable from the index entry once it is prepared — which is what
+    // the shared builder reads. One call, reached two ways.
+    const ask = (): void => {
+      requestStoryCheck(emit, sbApi, storyId, { dualMode: opts.dualMode, trigger: "bulk" });
+    };
+
+    if (opts.alreadyRendered) {
+      // The story on screen. `selectStory` on it is answered with
+      // STORY_UNCHANGED and no re-render, so the wait below would never settle
+      // and the story would report a timeout having been rendered the whole
+      // time — see `planBulkNavigation`. Ask about it straight away.
+      ask();
+      return;
+    }
+
     // Storybook will fire STORY_RENDERED once the new story is up. We
     // listen via the addons channel.
     const channel = addons.getChannel();
     const onRendered = (renderedId: string): void => {
       if (renderedId !== storyId) return;
       channel.off(STORY_RENDERED_EVENT, onRendered);
-      // The snapshot will come from this freshly-rendered story, and its args and
-      // `designSync` params are now readable from the index entry — which is what
-      // the shared builder reads.
-      requestStoryCheck(emit, sbApi, storyId, { dualMode: opts.dualMode, trigger: "bulk" });
+      ask();
     };
     channel.on(STORY_RENDERED_EVENT, onRendered);
 

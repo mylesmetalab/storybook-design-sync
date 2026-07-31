@@ -32,6 +32,38 @@ export type GroupedRow =
   | { kind: "other"; diff: DimensionDiff };
 
 /**
+ * Dimensions the diff engine still emits as placeholders but every consumer
+ * deliberately hides — they have no payload, no engine, and no near-term roadmap
+ * engine. Kept in the engine so future work has a single place to wire real
+ * comparison logic into; removed from this set the moment an engine starts
+ * producing meaningful data. Don't delete the engine code that emits these; just
+ * edit this set.
+ *
+ * `structure` left this set in v0.0.39: it compares Figma auto-layout against
+ * computed CSS layout (`engines/layout.ts`) and emits nothing at all unless both
+ * sides are genuinely laying out children, which is what it was missing.
+ */
+export const HIDDEN_DIMENSION_KINDS: ReadonlySet<DimensionDiff["kind"]> = new Set<
+  DimensionDiff["kind"]
+>(["motion"]);
+
+/**
+ * Apply the hidden-kinds filter at every consumer of `report.dimensions` — the
+ * panel's table, its bulk apply, its summary counts, its markdown/json exports,
+ * and `design-sync check`'s rows and counts.
+ *
+ * Lives here rather than in `manager.tsx` (where it was until v0.0.45) because
+ * the panel is no longer the only reader. A CLI that filtered a different set
+ * would report a different row count for the same report — the class of
+ * disagreement this file exists to prevent.
+ */
+export function visibleDimensions(report: {
+  dimensions: readonly DimensionDiff[];
+}): DimensionDiff[] {
+  return report.dimensions.filter((d) => !HIDDEN_DIMENSION_KINDS.has(d.kind));
+}
+
+/**
  * Pair each property's `token-value` and `token-binding` diffs into one row;
  * everything else becomes its own row, in engine order.
  *

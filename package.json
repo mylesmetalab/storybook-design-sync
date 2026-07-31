@@ -38,13 +38,17 @@
   "peerDependencies": {
     "react": "^18.0.0 || ^19.0.0",
     "react-dom": "^18.0.0 || ^19.0.0",
-    "storybook": "^10.0.0"
+    "storybook": "^10.0.0",
+    "playwright": "^1.40.0"
   },
   "peerDependenciesMeta": {
     "react": {
       "optional": true
     },
     "react-dom": {
+      "optional": true
+    },
+    "playwright": {
       "optional": true
     }
   },

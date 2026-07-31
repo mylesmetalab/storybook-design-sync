@@ -37,6 +37,12 @@ export interface StoryDesignSyncParams {
    * file: `dualModeNames` decides whether it is usable.
    */
   modes?: unknown;
+  /**
+   * `false` turns the `copy` dimension off for this story (#63). Figma cannot
+   * express "this text is a placeholder", so a component whose design holds lorem
+   * and whose stories hold product copy would otherwise drift forever.
+   */
+  compareCopy?: boolean;
   /** Where per-row applies POST to. Not part of a check request. */
   pipelineUrl?: string;
 }
@@ -251,6 +257,9 @@ export function buildCheckDriftRequest(ctx: StoryCheckContext): CheckDriftReques
     if (modes) payload.dualModes = modes;
   }
   if (ctx.trigger === "bulk") payload.bulk = true;
+  // Sent only when the story actually declared it, so a story that says nothing
+  // keeps a byte-identical payload (and therefore cache hash).
+  if (designSync.compareCopy === false) payload.compareCopy = false;
   return payload;
 }
 

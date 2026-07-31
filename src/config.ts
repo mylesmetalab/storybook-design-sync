@@ -13,12 +13,38 @@ import type { CodeTarget } from "@metalab/design-sync-pipeline";
  */
 export type ApplyMode = "off" | "experimental";
 
+/**
+ * Whether the `copy` dimension compares text at all (issue #63).
+ *
+ *   - `"on"` (default): Figma TEXT-node strings are compared against the story's
+ *     rendered text, as they always have been.
+ *   - `"off"`: no `copy` rows are produced anywhere. Not suppressed rows — **no
+ *     rows**, because a visible row with its verdict withheld was the bug fixed in
+ *     v0.0.29.
+ *
+ * Why this is a switch and not a heuristic: copy comparison is only meaningful
+ * when the design intends the literal string, and Figma has no way to express
+ * "this is a placeholder". Meanwhile the `component-handoff` skill mandates
+ * realistic story content. So a component whose Figma text is lorem and whose
+ * stories carry product copy drifts permanently on every story, forever — 16 of 20
+ * remaining rows on the SDS Card — while a button Figma labels `Save` genuinely
+ * should say Save. Only the consumer knows which they have, so the consumer
+ * declares it. Inferring placeholder-ness from the string is explicitly rejected:
+ * lorem detection is a heuristic that misfires on real copy.
+ *
+ * Per-story override: `parameters.designSync.compareCopy: false`, for the common
+ * case where a component's structural text is placeholder but its labels are not.
+ */
+export type CopyMode = "on" | "off";
+
 export interface DesignSyncConfig {
   engine: string;
   registryPath: string;
   fileKey: string;
   /** Write gating — see {@link ApplyMode}. Defaults to `"off"`. */
   apply: ApplyMode;
+  /** Whether the `copy` dimension runs — see {@link CopyMode}. Defaults to `"on"`. */
+  copy: CopyMode;
   /**
    * Files the addon is allowed to write when applying a **code-scope** edit
    * in-process (P1.4 — "Update code" without the pipeline binary running).
@@ -86,6 +112,7 @@ const DEFAULTS = {
   engine: "figma-rest",
   registryPath: ".design-sync/registry.json",
   apply: "off" as ApplyMode,
+  copy: "on" as CopyMode,
   codeTargets: [] as CodeTarget[],
   tokenAliases: {} as Record<string, string>,
   cssEntries: ["src/**/*.css"],
@@ -260,12 +287,20 @@ function normalize(raw: unknown): DesignSyncConfig {
       `[design-sync] Config: \`apply\` must be "off" or "experimental" (got ${JSON.stringify(r.apply)}).`,
     );
   }
+  if (r.copy !== undefined && r.copy !== "on" && r.copy !== "off") {
+    throw new Error(
+      `[design-sync] Config: \`copy\` must be "on" or "off" (got ${JSON.stringify(r.copy)}). ` +
+        `"off" stops the copy dimension producing rows at all; per-story control is ` +
+        `\`parameters.designSync.compareCopy: false\`.`,
+    );
+  }
   const codeTargets = normalizeCodeTargets(r.codeTargets);
   return {
     engine: r.engine ?? DEFAULTS.engine,
     registryPath: r.registryPath ?? DEFAULTS.registryPath,
     fileKey: r.fileKey,
     apply: r.apply ?? DEFAULTS.apply,
+    copy: r.copy ?? DEFAULTS.copy,
     codeTargets,
     codeTargetPaths: codeTargets.map((t) => t.path),
     tokenAliases: normalizeTokenAliases(r.tokenAliases),

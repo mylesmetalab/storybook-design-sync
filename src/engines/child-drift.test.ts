@@ -162,8 +162,17 @@ describe("a registry entry with no `children` behaves exactly as before", () => 
     installFetchStub();
     const withEmptyArray = await check([]);
 
+    // `source.readAt` is a wall-clock timestamp like `generatedAt`, so it is
+    // normalised out for the same reason — the comparison is about which ROWS the
+    // two calls produce. The rest of `source` (file version / lastModified) stays
+    // compared.
     const strip = (r: DriftReport): string =>
-      JSON.stringify({ ...r, generatedAt: null, timing: null });
+      JSON.stringify({
+        ...r,
+        generatedAt: null,
+        timing: null,
+        ...(r.source ? { source: { ...r.source, readAt: null } } : {}),
+      });
     expect(strip(withEmptyArray)).toBe(strip(withoutField));
   });
 

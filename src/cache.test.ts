@@ -230,9 +230,11 @@ describe("CACHE_VERSION — verdicts written by older rules are discarded", () =
     const cache = new PersistentCache(path);
     await cache.load();
     expect(cache.get(STORY, LAST_MODIFIED, rootSnapshot)).toBeNull();
-    // v0.0.43 (#80): entries a Check all wrote before the bulk path sent the
-    // story's args and target are reports of the wrong thing.
-    expect(CACHE_VERSION).toBe(6);
+    // v0.0.44 (#76): entries written before reports carried `source` cannot tell a
+    // fix prompt when their Figma values were read, so a prompt built from one can
+    // only report the read time as unknown — indefinitely, since nothing but a
+    // `lastModified` move would replace the entry.
+    expect(CACHE_VERSION).toBe(7);
   });
 
   /**

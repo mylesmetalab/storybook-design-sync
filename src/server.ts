@@ -18,12 +18,14 @@ import {
 } from "./child-bindings.js";
 import type { ChildTarget } from "./engines/types.js";
 import { applyCodeEdit } from "./apply-code.js";
-import type { DimensionDiff, DriftReport } from "./dimensions/types.js";
+import type { DimensionDiff, DriftReport, FigmaReadSource } from "./dimensions/types.js";
 import { getAutoScan, getAutoTokenMap } from "./auto-tokens.js";
 import { lookupBindings } from "./scan-css.js";
 import { resolveComponentBindings } from "./tailwind-components.js";
 import { componentNameFromStoryId } from "./fix-prompt.js";
 import { versionInfo } from "./addon-version.js";
+import { resolveTokenPresence, type CustomPropertyIndex } from "./token-presence.js";
+import { contractReferenceFor, loadComponentContract } from "./contract.js";
 import { checkTimeoutMessage, explicitBudgetMs } from "./check-budget.js";
 import { withBudget } from "./bulk-run.js";
 
@@ -77,6 +79,12 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         // glob-string shorthand, which then shipped into fix prompts as a file
         // named `undefined`. See `config.ts`.
         codeTargetPaths: config.codeTargetPaths,
+        // The project's own custom properties, so a fix prompt can resolve a Figma
+        // variable name against them instead of naming a convention-converted
+        // spelling that may not exist (#66/#67). Names + relative paths only.
+        ...(Object.keys(getAutoScan().customProperties).length > 0
+          ? { themeCustomProperties: cloneIndex(getAutoScan().customProperties) }
+          : {}),
         ...versionFields,
       };
       channel.emit(EVENTS.ConfigInfo, payload);
@@ -211,6 +219,7 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       childSnapshots,
       bulk,
       modeSwitch,
+      compareCopy,
     } = payload as CodeSnapshotPayload;
     try {
       // Each snapshot carries its own mode, so each gets its own resolution —
@@ -287,6 +296,11 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       if (Object.keys(config.tokenAliases).length > 0) {
         baseInput.tokenAliases = config.tokenAliases;
       }
+      // Either declaration switches the copy dimension off, and the row-level
+      // consequence is the same: no `copy` rows at all (#63). Project-wide config
+      // wins nothing here — it is an OR, because both are statements that this
+      // comparison does not apply.
+      if (config.copy === "off" || compareCopy === false) baseInput.compareCopy = false;
       if (snapshot) baseInput.snapshot = snapshot;
       if (mode) baseInput.mode = mode;
       if (args) baseInput.args = args;
@@ -333,6 +347,15 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       if (modeComparison) report.modeComparison = modeComparison;
 
       annotateClassHints(report, autoBindings.classes);
+      // Two annotations, both applied HERE rather than in the engine, and the
+      // placement is load-bearing: the engine writes its report to
+      // `.design-sync/cache.json`, and neither of these belongs in a cached
+      // artefact. The CSS scan and the contract file can both change without the
+      // Figma file's `lastModified` moving, so a cached copy of either would go
+      // stale invisibly. Annotating downstream of the cache means a cache hit gets
+      // today's answer for both.
+      annotateTokenPresence(report);
+      await annotateContract(report, storyId, target);
       if (autoBindings.advisory) {
         // eslint-disable-next-line no-console
         console.warn(`[design-sync] ${storyId}: ${autoBindings.advisory}`);
@@ -675,6 +698,80 @@ function mergeAutoBindings(
 }
 
 /**
+ * A plain, mutable copy of the scan's custom-property index for the wire.
+ *
+ * The scan's own object is a process-wide singleton read by every check; handing
+ * the channel a reference to it (and its `readonly string[]` buckets) would let a
+ * serializer or a future consumer mutate the scanner's state.
+ */
+function cloneIndex(index: CustomPropertyIndex): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const [name, files] of Object.entries(index)) out[name] = [...files];
+  return out;
+}
+
+/**
+ * Resolve each token-bearing row's Figma variable name against the project's own
+ * declared custom properties (#66/#67).
+ *
+ * Annotation only — nothing about a row's status, values or partitioning depends on
+ * it. What it changes is what a prompt is *allowed to say*: with an answer here, a
+ * prompt names the project's real variable or states that no such token exists;
+ * without one it falls back to the "converted by convention, unconfirmed" caveat,
+ * which is what every consumer whose CSS the scanner cannot reach still gets.
+ */
+function annotateTokenPresence(report: DriftReport): void {
+  const index = getAutoScan().customProperties;
+  if (Object.keys(index).length === 0) return;
+  for (const dim of report.dimensions) {
+    if (!dim.tokenName) continue;
+    const presence = resolveTokenPresence(dim.tokenName, index);
+    if (presence.kind !== "unknown") dim.tokenPresence = presence;
+  }
+}
+
+/**
+ * Attach `contracts/<component>.spec.json`'s record of what else each row's token
+ * drives (#71) — the first time any tool in the suite reads the contract.
+ *
+ * Deliberately minimal. It cannot create, suppress or re-status a row; it adds a
+ * sentence naming slots the comparison could not reach, because those slots' absence
+ * from the table is not evidence that they are correct. The contract is validated by
+ * nothing, so it may inform a human and must never overrule a comparison.
+ *
+ * Read on every check rather than cached: a spec edited between checks must take
+ * effect on the next one, and the file is small.
+ */
+async function annotateContract(
+  report: DriftReport,
+  storyId: string,
+  rootSelector: string | undefined,
+): Promise<void> {
+  const withTokens = report.dimensions.filter((d) => d.tokenName);
+  if (withTokens.length === 0) return;
+  const contract = await loadComponentContract(
+    process.cwd(),
+    componentNameFromStoryId(storyId),
+  );
+  if (!contract) return;
+  // Every element this report actually compared, so a contract sibling can be
+  // marked compared-or-not truthfully.
+  const comparedSelectors = [
+    ...(rootSelector ? [rootSelector] : []),
+    ...(report.children ?? []).filter((c) => c.status === "compared").map((c) => c.selector),
+  ];
+  for (const dim of withTokens) {
+    const reference = contractReferenceFor(contract, {
+      figmaToken: dim.tokenName,
+      property: dim.property,
+      selector: dim.childSelector ?? rootSelector,
+      comparedSelectors,
+    });
+    if (reference) dim.contract = reference;
+  }
+}
+
+/**
  * Attach the utility class that produced each code-side binding to the matching
  * drift rows, so the fix prompt can say "change `bg-primary`" rather than only
  * "background-color drifted". Purely additive annotation — no diff's status,
@@ -816,6 +913,30 @@ export function mergeReports(entries: Array<{ mode: string; report: DriftReport 
       figmaValue: figmaByMode,
       status,
     };
+    // Fields that describe the DESIGN DECISION rather than one mode's measurement
+    // survive the merge, and they must: dropping `tokenName` re-classified every
+    // dual-mode drift row as `unbound-figma-value` — "Figma's value is a literal
+    // NOT bound to a variable" — which is a fabricated claim about a row that is
+    // bound, and it routed the fix prompt to the wrong side entirely.
+    //
+    // Carried only when every mode agrees. Two modes reporting two different token
+    // names is not one decision, and picking either would be a guess.
+    const tokenNames = new Set(list.map(({ dim }) => dim.tokenName));
+    if (tokenNames.size === 1) {
+      const only = [...tokenNames][0];
+      if (only !== undefined) out.tokenName = only;
+    }
+    const classNames = new Set(list.map(({ dim }) => dim.codeClassName));
+    if (classNames.size === 1) {
+      const only = [...classNames][0];
+      if (only !== undefined) out.codeClassName = only;
+    }
+    const sourceAdvisory = list.find(({ dim }) => dim.sourceAdvisory)?.dim.sourceAdvisory;
+    if (sourceAdvisory) out.sourceAdvisory = sourceAdvisory;
+    // The Figma variable's own per-mode values, which is exactly what this merge
+    // just measured. A fix prompt for a mode-varying token has to carry both (#66).
+    const perMode = modeAwareFrom(figmaByMode);
+    if (perMode) out.modes = perMode;
     if (status === "advisory") {
       // Unverified in either mode is unverified for the merged row — the weaker
       // claim wins, never the stronger one.
@@ -849,7 +970,35 @@ export function mergeReports(entries: Array<{ mode: string; report: DriftReport 
   if (incomplete) result.incomplete = incomplete;
   const cacheStatus = entries.map((e) => e.report.cacheStatus).find((c) => c !== undefined);
   if (cacheStatus) result.cacheStatus = cacheStatus;
+  // Provenance of the merged report: the EARLIEST of the two passes' reads, and
+  // `fromCache` if either was replayed. Both choices are the conservative one — a
+  // prompt built from this report is only as fresh as its stalest half, and
+  // reporting the later read would overstate how current the values are (#76).
+  const sources = entries.map((e) => e.report.source).filter((s): s is FigmaReadSource => !!s);
+  if (sources.length > 0) {
+    const earliest = sources.reduce((a, b) => (a.readAt <= b.readAt ? a : b));
+    result.source = {
+      ...earliest,
+      ...(sources.some((s) => s.fromCache) ? { fromCache: true } : {}),
+    };
+  }
   return result;
+}
+
+/**
+ * A `{ light, dark }` view of a per-mode map, when it has exactly those two modes.
+ *
+ * Narrow on purpose. `ModeAwareValue` names light and dark specifically, so a
+ * project themed `["day", "night"]` gets no `modes` field rather than having its
+ * modes silently relabelled — a mislabelled mode value in a fix prompt would send
+ * a change to the wrong block.
+ */
+function modeAwareFrom(byMode: Record<string, unknown>): { light: string; dark: string } | undefined {
+  const light = byMode["light"];
+  const dark = byMode["dark"];
+  if (typeof light !== "string" || typeof dark !== "string") return undefined;
+  if (Object.keys(byMode).length !== 2) return undefined;
+  return { light, dark };
 }
 
 /**

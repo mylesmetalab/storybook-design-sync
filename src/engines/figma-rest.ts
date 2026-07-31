@@ -45,6 +45,24 @@ import {
 
 const FIGMA_API = "https://api.figma.com/v1";
 
+/**
+ * The two top-level file fields the addon reads. `lastModified` is the cache
+ * invalidator; `version` is the revision id a fix prompt cites so its reader can
+ * tell whether the file has moved since the read (#76).
+ */
+interface FileMeta {
+  lastModified: string;
+  version?: string;
+}
+
+/**
+ * What a failed (or swallowed) metadata fetch returns. An empty `lastModified`
+ * already means "skip the persistent cache" everywhere it is consulted, and an
+ * absent `version` means the prompt says the version was not recorded rather than
+ * printing something invented.
+ */
+const EMPTY_FILE_META: FileMeta = { lastModified: "" };
+
 interface FigmaNodesResponse {
   nodes: Record<
     string,
@@ -339,8 +357,12 @@ class FigmaRestEngine implements Engine {
    * the user just modified pick up the change.
    */
   private readonly nodeCache = new TtlCache<FigmaNode>(30_000);
-  /** File metadata (lastModified) — 60s TTL. Used for cross-restart cache invalidation. */
-  private readonly fileMetaCache = new TtlCache<string>(60_000);
+  /**
+   * File metadata (`lastModified` + `version`) — 60s TTL. `lastModified` drives
+   * cross-restart cache invalidation; `version` is stamped onto the report so a
+   * fix prompt can say which revision of the file it read (#76).
+   */
+  private readonly fileMetaCache = new TtlCache<FileMeta>(60_000);
   /**
    * The `lastModified` we last saw per fileKey. When it moves, every artefact
    * cached for that file is suspect and gets dropped — a cheap truth signal is a
@@ -394,22 +416,40 @@ class FigmaRestEngine implements Engine {
     // of the cache identity: adding the alias that turns 89 false drift rows into
     // advisories must not leave a bulk run replaying the pre-alias report.
     const aliases: TokenAliasMap = input.tokenAliases ?? {};
-    const aliasKey = aliasSignature(aliases);
+    // Config that changes a report's VERDICTS is part of the cache identity, not
+    // just its inputs: nothing in the Figma file or the DOM moves when someone
+    // edits `design-sync.config.json`. `tokenAliases` joined in v0.0.38; the copy
+    // gate joins here, because turning `copy` off must not leave every cached entry
+    // replaying the rows it was turned off to stop producing (#63).
+    const configKey = [
+      aliasSignature(aliases),
+      input.compareCopy === false ? "copy:off" : "",
+    ]
+      .filter(Boolean)
+      .join("|");
 
     if (this.persistentCache) await this.persistentCache.load();
     if (this.persistentCache && !explicit) {
-      const fileLastModified = await this.fetchFileLastModified(fileKey).catch(() => "");
+      const meta = await this.fetchFileMeta(fileKey).catch(() => EMPTY_FILE_META);
       const cached = this.persistentCache.get(
         input.storyId,
-        fileLastModified,
+        meta.lastModified,
         input.snapshot,
         input.children,
-        aliasKey,
+        configKey,
       );
       if (cached) {
         return {
           ...cached,
           generatedAt: new Date().toISOString(),
+          // `generatedAt` restamps — that is what the panel's "last checked" line
+          // means. `source` MUST NOT: these values came out of a file on disk, and
+          // the read they describe happened whenever it happened (#76). Restamping
+          // it here would hand a fix prompt a two-day-old reading wearing today's
+          // timestamp, which is precisely the failure the field exists to prevent.
+          // A cache written before this field existed carries none, and "unknown"
+          // is then the honest answer — not now.
+          ...(cached.source ? { source: { ...cached.source, fromCache: true } } : {}),
           timing: {
             totalMs: Date.now() - startedAt,
             figmaFetchMs: 0,
@@ -421,6 +461,10 @@ class FigmaRestEngine implements Engine {
     }
 
     const figmaT0 = Date.now();
+    // Read alongside the node so the report can say WHICH revision of the file it
+    // was read from (#76). It is one small request, already 60s-cached and already
+    // made on the cache path, so a bulk run pays nothing extra for it.
+    const fileMeta = await this.fetchFileMeta(fileKey).catch(() => EMPTY_FILE_META);
     const node = await this.fetchNodeWithInheritedBindings(fileKey, nodeId);
     // A variables fetch that FAILED and one that legitimately returns nothing
     // (a non-Enterprise file, 403/404 — handled inside `fetchLocalVariables`)
@@ -456,7 +500,14 @@ class FigmaRestEngine implements Engine {
       ...this.diffTokenBindings(node, snapshot, variables, activeMode, { aliases, valueDiffs }),
     );
     dimensions.push(...this.diffVariantSet(node, snapshot, input.storyId, propsDiffs));
-    dimensions.push(...this.diffCopy(node, snapshot));
+    // `copy` is the one dimension whose applicability the addon cannot decide for
+    // itself: Figma has no way to mark a string as placeholder text, so the
+    // consumer declares it (`"copy": "off"` project-wide, or
+    // `parameters.designSync.compareCopy: false` per story). Off means NO rows —
+    // an empty row with its verdict withheld is the bug fixed in v0.0.29. See #63.
+    if (input.compareCopy !== false) {
+      dimensions.push(...this.diffCopy(node, snapshot));
+    }
     dimensions.push(...propsDiffs);
     // `structure` — Figma auto-layout vs computed CSS layout. Emits nothing
     // unless BOTH sides are laying out children (see `layout.ts`), which is why
@@ -479,6 +530,7 @@ class FigmaRestEngine implements Engine {
         variables,
         activeMode,
         aliases,
+        input.compareCopy !== false,
       );
       dimensions.push(...outcome.dimensions);
       childReports = outcome.reports;
@@ -496,6 +548,14 @@ class FigmaRestEngine implements Engine {
       nodeId,
       dimensions,
       generatedAt: new Date().toISOString(),
+      // The provenance of the values above. `readAt` is when the Figma fetch
+      // STARTED, not when this object was assembled: the two differ by the length
+      // of the fetch, and the earlier one is the one an applier must distrust.
+      source: {
+        readAt: new Date(figmaT0).toISOString(),
+        ...(fileMeta.lastModified ? { fileLastModified: fileMeta.lastModified } : {}),
+        ...(fileMeta.version ? { fileVersion: fileMeta.version } : {}),
+      },
       timing: {
         totalMs: Date.now() - startedAt,
         figmaFetchMs,
@@ -514,7 +574,7 @@ class FigmaRestEngine implements Engine {
     // Stash for future short-circuits. `set` refuses an incomplete report, so a
     // rate-limited run is retried next time instead of replayed.
     if (this.persistentCache) {
-      const fileLastModified = await this.fetchFileLastModified(fileKey).catch(() => "");
+      const fileLastModified = fileMeta.lastModified;
       if (fileLastModified) {
         this.persistentCache.set(
           input.storyId,
@@ -522,7 +582,7 @@ class FigmaRestEngine implements Engine {
           input.snapshot,
           report,
           input.children,
-          aliasKey,
+          configKey,
         );
       }
       // Cache bookkeeping worth saying out loud: entries discarded on a version
@@ -626,23 +686,38 @@ class FigmaRestEngine implements Engine {
   }
 
   /**
-   * Fetch the file's `lastModified` timestamp via the lightest possible
-   * call. `depth=1` keeps the response small; only the top-level metadata
-   * is needed. Cached in-process for 60s — bulk runs share one fetch.
+   * Fetch the file's metadata via the lightest possible call. `depth=1` keeps the
+   * response small; only the top-level fields are needed. Cached in-process for
+   * 60s — bulk runs share one fetch.
+   *
+   * Both fields, not just `lastModified`. `lastModified` is the cache invalidator
+   * it always was; `version` is the identity a fix prompt cites so the applier can
+   * tell whether the file it is re-reading is the one the prompt described (#76).
+   * They come from the same response, so recording the second costs nothing.
    */
-  private async fetchFileLastModified(fileKey: string): Promise<string> {
+  private async fetchFileMeta(fileKey: string): Promise<FileMeta> {
     const cached = this.fileMetaCache.get(fileKey);
     if (cached) return cached;
     const url = `${FIGMA_API}/files/${encodeURIComponent(fileKey)}?depth=1`;
     const res = await throttledFetch(url, { headers: this.headers() });
     if (!res.ok) {
       // Swallow — without a metadata fetch we just skip the persistent cache.
-      return "";
+      return EMPTY_FILE_META;
     }
-    const data = (await res.json()) as { lastModified?: string };
-    const value = data.lastModified ?? "";
-    if (value) this.fileMetaCache.set(fileKey, value);
-    return value;
+    const data = (await res.json()) as { lastModified?: string; version?: string };
+    const meta: FileMeta = {
+      lastModified: data.lastModified ?? "",
+      ...(typeof data.version === "string" && data.version !== ""
+        ? { version: data.version }
+        : {}),
+    };
+    if (meta.lastModified) this.fileMetaCache.set(fileKey, meta);
+    return meta;
+  }
+
+  /** The invalidator on its own, for the call sites that only key on it. */
+  private async fetchFileLastModified(fileKey: string): Promise<string> {
+    return (await this.fetchFileMeta(fileKey)).lastModified;
   }
 
   // ---- HTTP ---------------------------------------------------------------
@@ -796,6 +871,8 @@ class FigmaRestEngine implements Engine {
     variables: FigmaLocalVariablesResponse | null,
     activeMode: string | undefined,
     aliases: TokenAliasMap,
+    /** Same gate as the root's (#63) — a declared child's copy rows are copy rows. */
+    compareCopy: boolean,
   ): Promise<{
     dimensions: DimensionDiff[];
     reports: ChildBindingReport[];
@@ -872,7 +949,7 @@ class FigmaRestEngine implements Engine {
           aliases,
           valueDiffs: childValueDiffs,
         }),
-        ...this.diffCopy(node, child.snapshot),
+        ...(compareCopy ? this.diffCopy(node, child.snapshot) : []),
         // A declared child is very often the flex container that matters (a
         // Card's header row), so it gets the same layout comparison as the root
         // — and the same applicability guard.

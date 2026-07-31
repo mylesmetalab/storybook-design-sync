@@ -55,6 +55,7 @@ async function runInitialScan(): Promise<void> {
       themeVars: cssResult.themeVars,
       components: tsxResult.components,
       classHints: tsxResult.classHints,
+      customProperties: cssResult.customProperties,
     });
     const themeCount = Object.keys(cssResult.themeVars).length;
     const cvaScopes = countTailwindScopes(tsxResult.components, cssResult.themeVars);
@@ -74,7 +75,8 @@ async function runInitialScan(): Promise<void> {
         `tailwind-cva: ${cvaScopes} scope(s) across ` +
         `${tsxResult.components.length} component(s)` +
         (componentNames ? ` [${componentNames}]` : "") +
-        `); Tailwind @theme vars: ${themeCount}.`,
+        `); Tailwind @theme vars: ${themeCount}, ` +
+        `custom properties declared: ${Object.keys(cssResult.customProperties).length}.`,
     );
     for (const w of [...cssResult.warnings, ...tsxResult.warnings]) {
       // eslint-disable-next-line no-console

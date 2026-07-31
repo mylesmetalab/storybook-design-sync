@@ -43,9 +43,15 @@ import {
   type RowFinding,
   type StatusCounts,
 } from "./row-triage.js";
-import { buildFixPrompt, buildBulkFixPrompt, type FixPromptInput } from "./fix-prompt.js";
+import {
+  buildFixPrompt,
+  buildBulkFixPrompt,
+  type FixPromptInput,
+  type PromptProvenance,
+} from "./fix-prompt.js";
 import { driftedSiblings } from "./property-families.js";
 import { runBulkCheck, type WarmOutcome } from "./bulk-run.js";
+import { variantScopeFor, type SiblingStoryRows } from "./variant-scope.js";
 import { coverageLabel, summarizeBulk, type BulkSummaryRow } from "./bulk-summary.js";
 import { panelBudgetMs, panelTimeoutMessage } from "./check-budget.js";
 import {
@@ -811,6 +817,13 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
             selector: designSync.target,
             filePaths: configInfo?.codeTargetPaths,
             fileKey: configInfo?.fileKey,
+            addonVersion: configInfo?.addonVersion,
+            // Sibling evidence for the blast-radius bullet (#68). The panel already
+            // held every story's report after a Check all and no prompt looked at
+            // it — which is how a prompt came to propose an edit that contradicted
+            // Figma on 7 of 8 sibling variants. Empty before any Check all, and the
+            // prompt then says the blast radius is unestablished.
+            siblingReports: siblingRowsFrom(bulk, storyId),
           }}
           applyResults={applyResults}
           onApply={async (d, key, scope) => {
@@ -900,11 +913,44 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   );
 };
 
+/**
+ * Every OTHER story's rows from the last **Check all**, for the blast-radius
+ * bullet (#68).
+ *
+ * Excludes the story being viewed (it is the subject, not a sibling) and any row
+ * whose report is missing — a story that errored or timed out has no expected
+ * values, and counting it as a sibling that agrees would be exactly the kind of
+ * unread-value-as-value this project forbids.
+ */
+function siblingRowsFrom(
+  bulk: BulkState | null,
+  storyId: string | undefined,
+): SiblingStoryRows[] {
+  if (!bulk) return [];
+  return bulk.rows
+    .filter((r) => r.report && r.storyId !== storyId)
+    .map((r) => ({ storyId: r.storyId, dimensions: r.report!.dimensions }));
+}
+
 /** Context threaded into per-row fix prompts (see fix-prompt.ts). */
 interface FixContext {
   selector?: string | undefined;
   filePaths?: string[] | undefined;
   fileKey?: string | undefined;
+  /**
+   * The addon version the panel is running, from `ConfigInfo`. Part of a prompt's
+   * provenance stamp (#76 + #62): "which version produced this reading" is the
+   * question a stale process makes urgent, and a prompt outlives the panel it came
+   * from.
+   */
+  addonVersion?: string | undefined;
+  /**
+   * Every other story's rows from the most recent **Check all**, so a per-row
+   * prompt can state its blast radius across sibling variants instead of calling a
+   * possibly component-wide edit minimal (#68). Absent/empty means the run held no
+   * siblings — which the prompt reports as "not established", not as "safe".
+   */
+  siblingReports?: readonly SiblingStoryRows[] | undefined;
 }
 
 interface DiffTableProps {
@@ -964,6 +1010,25 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
   const groups = groupRowsByElement(rows, report.children);
   const unresolvedChildren = unresolvedChildBindings(report.children);
 
+  // What every prompt from this report is a reading OF (#76). Built from the
+  // report's own `source` — NOT from `Date.now()` and NOT from `generatedAt`, which
+  // restamps on a cache hit. A prompt built from cached values must report the
+  // cache's read time; `report.source` is the only field that carries it. When the
+  // report has no `source` (an entry written by an older addon) the fields stay
+  // absent and the prompt says the read time is unknown, which is the honest answer.
+  const provenance: PromptProvenance | undefined =
+    report.source || fixContext.addonVersion
+      ? {
+          ...(report.source?.readAt ? { readAt: report.source.readAt } : {}),
+          ...(report.source?.fileLastModified
+            ? { fileLastModified: report.source.fileLastModified }
+            : {}),
+          ...(report.source?.fileVersion ? { fileVersion: report.source.fileVersion } : {}),
+          ...(report.source?.fromCache ? { fromCache: true } : {}),
+          ...(fixContext.addonVersion ? { addonVersion: fixContext.addonVersion } : {}),
+        }
+      : undefined;
+
   // Build the fix-prompt input for one drift row. Shared by both apply modes —
   // auditing without writes still hands you the fix.
   //
@@ -988,6 +1053,16 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
     // asymmetric-padding outcome: the text has to survive being pasted into a
     // session with no other context.
     const siblings = driftedSiblings(d, dimensions).map((s) => s.property);
+    const scope = variantScopeFor(
+      {
+        storyId: report.storyId,
+        property: d.property,
+        childSelector: d.childSelector,
+        tokenName: d.tokenName,
+        figmaValue: d.figmaValue,
+      },
+      fixContext.siblingReports ?? [],
+    );
     return {
       storyId: report.storyId,
       kind: d.kind,
@@ -1012,6 +1087,23 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
       ...(extras?.layer ? { layer: extras.layer } : {}),
       ...(extras?.codeTokenName ? { codeTokenName: extras.codeTokenName } : {}),
       ...(siblings.length > 0 ? { siblingProperties: siblings } : {}),
+      // The Figma variable's per-mode values. A colour prompt carrying only the
+      // light value half-fixes and leaves dark silently wrong (#66).
+      ...(d.modes ? { modes: d.modes } : {}),
+      // Whether this project actually declares a custom property for Figma's token
+      // name, so the prompt names the project's own variable or says the token is
+      // absent — instead of presenting a converted Figma path as if it existed
+      // (#66/#67). Annotated server-side from the CSS scan.
+      ...(d.tokenPresence ? { tokenPresence: d.tokenPresence } : {}),
+      // What `contracts/<component>.spec.json` says this token also drives (#71).
+      ...(d.contract ? { contract: d.contract } : {}),
+      // How far the edit reaches across sibling variants, from the last Check all
+      // (#68). Undefined when nothing comparable was in the run — the prompt then
+      // states that the blast radius is unestablished.
+      ...(scope ? { variantScope: scope } : {}),
+      // When the Figma values were read, which file revision they came from, and
+      // whether they were replayed from the on-disk cache (#76).
+      ...(provenance ? { provenance } : {}),
     };
   };
 
@@ -1053,6 +1145,7 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
             filePaths: fixContext.filePaths,
             fileKey: fixContext.fileKey,
             nodeId: report.nodeId,
+            ...(provenance ? { provenance } : {}),
           },
           rows: driftedInputs,
         })

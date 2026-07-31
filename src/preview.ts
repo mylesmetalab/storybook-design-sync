@@ -680,6 +680,7 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     // Relayed so the server knows whether this was a bulk run's story or a
     // deliberate single check (which must not be answered from a cache).
     if (payload.bulk) out.bulk = true;
+    if (payload.compareCopy === false) out.compareCopy = false;
     if (outcome.children.length > 0) out.childSnapshots = outcome.children;
     channel.emit(EVENTS.CodeSnapshot, out);
     return;
@@ -696,6 +697,7 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
   if (payload.args) out.args = payload.args;
   if (payload.target) out.target = payload.target;
   if (payload.bulk) out.bulk = true;
+  if (payload.compareCopy === false) out.compareCopy = false;
   if (childSnapshots.length > 0) out.childSnapshots = childSnapshots;
   channel.emit(EVENTS.CodeSnapshot, out);
 });

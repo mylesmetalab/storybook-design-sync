@@ -135,6 +135,16 @@ export interface CheckDriftInput {
    * of once per mode. Absent means "assume a fresh action" (revalidate).
    */
   checkId?: string;
+  /**
+   * Whether the `copy` dimension runs for this check. `false` means produce **no**
+   * `copy` rows — not rows with their verdict withheld (issue #63).
+   *
+   * Resolved by the server from two declarations, either of which switches it off:
+   * `"copy": "off"` in `design-sync.config.json` (whole project) and
+   * `parameters.designSync.compareCopy: false` (one story). Absent means on, so
+   * every existing consumer is unchanged.
+   */
+  compareCopy?: boolean;
 }
 
 export interface Engine {

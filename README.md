@@ -148,10 +148,11 @@ for binding writes, REST for variable values).
 ## Install
 
 ```sh
-npm i -D mylesmetalab/storybook-design-sync#v0.0.28
+npm i -D "github:mylesmetalab/storybook-design-sync#v0.0.46"
+npx design-sync init
 ```
 
-In `.storybook/main.ts`:
+In `.storybook/main.ts` (`init` does this for you when it can):
 
 ```ts
 const config = {
@@ -159,6 +160,101 @@ const config = {
   // ...
 };
 ```
+
+## `design-sync init`
+
+One command in place of the manual adoption sequence. It does the mechanical
+part of setup and **reports every step it could not do, in order**. It is not a
+substitute for reading the rest of this section — it is the thing that stops you
+having to type it.
+
+```sh
+npx design-sync init                      # prompts for the Figma file key on a TTY
+npx design-sync init --file-key ABC123    # or pass it
+npx design-sync init --dry-run            # print the plan, write nothing
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--file-key <key>` | The Figma file key. Never derived from anything — see below. |
+| `--yes` / `-y` | Never prompt. A missing key becomes a placeholder plus a loud step one. |
+| `--no-skills` | Do not copy the workflow skills into `.claude/skills/`. |
+| `--force` | Rewrite the files **init itself authors** (`design-sync.config.json`). Never a skill, never your `main.ts` or `preview.ts`. |
+| `--dry-run` | Print the plan and write nothing. |
+
+Exit codes: **0** init did its part (remaining steps may still be listed) ·
+**1** refused, nothing written · **2** a write failed.
+
+### What it does
+
+1. **Checks the project can host the suite, and refuses if not** — Node ≥ 20.6,
+   Storybook **10** (8/9 is refused by name, with the upgrade command; so is a
+   project with no Storybook, or no `.storybook/main.*`). A refusal writes
+   nothing at all.
+2. **Detects, and shows its reasoning.** Storybook version (installed beats
+   declared), whether the project is on Tailwind and which generation, which CSS
+   file holds the `@theme` block, which directory holds components, and the
+   project's **own** story globs read out of `.storybook/main.*` — so a monorepo
+   or a `stories/` layout is configured correctly without being asked. Every
+   derived entry prints with the reason it was chosen, and a fallback says it is
+   a fallback.
+3. **Registers both addons in `.storybook/main.*`** — a *merge*, not a rewrite.
+   It refuses to touch the `addons` array unless it holds nothing but string
+   literals, so what it produces can be described character for character; a
+   comment, a spread or an object and it prints the snippet and lists it as a
+   step that remains. Quote style and indentation are preserved.
+4. **Writes `design-sync.config.json`** from what it detected, with
+   `"apply": "off"`. If a config already exists it is **left untouched** and
+   anything missing from it is reported.
+5. **Appends `.design-sync/cache.json` to `.gitignore`** (the cache is a local
+   derivative; `registry.json` is committed on purpose).
+6. **Copies the workflow skills into `.claude/skills/`** — only ones that are not
+   already there. See below.
+7. **Prints what remains, numbered and ordered**: the file key if it is still a
+   placeholder, `FIGMA_PAT`, token alignment, the `copy` decision, the token
+   manifest, the `modeSwitch` declaration, `register` + `audit`, CI, and the
+   end-to-end verification. The last line is never "setup complete", because it
+   isn't.
+
+Running it twice is safe and says what it skipped. On an already-configured
+project it changes nothing and reports twelve things as already done.
+
+### What it refuses to do
+
+- **Invent a `fileKey`.** It is the one fact only you have. Flag, prompt, or a
+  placeholder plus a step one that says every drift check fails until you fill it
+  in. Never anything derived.
+- **Overwrite a file you wrote.** Ever, including under `--force`, for anything
+  except the config it authored itself.
+- **Generate the inspector's token manifest.** That is the *other* addon's
+  schema, and a manifest that disagrees with your CSS makes the inspector's
+  on-token dots lie. It also has to come *after* aligning your theme with the
+  design source, which is judgement. Init detects whether a manifest exists and
+  whether `preview.*` wires it, and names the step otherwise.
+- **Align your tokens, or decide `copy`.** Both need someone to look at the
+  design file. `copy` is left **unset** rather than written as a default, because
+  a written default reads as a decision.
+- **Run `npm install`, or `register`.** The first is your package manager's job;
+  the second needs Figma node ids. Both are printed as exact commands.
+
+### The workflow skills
+
+The package ships the six suite skills (`design-sync-setup`,
+`handoff-ready-component`, `component-handoff`, `component-update`, `fix-drift`,
+`vqa-review`) under `skills/`, and `init` copies them into `.claude/skills/`.
+
+They are **created only when absent, and never overwritten** — not even with
+`--force`. A project's copy is *meant* to diverge: a client's codegen standards
+are not universal, and overwriting a lead's edited conventions is worse than
+being out of date. But "deliberately diverged" and "silently stale" look
+identical from inside a repo, which is what the `revised:` stamp in each skill's
+frontmatter is for. So on a re-run init reports both dates per skill, flags yours
+when it is older, and names the packaged path to diff against — then leaves the
+decision to you. `--no-skills` skips the whole step.
+
+Shipping them inside the package is what makes the offer possible at all: a
+consumer installs the addon and has no other access to the suite's skills, so
+printing a path would have pointed at nothing.
 
 ## Configure
 
@@ -577,9 +673,10 @@ before.
 
 ## CLI
 
-The package ships a `design-sync` binary with five subcommands:
+The package ships a `design-sync` binary with six subcommands:
 
 ```
+design-sync init                        Set up the suite in this project (see `design-sync init`)
 design-sync check [--url http://localhost:6006]
                                         Run the drift check headlessly against a RUNNING Storybook
 design-sync audit                       Diff stories on disk against the registry
@@ -1258,7 +1355,7 @@ consumers, it never compares them.
 ## What this addon is NOT
 
 - Not *only* a CLI. The panel is the surface a designer works in; the CLI
-  (`check`, `audit`, `register`, `ls`, `export-graph`) is the surface CI and
+  (`init`, `check`, `audit`, `register`, `ls`, `export-graph`) is the surface CI and
   agents work in. Both go through the same engine — see
   [`check`](#check--the-panels-drift-check-headlessly).
 - Not coupled to a specific engine. The figma-rest engine is one of many

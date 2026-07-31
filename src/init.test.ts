@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -11,6 +11,7 @@ import {
   configContents,
   detectProject,
   majorFromRange,
+  packagedSkillsDir,
   parseInitArgs,
   readStringArrayProperty,
   refusals,
@@ -615,6 +616,27 @@ describe("majorFromRange", () => {
     expect(majorFromRange(">=10 <11")).toBe(10);
     expect(majorFromRange("10.x")).toBe(10);
     expect(majorFromRange("workspace:*")).toBeUndefined();
+  });
+});
+
+describe("the vendored skills", () => {
+  it("all carry the `revised:` stamp the staleness report depends on", async () => {
+    const root = packagedSkillsDir();
+    const names = (await readdir(root, { withFileTypes: true }))
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+
+    // Six suite skills. A vendored copy that lost its stamp would make init
+    // report "no `revised:` stamp" forever, which is the staleness rule silently
+    // switching itself off.
+    expect(names.length).toBeGreaterThanOrEqual(6);
+    for (const name of names) {
+      const source = await readFile(join(root, name, "SKILL.md"), "utf8");
+      expect(skillRevised(source), `${name} has no \`revised:\` stamp`).toMatch(
+        /^\d{4}-\d{2}-\d{2}$/,
+      );
+      expect(source, `${name} has no \`name:\``).toMatch(/^name:\s*\S+/m);
+    }
   });
 });
 

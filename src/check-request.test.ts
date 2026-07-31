@@ -377,6 +377,19 @@ describe("one triage, two consumers", () => {
     expect(reportSource).not.toMatch(/\bcountStatuses\(/);
   });
 
+  /**
+   * Both bulk loops must agree on which stories need navigating to. They did not:
+   * neither skipped the story already on screen, and the panel therefore timed out
+   * on it (`planBulkNavigation`). Sharing one plan is the fix; this pins it.
+   */
+  it("both bulk loops decide navigation with planBulkNavigation", async () => {
+    for (const file of ["manager.tsx", "headless-check.ts"]) {
+      const text = await readFile(join(SRC, file), "utf8");
+      expect(text).toContain("planBulkNavigation(");
+      expect(text).toContain("alreadyRendered");
+    }
+  });
+
   it("the CLI never writes, in any apply mode", async () => {
     // `check` reads and reports. There is no code path from it to an Edit, so
     // `apply: "experimental"` changes nothing about it.

@@ -202,6 +202,45 @@ describe("headless bridge — payload safety", () => {
     expect(args).toEqual({ x: { a: 1 }, y: { a: 1 } });
   });
 
+  it("turns a Date into its ISO string, not into an empty object", () => {
+    /**
+     * The engine writes `source.readAt` as an ISO string; telejson revives
+     * anything ISO-shaped as a `Date` on its way across the websocket, and a Date
+     * has no enumerable keys — so the generic object path emitted `{}`, a value
+     * that reads as present and carries nothing. Caught by diffing a headless run
+     * against a panel run against the reference consumer.
+     */
+    const { g, state } = install();
+    const channel = fakeChannel();
+    g["__STORYBOOK_ADDONS_CHANNEL__"] = channel;
+    channel.fire("design-sync:driftReport", {
+      report: {
+        storyId: "s",
+        source: {
+          readAt: new Date("2026-07-30T12:34:56.000Z"),
+          fileLastModified: new Date("2026-07-29T00:00:00.000Z"),
+          fileVersion: "2381959055834843157",
+          fromCache: true,
+        },
+      },
+    });
+    const payload = state.drain(0)[0]!.args[0] as { report: { source: Record<string, unknown> } };
+    expect(payload.report.source).toEqual({
+      readAt: "2026-07-30T12:34:56.000Z",
+      fileLastModified: "2026-07-29T00:00:00.000Z",
+      fileVersion: "2381959055834843157",
+      fromCache: true,
+    });
+  });
+
+  it("refuses to invent a timestamp for an invalid Date", () => {
+    const { g, state } = install();
+    const channel = fakeChannel();
+    g["__STORYBOOK_ADDONS_CHANNEL__"] = channel;
+    channel.fire("design-sync:driftReport", { at: new Date("not a date") });
+    expect(state.drain(0)[0]!.args[0]).toEqual({ at: "[InvalidDate]" });
+  });
+
   it("passes a drift report through unchanged", () => {
     const { g, state } = install();
     const channel = fakeChannel();

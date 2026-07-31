@@ -51,7 +51,7 @@ import {
   type PromptProvenance,
 } from "./fix-prompt.js";
 import { driftedSiblings } from "./property-families.js";
-import { runBulkCheck, type WarmOutcome } from "./bulk-run.js";
+import { planBulkNavigation, runBulkCheck, type WarmOutcome } from "./bulk-run.js";
 import { variantScopeFor, type SiblingStoryRows } from "./variant-scope.js";
 import { coverageLabel, summarizeBulk, type BulkSummaryRow } from "./bulk-summary.js";
 import {
@@ -367,8 +367,15 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
    * Assigned during render on purpose: an effect would land *after* a handler
    * that fires in the same tick, which is precisely the race being closed.
    */
+  // Read at run time rather than captured at render time: this callback outlives
+  // the render a once-registered channel handler closed over (#78). `storyId` is
+  // here for the same reason — a bulk run has to know which story is already on
+  // screen, and that is a fact about *now*, not about the render that started it.
   const liveCheckOptions = useRef(
-    createLiveValue<{ dualMode: boolean }>({ dualMode: false }),
+    createLiveValue<{ dualMode: boolean; storyId: string | undefined }>({
+      dualMode: false,
+      storyId: undefined,
+    }),
   ).current;
   const clearCheckTimer = useCallback((): void => {
     if (checkTimerRef.current !== null) {
@@ -493,7 +500,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   // render; the box is what a once-registered channel handler reads through.
   // Only the panel-level controls live here — per-story context is read from the
   // story being checked, by `requestStoryCheck`.
-  liveCheckOptions.set({ dualMode });
+  liveCheckOptions.set({ dualMode, storyId });
 
   const onCheck = useCallback(() => {
     if (!storyId) return;
@@ -567,6 +574,16 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
       })),
     });
 
+    // Which stories need navigating to, and which one is already on screen. The
+    // story showing when the run starts cannot be navigated to — see
+    // `planBulkNavigation` for the timeout that cost it a place in the summary.
+    const plan = new Map(
+      planBulkNavigation(
+        stories.map((s) => s.storyId),
+        liveCheckOptions.get().storyId,
+      ).map((step) => [step.storyId, step.alreadyRendered]),
+    );
+
     await runBulkCheck<DriftReport>({
       storyIds: stories.map((s) => s.storyId),
       warm: warmSharedCaches,
@@ -574,6 +591,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
         // `dualMode` is read per story, at run time. See `liveCheckOptions`.
         checkOneStory(storyId, sbApi, emit, pendingResolversRef, {
           dualMode: liveCheckOptions.get().dualMode,
+          alreadyRendered: plan.get(storyId) === true,
         }),
       // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
       budgetMs: bulkBudgetMs(liveCheckOptions.get().dualMode),
@@ -1901,7 +1919,7 @@ function checkOneStory(
     reject: (err: string) => void;
     storyId: string;
   } | null>,
-  opts: { dualMode: boolean },
+  opts: { dualMode: boolean; alreadyRendered: boolean },
 ): Promise<DriftReport> {
   return new Promise<DriftReport>((resolve, reject) => {
     if (!sbApi) {
@@ -1910,16 +1928,29 @@ function checkOneStory(
     }
     pendingRef.current = { storyId, resolve, reject };
 
+    // The snapshot comes from the rendered story, and its args and `designSync`
+    // params are readable from the index entry once it is prepared — which is what
+    // the shared builder reads. One call, reached two ways.
+    const ask = (): void => {
+      requestStoryCheck(emit, sbApi, storyId, { dualMode: opts.dualMode, trigger: "bulk" });
+    };
+
+    if (opts.alreadyRendered) {
+      // The story on screen. `selectStory` on it is answered with
+      // STORY_UNCHANGED and no re-render, so the wait below would never settle
+      // and the story would report a timeout having been rendered the whole
+      // time — see `planBulkNavigation`. Ask about it straight away.
+      ask();
+      return;
+    }
+
     // Storybook will fire STORY_RENDERED once the new story is up. We
     // listen via the addons channel.
     const channel = addons.getChannel();
     const onRendered = (renderedId: string): void => {
       if (renderedId !== storyId) return;
       channel.off(STORY_RENDERED_EVENT, onRendered);
-      // The snapshot will come from this freshly-rendered story, and its args and
-      // `designSync` params are now readable from the index entry — which is what
-      // the shared builder reads.
-      requestStoryCheck(emit, sbApi, storyId, { dualMode: opts.dualMode, trigger: "bulk" });
+      ask();
     };
     channel.on(STORY_RENDERED_EVENT, onRendered);
 

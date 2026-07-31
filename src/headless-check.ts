@@ -17,7 +17,12 @@ import {
   STORY_THREW_EXCEPTION,
 } from "./storybook-events.js";
 import { requestStoryCheck, type StoryDataReader } from "./check-request.js";
-import { runBulkCheck, type BulkStoryOutcome, type WarmOutcome } from "./bulk-run.js";
+import {
+  planBulkNavigation,
+  runBulkCheck,
+  type BulkStoryOutcome,
+  type WarmOutcome,
+} from "./bulk-run.js";
 import { bulkBudgetMs, WARM_BUDGET_MS } from "./check-budget.js";
 import { componentNameFromStoryId } from "./fix-prompt.js";
 
@@ -567,17 +572,24 @@ export async function runHeadlessCheck(opts: HeadlessRunOptions): Promise<Headle
   // way: the first is rendered by the page load, the rest by `setCurrentStory`.
   await opts.driver.navigate(previewUrl(opts.baseUrl, storyIds[0]));
   channel.reset();
-  let first = true;
+  // The page load rendered the first story, so it is "already on screen" in
+  // exactly the sense the panel's current story is — same helper, same rule. It
+  // is also why this loop never hit the timeout the panel did.
+  const plan = new Map(
+    planBulkNavigation(storyIds, storyIds[0]).map((step) => [step.storyId, step.alreadyRendered]),
+  );
 
   let warm: WarmOutcome = { ms: 0 };
   const outcomes = await runBulkCheck<DriftReport>({
     storyIds,
     warm: () => warmSharedCaches(channel, WARM_BUDGET_MS, now),
-    check: (storyId) => {
-      const alreadyCurrent = first;
-      first = false;
-      return checkStoryHeadless({ channel, storyId, dualMode: opts.dualMode, alreadyCurrent });
-    },
+    check: (storyId) =>
+      checkStoryHeadless({
+        channel,
+        storyId,
+        dualMode: opts.dualMode,
+        alreadyCurrent: plan.get(storyId) === true,
+      }),
     budgetMs: opts.budgetMs ?? bulkBudgetMs(opts.dualMode),
     onWarmed: (outcome) => {
       warm = outcome;

@@ -109,6 +109,15 @@ export function installHeadlessBridge(
    * would instead be compared as that string — a `props` row that disagreed with
    * the panel's. The panel receives functions telejson-encoded as objects, so an
    * object is the faithful shape.
+   *
+   * A `Date` becomes its ISO string, and this one is load-bearing. The engine
+   * writes `DriftReport.source.readAt` as an ISO **string**, but telejson revives
+   * anything ISO-shaped as a `Date` when the payload crosses the websocket — so
+   * what arrives here is a Date whose own enumerable keys are none at all.
+   * Without this branch the generic object path turned the provenance of every
+   * Figma read into `{}`: a value that reads as present and carries nothing, which
+   * is precisely the "unreadable value masquerading as a value" this project
+   * forbids. Found by diffing a headless run against a panel run.
    */
   const clone = (value: unknown, stack: unknown[], depth: number): unknown => {
     if (typeof value === "function") {
@@ -117,6 +126,11 @@ export function installHeadlessBridge(
     }
     if (typeof value === "bigint" || typeof value === "symbol") return String(value);
     if (value === null || typeof value !== "object") return value;
+    if (value instanceof Date) {
+      // An invalid Date has no ISO form; say so rather than emitting a string.
+      const time = value.getTime();
+      return time === time ? value.toISOString() : "[InvalidDate]";
+    }
     if (stack.indexOf(value) !== -1) return "[Circular]";
     if (depth > 12) return "[MaxDepth]";
     stack.push(value);

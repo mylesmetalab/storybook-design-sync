@@ -82,12 +82,14 @@ async function runInitialScan(): Promise<void> {
       // eslint-disable-next-line no-console
       console.warn(`[design-sync] scan warning (${w.file}): ${w.message}`);
     }
-    // Files a `cssEntries` glob asked for and did NOT get (issue #46). Logged
-    // separately from `warnings`, and worded as a coverage hole rather than a
-    // file-level hiccup: a scanner that derived nothing is indistinguishable
-    // from a codebase that declares nothing, and a consumer who hits this
-    // silently gets a panel reporting clean for the rest of the session.
-    for (const skipped of cssResult.skipped) {
+    // Files a `cssEntries` (#46) or `tsxEntries` (#60) glob asked for and did
+    // NOT get. Logged separately from `warnings`, and worded as a coverage hole
+    // rather than a file-level hiccup: a scanner that derived nothing is
+    // indistinguishable from a codebase that declares nothing, and a consumer
+    // who hits this silently gets a panel reporting clean for the rest of the
+    // session. Both scanners report through the same shape so neither can be
+    // the one that stays quiet.
+    for (const skipped of [...cssResult.skipped, ...tsxResult.skipped]) {
       // eslint-disable-next-line no-console
       console.warn(`[design-sync] NOT SCANNED — ${skipped.message}`);
     }

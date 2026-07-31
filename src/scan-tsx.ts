@@ -8,7 +8,6 @@ import type {
   ObjectLiteralExpression,
   PropertyAssignment,
 } from "ts-morph";
-import { glob } from "tinyglobby";
 import { basename, resolve } from "node:path";
 import {
   composeTailwindBindings,
@@ -16,6 +15,7 @@ import {
   type TailwindThemeVars,
 } from "@metalab/design-sync-core";
 import type { AutoTokenMap } from "./scan-css.js";
+import { resolveScanEntries, type SkippedScanPath } from "./scan-ignores.js";
 import {
   expandDecl as expandDeclShared,
   compositeBorderTokens,
@@ -94,6 +94,16 @@ export interface TsxScanResult {
   components: TailwindComponentScan[];
   /** Class attribution for bindings that came from a literal `className`. */
   classHints: TsxClassHintMap;
+  /**
+   * Non-empty when a configured `tsxEntries` glob matched files that a default
+   * ignore suppressed. The caller MUST surface these (issue #60). On a Tailwind
+   * / shadcn / cva stack `tsxEntries` is what carries the bindings, so a silent
+   * skip here empties the declared-binding dimension for every story while the
+   * panel goes on reporting clean. Empty in the ordinary case, including when an
+   * entry names a default-ignored directory outright — then nothing is
+   * suppressed.
+   */
+  skipped: SkippedScanPath[];
 }
 
 function camelToDash(name: string): string {
@@ -413,17 +423,20 @@ export async function scanTsx(
   themeVars: TailwindThemeVars = {},
 ): Promise<TsxScanResult> {
   const warnings: Array<{ file: string; message: string }> = [];
-  const files = await glob(entries, {
-    cwd,
-    absolute: true,
-    onlyFiles: true,
-    ignore: [
-      "**/node_modules/**",
-      "**/dist/**",
-      "**/storybook-static/**",
-      "**/*.stories.tsx",
-      "**/*.test.tsx",
-    ],
+  // Two-tier ignores, shared with the CSS scanner (issue #60): `node_modules`
+  // and the two file *kinds* below are unconditional and silent; `dist` /
+  // `storybook-static` are a default an entry can beat by naming, and anything
+  // still suppressed comes back in `skipped` rather than vanishing.
+  //
+  // Story and test files stay unconditional deliberately. They are not build
+  // output that duplicates the source — they are files whose bindings would be
+  // wrong to derive (a story's inline styles are arguments to a component, not
+  // the component's declared tokens), so there is nothing to opt into.
+  const { files, skipped } = await resolveScanEntries(cwd, entries, {
+    label: "TSX",
+    configKey: "tsxEntries",
+    extension: "tsx",
+    alsoIgnored: ["**/*.stories.tsx", "**/*.test.tsx"],
   });
 
   // One Project for the whole scan so internal type/parse caches amortize.
@@ -547,5 +560,6 @@ export async function scanTsx(
     scannedFiles: files.map((f) => resolve(f)),
     components,
     classHints,
+    skipped,
   };
 }

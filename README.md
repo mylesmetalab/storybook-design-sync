@@ -426,6 +426,15 @@ file count, example paths and the entry that would opt in. Nothing is suppressed
 in silence: a scanner that derived nothing looks exactly like a codebase that
 declares nothing.
 
+**The same rules apply to `tsxEntries`, identically** — one shared implementation,
+so the two scanners cannot answer this question differently ([#60], fixed in
+v0.0.46; before that the ignore list overrode `tsxEntries` unconditionally, which
+emptied the binding dimension outright on a Tailwind stack, where `tsxEntries` is
+what carries the bindings). Two extra patterns are unconditional and silent for the
+TSX scanner: `*.stories.tsx` and `*.test.tsx`. Those are not build output that
+duplicates the source — a story's inline styles are arguments to a component, not
+the component's declared tokens — so there is nothing to opt into.
+
 `target` is also how you point at **portalled** content and how you resolve an
 ambiguous story root — see [Portalled components](#portalled-components-dialog-popover-tooltip-select).
 
@@ -926,6 +935,15 @@ is undeterminable and nothing is said.
   *header* padding drifts reports clean unless that header is bound — see
   [child bindings](#child-bindings--checking-the-whole-component-not-just-its-root). This is the single easiest way to get a
   clean report that means less than it appears to.
+- **Bindings are only derived from files your entries reach.** `cssEntries` and
+  `tsxEntries` are the whole input to the declared-binding dimension, and a story
+  whose bindings were never scanned reports on value drift alone. Both scanners now
+  apply one shared rule ([#46], [#60]): `node_modules` (plus `*.stories.tsx` /
+  `*.test.tsx` for TSX) is unconditional, `dist/` and `storybook-static/` are a
+  default that an entry naming the directory beats, and anything suppressed anyway
+  is logged at startup as `NOT SCANNED` with a count, example paths and the entry
+  responsible. Read the startup line: `derived bindings for 0 selector(s)` means the
+  scan found nothing, which looks exactly like a codebase that declares nothing.
 - **Typography, `color` and copy are compared only on the element that renders
   its own text.** A wrapper `div` inherits its font size from the page while
   Figma answers from a TEXT node several levels down, so the two sides describe
@@ -1184,6 +1202,8 @@ consumers, it never compares them.
   to restart Storybook (and clear `node_modules/.cache/storybook` if the manager
   bundle is cached).
 
+[#46]: https://github.com/mylesmetalab/storybook-design-sync/issues/46
+[#60]: https://github.com/mylesmetalab/storybook-design-sync/issues/60
 [#62]: https://github.com/mylesmetalab/storybook-design-sync/issues/62
 [#63]: https://github.com/mylesmetalab/storybook-design-sync/issues/63
 [#66]: https://github.com/mylesmetalab/storybook-design-sync/issues/66

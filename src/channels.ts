@@ -93,7 +93,13 @@ export interface CheckDriftRequestPayload {
   dualMode?: boolean;
   /**
    * The two mode names to snapshot when `dualMode` is true. Defaults to
-   * `["light", "dark"]`. Per-story override via `parameters.designSync.modes`.
+   * `["light", "dark"]`. Per-story override via `parameters.designSync.modes`,
+   * which must be exactly two non-empty strings — a malformed declaration is
+   * refused and warned about rather than half-applied (`check-request.ts`).
+   *
+   * The override was documented here from the start but sent by neither check
+   * path until #80, so a project on `["day", "night"]` was silently snapshotted
+   * as light/dark.
    */
   dualModes?: [string, string];
   /**

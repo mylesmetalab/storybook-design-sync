@@ -1,10 +1,9 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
-import { addons, types, useArgs, useChannel, useParameter, useStorybookApi, useStorybookState } from "storybook/manager-api";
+import { addons, types, useChannel, useParameter, useStorybookApi, useStorybookState } from "storybook/manager-api";
 import {
   ADDON_ID,
   PANEL_ID,
   EVENTS,
-  type CheckDriftRequestPayload,
   type DriftReportPayload,
   type DriftErrorPayload,
   type ProposedEdit,
@@ -34,7 +33,7 @@ import {
   rowChildSelector,
   unresolvedChildBindings,
   bindingAdvisory,
-  countStatuses,
+  countRowStatuses,
   fixLayer,
   codeTokenName,
   EMPTY_STATUS_COUNTS,
@@ -49,6 +48,13 @@ import { driftedSiblings } from "./property-families.js";
 import { runBulkCheck, type WarmOutcome } from "./bulk-run.js";
 import { coverageLabel, summarizeBulk, type BulkSummaryRow } from "./bulk-summary.js";
 import { panelBudgetMs, panelTimeoutMessage } from "./check-budget.js";
+import {
+  readStoryDesignSync,
+  requestStoryCheck,
+  type EmitFn,
+  type StoryDataReader,
+  type StoryDesignSyncParams,
+} from "./check-request.js";
 import { createLiveValue } from "./live-value.js";
 import {
   cacheNoticeText,
@@ -140,24 +146,6 @@ const PIPELINE_DEFAULT_URL = "http://127.0.0.1:7099";
  * happened to be first.
  */
 const WARM_BUDGET_MS = 30000;
-
-/**
- * One-time-per-story deprecation warning for the legacy
- * `parameters.designSync.tokens` story param. Token bindings are now
- * derived from CSS by the preset's scanner; the param is kept as a
- * fallback for a single release before removal.
- */
-const tokensDeprecationWarned = new Set<string>();
-function warnTokensDeprecated(storyId: string): void {
-  if (tokensDeprecationWarned.has(storyId)) return;
-  tokensDeprecationWarned.add(storyId);
-  // eslint-disable-next-line no-console
-  console.warn(
-    `[design-sync] ${storyId}: parameters.designSync.tokens is deprecated. ` +
-      "Bindings are now derived from your CSS — you can remove the `tokens` " +
-      "block. CSS-derived bindings take precedence where they exist.",
-  );
-}
 
 /**
  * POST a single drift row to the design-sync-pipeline. Returns an
@@ -322,15 +310,10 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
   const [dualMode, setDualMode] = useState(false);
   const sb = useStorybookState();
   const storyId = sb.storyId;
-  const designSync = useParameter<{
-    target?: string;
-    tokens?: Record<string, string>;
-    modeAttribute?: string;
-    /** How this project switches theme — see `mode-switch.ts` (#69). */
-    modeSwitch?: unknown;
-    pipelineUrl?: string;
-  }>("designSync", {}) ?? {};
-  const [args] = useArgs();
+  // The current story's declarations, for rendering (`pipelineUrl`, the fix-prompt
+  // target). Check requests do NOT read this: they read the story they are about,
+  // through `check-request.ts`, so the bulk loop and this panel can't disagree.
+  const designSync = useParameter<StoryDesignSyncParams>("designSync", {}) ?? {};
   const [applyResults, setApplyResults] = useState<Record<string, ApplyResult>>({});
   const [bulk, setBulk] = useState<BulkState | null>(null);
   // Addon config surface (apply gating, fileKey, codeTarget paths) relayed
@@ -375,10 +358,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
    * that fires in the same tick, which is precisely the race being closed.
    */
   const liveCheckOptions = useRef(
-    createLiveValue<{ dualMode: boolean; modeSwitch: unknown }>({
-      dualMode: false,
-      modeSwitch: undefined,
-    }),
+    createLiveValue<{ dualMode: boolean }>({ dualMode: false }),
   ).current;
   const clearCheckTimer = useCallback((): void => {
     if (checkTimerRef.current !== null) {
@@ -501,41 +481,23 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
 
   // Keep the run-time view of the check options current. One assignment per
   // render; the box is what a once-registered channel handler reads through.
-  liveCheckOptions.set({ dualMode, modeSwitch: designSync.modeSwitch });
+  // Only the panel-level controls live here — per-story context is read from the
+  // story being checked, by `requestStoryCheck`.
+  liveCheckOptions.set({ dualMode });
 
   const onCheck = useCallback(() => {
     if (!storyId) return;
     setState({ loading: true, report: null, error: null });
-    const payload: CheckDriftRequestPayload = { storyId };
-    if (designSync.target) payload.target = designSync.target;
-    if (designSync.tokens) {
-      payload.tokens = designSync.tokens;
-      warnTokensDeprecated(storyId);
-    }
-    if (designSync.modeAttribute) payload.modeAttribute = designSync.modeAttribute;
-    // Relayed even when absent-shaped, so the preview can tell "declared" from
-    // "detect it" — the distinction #69 turned on.
-    if (designSync.modeSwitch !== undefined) payload.modeSwitch = designSync.modeSwitch;
-    if (args && Object.keys(args).length > 0) payload.args = args as Record<string, unknown>;
-    if (dualMode) payload.dualMode = true;
     clearCheckTimer();
     const budgetMs = panelBudgetMs(dualMode);
     checkTimerRef.current = setTimeout(() => {
       checkTimerRef.current = null;
       setState({ loading: false, report: null, error: panelTimeoutMessage(budgetMs) });
     }, budgetMs);
-    emit(EVENTS.CheckDriftRequest, payload);
-  }, [
-    emit,
-    storyId,
-    designSync.target,
-    designSync.tokens,
-    designSync.modeAttribute,
-    designSync.modeSwitch,
-    args,
-    dualMode,
-    clearCheckTimer,
-  ]);
+    // Same request builder the bulk loop uses, reading the same per-story
+    // context. Two hand-built payloads is what #78 and #80 both were.
+    requestStoryCheck(emit, sbApi, storyId, { dualMode, trigger: "explicit" });
+  }, [emit, sbApi, storyId, dualMode, clearCheckTimer]);
 
   /**
    * Ask the server to pre-fetch what the whole run shares (Figma variables + file
@@ -598,14 +560,11 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
     await runBulkCheck<DriftReport>({
       storyIds: stories.map((s) => s.storyId),
       warm: warmSharedCaches,
-      check: (storyId) => {
-        // Read per story, at run time. See `liveCheckOptions`.
-        const live = liveCheckOptions.get();
-        return checkOneStory(storyId, sbApi, emit, pendingResolversRef, {
-          dualMode: live.dualMode,
-          ...(live.modeSwitch !== undefined ? { modeSwitch: live.modeSwitch } : {}),
-        });
-      },
+      check: (storyId) =>
+        // `dualMode` is read per story, at run time. See `liveCheckOptions`.
+        checkOneStory(storyId, sbApi, emit, pendingResolversRef, {
+          dualMode: liveCheckOptions.get().dualMode,
+        }),
       // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
       budgetMs: liveCheckOptions.get().dualMode ? 16000 : 8000,
       onBudgetExpired: () => {
@@ -679,9 +638,12 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
    * Code-side only by default — Figma is shared state; users opt into
    * Figma writes per-row.
    *
-   * Each story's `designSync.target` selector is read from
-   * `sbApi.getStoryData(storyId)?.parameters` — populated because bulk
-   * Check all navigated to every story before snapshotting.
+   * Each story's `designSync` declarations are read through the same
+   * `readStoryDesignSync` the check requests use — populated because bulk Check
+   * all navigated to every story before snapshotting. It used to call
+   * `sbApi.getStoryData(...)`, which is not a method on the Storybook 10 manager
+   * API; optional-chained, it evaluated to `undefined` on every row, so no story
+   * ever contributed its `target` selector or its `pipelineUrl` here.
    */
   const onApplyAll = useCallback(async (opts: { dryRun: boolean }) => {
     setBulk((prev) => {
@@ -711,10 +673,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
 
     for (const row of rows) {
       const report = row.report!;
-      const storyData = sbApi?.getStoryData?.(row.storyId);
-      const storyParams =
-        (storyData?.parameters as { designSync?: { target?: string; pipelineUrl?: string } } | undefined)
-          ?.designSync ?? {};
+      const storyParams = readStoryDesignSync(sbApi, row.storyId);
       const selector = storyParams.target;
       const pipelineUrl = storyParams.pipelineUrl ?? PIPELINE_DEFAULT_URL;
 
@@ -1845,6 +1804,13 @@ function normalizeInspectorPayload(raw: unknown, storyId: string | undefined): P
  * Navigate Storybook to a story, wait for it to render, then fire a single Check
  * drift and resolve when the report comes back. Used by the bulk-check loop.
  *
+ * The request itself is built by `requestStoryCheck` — the same call `Check
+ * drift` makes, reading the same per-story context off the story we just
+ * navigated to. This function contributes only the navigation and the promise;
+ * it has no say in what a check request contains. It used to build its own
+ * payload, and the two definitions disagreed twice in one release cycle (#78,
+ * #80) — see `check-request.ts`.
+ *
  * Holds no timer of its own: the per-story budget is enforced once, by
  * `runBulkCheck` (`bulk-run.ts`), *after* the run's shared Figma fetch has
  * completed. That ordering is the #56 fix — with the timer in here, the first
@@ -1853,14 +1819,14 @@ function normalizeInspectorPayload(raw: unknown, storyId: string | undefined): P
  */
 function checkOneStory(
   storyId: string,
-  sbApi: { selectStory: (id: string) => void } | undefined,
-  emit: (event: string, ...args: unknown[]) => void,
+  sbApi: (StoryDataReader & { selectStory: (id: string) => void }) | undefined,
+  emit: EmitFn,
   pendingRef: React.MutableRefObject<{
     resolve: (report: DriftReport) => void;
     reject: (err: string) => void;
     storyId: string;
   } | null>,
-  opts: { dualMode?: boolean; modeSwitch?: unknown } = {},
+  opts: { dualMode: boolean },
 ): Promise<DriftReport> {
   return new Promise<DriftReport>((resolve, reject) => {
     if (!sbApi) {
@@ -1875,21 +1841,10 @@ function checkOneStory(
     const onRendered = (renderedId: string): void => {
       if (renderedId !== storyId) return;
       channel.off(STORY_RENDERED_EVENT, onRendered);
-      // Emit the request — the snapshot will come from this freshly-rendered
-      // story. parameters.designSync.target/tokens are read by the preview
-      // from the active story's parameters, so we don't need to pass them.
-      const payload: CheckDriftRequestPayload = { storyId };
-      if (opts.dualMode) payload.dualMode = true;
-      // The story's own declared mechanism, read from the story we just navigated
-      // to. Without it, a bulk dual-mode run would fall back to detection on a
-      // project that had already told us how it themes.
-      if (opts.modeSwitch !== undefined) payload.modeSwitch = opts.modeSwitch;
-      // This is one story of a Check-all run: the engine's caches are what make
-      // the run affordable (one variables fetch for every story instead of one
-      // per story, which hits Figma's rate limits). A single explicit check
-      // sends no `bulk` flag and is served fresh.
-      payload.bulk = true;
-      emit(EVENTS.CheckDriftRequest, payload);
+      // The snapshot will come from this freshly-rendered story, and its args and
+      // `designSync` params are now readable from the index entry — which is what
+      // the shared builder reads.
+      requestStoryCheck(emit, sbApi, storyId, { dualMode: opts.dualMode, trigger: "bulk" });
     };
     channel.on(STORY_RENDERED_EVENT, onRendered);
 
@@ -1898,13 +1853,23 @@ function checkOneStory(
 }
 
 /**
- * Per-status tallies for one story, over the dimensions the panel actually shows.
- * Delegates to `countStatuses` so the summary line, the per-story columns and the
- * table's own row states can't disagree — they did (issue #57): the table offered
- * no fix on a name-only divergence while these counts called it drift.
+ * Per-status tallies for one story — the Check-all row's columns, and by way of
+ * `summarizeBulk` the run's summary line.
+ *
+ * Counted over the **rows** `DiffTable` renders, not over raw dimensions, so the
+ * summary and the story you open to confirm it report the same finding count.
+ * They didn't: three properties on `ui-button--neutral` each drifted on both their
+ * value and their binding comparison, which the table shows as three rows and the
+ * old dimension tally counted as six — 7 drift in the summary against 4 in the
+ * table, with nothing saying which was right (#80).
+ *
+ * The one number that is deliberately not the table's is `flagOnly`: the table
+ * drops rows with no value on either side as uninformative, and this does not.
+ * A comparison that couldn't be made is exactly what the summary must keep
+ * saying out loud.
  */
 function countRows(report: DriftReport): StatusCounts {
-  return countStatuses(visibleDimensions(report));
+  return countRowStatuses(groupDimensions(visibleDimensions(report)));
 }
 
 const ValueCell: React.FC<{ value: unknown }> = ({ value }) => {

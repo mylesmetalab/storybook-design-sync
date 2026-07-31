@@ -389,6 +389,12 @@ Fields the addon reads from `parameters.designSync`:
   happen (issue [#69]) — the run never compares one mode twice and calls it two.
   `setAttribute` cannot set a class, which is why `modeAttribute` alone could not
   cover this.
+- `modes` *(`[string, string]`, default `["light", "dark"]`)* — the two mode names
+  a **Both modes** check snapshots, for a project whose modes aren't called light
+  and dark. Anything other than exactly two non-empty names is refused with a
+  console warning rather than half-applied. Documented since the dual-mode
+  comparison landed but sent by neither check path until v0.0.43 ([#80]), so a
+  project on `["day", "night"]` was silently measured as light/dark.
 - `tokens` — deprecated, see below.
 
 `target` is the only field most stories need. The addon's PostCSS scanner
@@ -960,6 +966,23 @@ is undeterminable and nothing is said.
   cacheable. Retry waits are bounded per request and surfaced ("retry in 27s")
   rather than slept through in silence, and an explicit `Check drift` now has a
   ceiling (30s, 60s for both modes) so the panel always leaves "Checking…".
+- **Check all and Check drift now report the same story the same way** ([#80],
+  fixed in v0.0.43). Two things made them disagree, and the counting one is what
+  a reader saw: the summary's columns counted *comparisons* while the story's
+  table renders *findings*, and a token property produces two comparisons (its
+  value and its binding). `ui-button--neutral` showed 4 drifted rows against a
+  summary saying 7 — three properties detached from their Figma variables, each
+  drifting on both. The columns are now counted in the table's unit. `flagOnly`
+  is the deliberate exception: the table drops rows with no value on either side
+  as uninformative and the summary keeps counting them, because a comparison that
+  could not be made is the thing a coverage number must not hide.
+  Underneath, the bulk path built its own request and sent only the story id, so
+  every story in a `Check all` was checked without its `args` (no `cva()` variant
+  resolution), its `target` selector (no CSS-scanner bindings, and the story root
+  found by fallback), its `tokens`, or its `modeAttribute` — and with the
+  `modeSwitch` of whichever story the panel was sitting on. Both buttons now build
+  their request through one function that reads the story being checked, so a
+  field reaches both paths or neither.
 - **A story that exceeds the per-story budget leaves the totals quietly
   smaller** ([#72]). Coverage reports `timedOut` honestly, but the drift count in
   the header simply omits that story's rows, so a total compared against a known
@@ -986,6 +1009,7 @@ is undeterminable and nothing is said.
 [#73]: https://github.com/mylesmetalab/storybook-design-sync/issues/73
 [#74]: https://github.com/mylesmetalab/storybook-design-sync/issues/74
 [#78]: https://github.com/mylesmetalab/storybook-design-sync/issues/78
+[#80]: https://github.com/mylesmetalab/storybook-design-sync/issues/80
 
 ## What this addon is NOT
 

@@ -21,6 +21,7 @@ import {
   unresolvedChildBindings,
   bindingAdvisory,
   countStatuses,
+  countRowStatuses,
   groupDimensions,
   fixLayer,
   codeTokenName,
@@ -1178,6 +1179,141 @@ describe("groupDimensions — value and binding for one property become one row"
       "text",
       "Size",
     ]);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * one story, one verdict (issue #80)
+ * ------------------------------------------------------------------------- */
+
+describe("countRowStatuses — the summary counts what the table shows", () => {
+  const dim = (over: Partial<DimensionDiff> & Pick<DimensionDiff, "kind" | "status">): DimensionDiff => ({
+    property: "background-color",
+    codeValue: "rgb(56, 56, 56)",
+    figmaValue: "rgb(48, 48, 48)",
+    ...over,
+  });
+
+  /**
+   * The `ui-button--neutral` report that produced issue #80, in miniature: three
+   * colour properties whose value AND binding both drifted (Figma had detached
+   * them from their variables), one drifted `copy` row, one property whose value
+   * matched while the two sides spelled the token differently, and one match.
+   */
+  const NEUTRAL_DIMENSIONS: DimensionDiff[] = [
+    dim({ kind: "token-value", property: "background-color", status: "drift" }),
+    dim({ kind: "token-binding", property: "background-color", status: "drift" }),
+    dim({ kind: "token-value", property: "border-color", status: "drift" }),
+    dim({ kind: "token-binding", property: "border-color", status: "drift" }),
+    dim({ kind: "token-value", property: "color", status: "drift" }),
+    dim({ kind: "token-binding", property: "color", status: "drift" }),
+    dim({ kind: "copy", property: "text", status: "drift", codeValue: "Cancel", figmaValue: "Button" }),
+    dim({ kind: "token-value", property: "border-top-left-radius", status: "match", codeValue: "8px", figmaValue: "8px" }),
+    dim({
+      kind: "token-binding",
+      property: "border-top-left-radius",
+      status: "advisory",
+      nameDivergence: "value-matched",
+      codeValue: "radius",
+      figmaValue: "Radius/200",
+    }),
+    dim({ kind: "token-value", property: "gap", status: "match", codeValue: "8px", figmaValue: "8px" }),
+  ];
+
+  /**
+   * The assertion issue #80 is actually about. `ui-button--neutral` rendered four
+   * drifted rows and the Check-all summary said seven, because three properties
+   * drifted twice each — once on the value, once on the binding. A reviewer at the
+   * definition-of-done gate reads the summary; the story they open to confirm it
+   * disagreed, with nothing saying which number was right.
+   */
+  it("reports one drift per drifted row, not one per drifted comparison", () => {
+    const rows = groupDimensions(NEUTRAL_DIMENSIONS);
+    const counts = countRowStatuses(rows);
+    expect(counts.drift).toBe(4);
+    // The number the table renders, by the table's own predicate.
+    expect(rows.filter(rowHasDrift)).toHaveLength(4);
+    // And the old unit, for the record: seven comparisons drifted.
+    expect(countStatuses(NEUTRAL_DIMENSIONS).drift).toBe(7);
+  });
+
+  /**
+   * Stated as an invariant over an arbitrary dimension list rather than over one
+   * fixture, so a new dimension kind, or a change to how rows are grouped, has to
+   * keep the two surfaces agreeing.
+   */
+  it("drift count equals the drifted rows the table shows, for any report", () => {
+    const reports: DimensionDiff[][] = [
+      NEUTRAL_DIMENSIONS,
+      [],
+      [dim({ kind: "token-binding", property: "color", status: "drift" })],
+      [
+        dim({ kind: "token-value", property: "color", status: "match", codeValue: "a", figmaValue: "a" }),
+        dim({ kind: "token-binding", property: "color", status: "drift" }),
+      ],
+      [
+        dim({ kind: "props", property: "Size", status: "drift" }),
+        dim({ kind: "variant-set", property: "active-variant", status: "flag-only" }),
+        dim({ kind: "token-value", property: "gap", status: "unresolved" }),
+      ],
+    ];
+    for (const dimensions of reports) {
+      const rows = groupDimensions(dimensions);
+      expect(countRowStatuses(rows).drift).toBe(rows.filter(rowHasDrift).length);
+      // The table drops rows with no value on either side; none of them can be
+      // drift, so the visible drift count matches too.
+      expect(countRowStatuses(rows).drift).toBe(
+        rows.filter(rowHasAnyValue).filter(rowHasDrift).length,
+      );
+    }
+  });
+
+  it("gives every row exactly one bucket", () => {
+    const rows = groupDimensions(NEUTRAL_DIMENSIONS);
+    const counts = countRowStatuses(rows);
+    const total =
+      counts.match + counts.drift + counts.advisory + counts.unverified + counts.flagOnly + counts.unresolved;
+    expect(total).toBe(rows.length);
+    expect(counts).toEqual({
+      match: 1,
+      drift: 4,
+      advisory: 1,
+      unverified: 0,
+      flagOnly: 0,
+      unresolved: 0,
+    });
+  });
+
+  it("counts a name-only divergence as the advisory it is, never as drift or match", () => {
+    // The #57 rule, restated at row level: the row's value matched, so it is not
+    // drift; the names differ, so it is not a plain match either.
+    const rows = groupDimensions([
+      dim({ kind: "token-value", property: "gap", status: "match", codeValue: "8px", figmaValue: "8px" }),
+      dim({
+        kind: "token-binding",
+        property: "gap",
+        status: "advisory",
+        nameDivergence: "value-matched",
+      }),
+    ]);
+    expect(countRowStatuses(rows)).toEqual({
+      ...EMPTY_STATUS_COUNTS,
+      advisory: 1,
+    });
+  });
+
+  it("will not call a binding-only drift a match — nothing compared the render", () => {
+    const rows = groupDimensions([dim({ kind: "token-binding", property: "color", status: "drift" })]);
+    expect(countRowStatuses(rows)).toEqual({ ...EMPTY_STATUS_COUNTS, unverified: 1 });
+  });
+
+  it("treats an advisory with no `nameDivergence` as unverified, like countStatuses", () => {
+    const rows = groupDimensions([dim({ kind: "token-value", property: "gap", status: "advisory" })]);
+    expect(countRowStatuses(rows).unverified).toBe(1);
+  });
+
+  it("is empty for an empty report", () => {
+    expect(countRowStatuses([])).toEqual(EMPTY_STATUS_COUNTS);
   });
 });
 

@@ -21,6 +21,8 @@ import {
   type DiscoveredStory,
   type DiscoveryOutcome,
 } from "./story-discovery.js";
+import { parseCheckArgs, runCheck } from "./check-command.js";
+import { CHECK_EXIT } from "./check-report.js";
 
 interface CommonOptions {
   cwd: string;
@@ -57,6 +59,17 @@ async function main(argv: string[]): Promise<number> {
       return register(parseRegisterArgs(rest));
     case "export-graph":
       return exportGraph(parseExportGraphArgs(rest));
+    case "check":
+      // Argument parsing happens INSIDE the try so a usage error maps to
+      // `CouldNotRun` rather than falling through to the top-level catch, which
+      // exits 2 — the code that means "I ran and the coverage has gaps". A wrong
+      // flag must never be reported as an incomplete drift check.
+      try {
+        return await runCheck(parseCheckArgs(rest));
+      } catch (err: unknown) {
+        console.error(err instanceof Error ? err.message : String(err));
+        return CHECK_EXIT.CouldNotRun;
+      }
     default:
       console.error(`Unknown command: ${cmd}`);
       printHelp();
@@ -70,6 +83,15 @@ function printHelp(): void {
       "design-sync — Storybook ↔ Figma drift CLI",
       "",
       "Usage:",
+      "  design-sync check [--url http://localhost:6006]",
+      "                                          Run the panel's drift check headlessly against a RUNNING",
+      "                                          `storybook dev`, over every registered story.",
+      "                                          --story <id> / --component <name> (repeatable) to narrow;",
+      "                                          --both-modes, --json, --out <file>, --full-report,",
+      "                                          --timeout <ms>, --headed, --quiet",
+      "                                          Exit: 0 clean · 1 drift · 2 coverage incomplete · 3 could not run",
+      "                                          Needs Playwright (optional peer dep) and FIGMA_PAT in the",
+      "                                          STORYBOOK process's environment, not the CLI's.",
       "  design-sync audit                       Diff stories on disk against the registry (exits non-zero on drift)",
       "                                          Also validates the SHAPE of declared child bindings (not that they resolve)",
       "                                          Exits non-zero on any story file it could not read — a file that yields no",

@@ -55,3 +55,35 @@ export function panelTimeoutMessage(budgetMs: number): string {
     `Check its terminal for errors, then re-run.`
   );
 }
+
+/* ------------------------------------------------------------------------- *
+ * Bulk-run budgets
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Per-story ceiling for a **whole-registry** run — the panel's `Check all` and
+ * the CLI's `design-sync check`, which must agree: a story that fails headlessly
+ * has to fail in the panel too, or the two answers diverge on timing alone.
+ *
+ * Far tighter than the explicit budget above, and for the opposite reason. An
+ * explicit check is one story a human is waiting on; a bulk run has the whole
+ * registry to get through, and a story that hangs costs every story after it.
+ *
+ * These numbers lived as a literal in `manager.tsx` (`dualMode ? 16000 : 8000`).
+ * They are here now because a second caller appeared, and "the budget the panel
+ * uses" had to stop being a number typed in one file.
+ */
+export const BULK_STORY_BUDGET_MS = 8_000;
+/** Dual-mode: two snapshots and two engine passes per story, so twice the room. */
+export const BULK_STORY_BUDGET_DUAL_MS = 16_000;
+
+export function bulkBudgetMs(dualMode: boolean): number {
+  return dualMode ? BULK_STORY_BUDGET_DUAL_MS : BULK_STORY_BUDGET_MS;
+}
+
+/**
+ * Budget for a run's shared Figma fetch (`WarmCacheRequest` → `WarmCacheDone`),
+ * outside every story's own budget (#56). Generous: on a cold cache this is one
+ * `/variables/local` call plus file metadata for a whole design system.
+ */
+export const WARM_BUDGET_MS = 30_000;

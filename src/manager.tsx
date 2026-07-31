@@ -36,6 +36,7 @@ import {
   countRowStatuses,
   fixLayer,
   codeTokenName,
+  visibleDimensions,
   EMPTY_STATUS_COUNTS,
   type BindingAdvisory,
   type ElementGroup,
@@ -53,7 +54,12 @@ import { driftedSiblings } from "./property-families.js";
 import { runBulkCheck, type WarmOutcome } from "./bulk-run.js";
 import { variantScopeFor, type SiblingStoryRows } from "./variant-scope.js";
 import { coverageLabel, summarizeBulk, type BulkSummaryRow } from "./bulk-summary.js";
-import { panelBudgetMs, panelTimeoutMessage } from "./check-budget.js";
+import {
+  bulkBudgetMs,
+  panelBudgetMs,
+  panelTimeoutMessage,
+  WARM_BUDGET_MS,
+} from "./check-budget.js";
 import {
   readStoryDesignSync,
   requestStoryCheck,
@@ -68,8 +74,11 @@ import {
   versionIsStale,
   versionLabel,
 } from "./version-notice.js";
+import { STORY_RENDERED } from "./storybook-events.js";
 
-const STORY_RENDERED_EVENT = "storyRendered";
+// One definition of Storybook's own channel event names, shared with the
+// headless check so both bulk loops wait on the same event.
+const STORY_RENDERED_EVENT = STORY_RENDERED;
 
 interface PanelState {
   loading: boolean;
@@ -145,13 +154,8 @@ interface ApplyResult {
 
 const PIPELINE_DEFAULT_URL = "http://127.0.0.1:7099";
 
-/**
- * Budget for the run's shared Figma fetch (#56). Generous on purpose: this is the
- * multi-second `/variables/local` call on a large library, and the entire point of
- * hoisting it is that its cost belongs to the run instead of to whichever story
- * happened to be first.
- */
-const WARM_BUDGET_MS = 30000;
+// `WARM_BUDGET_MS` and the per-story bulk budget moved to `check-budget.ts` in
+// v0.0.45, so `design-sync check` runs on the panel's numbers rather than its own.
 
 /**
  * POST a single drift row to the design-sync-pipeline. Returns an
@@ -572,7 +576,7 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
           dualMode: liveCheckOptions.get().dualMode,
         }),
       // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
-      budgetMs: liveCheckOptions.get().dualMode ? 16000 : 8000,
+      budgetMs: bulkBudgetMs(liveCheckOptions.get().dualMode),
       onBudgetExpired: () => {
         // Drop the resolver for the abandoned check so a late report can't be
         // mistaken for the next story's.
@@ -963,31 +967,9 @@ interface DiffTableProps {
   onUndo: (key: string, scope: ApplyScope, inverse: Record<string, unknown>) => void;
 }
 
-/**
- * Dimensions the diff engine still emits as placeholders but the UI
- * deliberately hides — they have no payload, no engine, and no near-term
- * roadmap engine. Kept in the engine so future work has a single place
- * to wire real comparison logic into; removed from this set the moment
- * an engine starts producing meaningful data. Don't delete the engine
- * code that emits these; just edit this set.
- *
- * `structure` left this set in v0.0.39: it compares Figma auto-layout against
- * computed CSS layout (`engines/layout.ts`) and emits nothing at all unless both
- * sides are genuinely laying out children, which is what it was missing.
- */
-const HIDDEN_DIMENSION_KINDS = new Set<DimensionDiff["kind"]>([
-  "motion",
-]);
-
-/**
- * Apply the hidden-kinds filter at every consumer of `report.dimensions`
- * (table render, bulk apply, summary counts, markdown/json exports). Going
- * through this one helper means turning a dimension back on is a one-line
- * change to `HIDDEN_DIMENSION_KINDS` rather than a hunt across the file.
- */
-function visibleDimensions(report: DriftReport): DimensionDiff[] {
-  return report.dimensions.filter((d) => !HIDDEN_DIMENSION_KINDS.has(d.kind));
-}
+// `HIDDEN_DIMENSION_KINDS` and `visibleDimensions` moved to `row-triage.ts` in
+// v0.0.45, when `design-sync check` became a second reader of the same reports.
+// Turning a dimension back on is still a one-line change — just in that file.
 
 const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext, applyResults, onApply, onUndo }) => {
   // Rows with neither a code value nor a Figma value carry no information

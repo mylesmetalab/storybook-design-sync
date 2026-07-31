@@ -31,6 +31,11 @@ for binding writes, REST for variable values).
   checked. The run's shared Figma fetch (variables + file metadata) happens
   once, before the first story, so the first story is not charged for
   warming the cache every other story reads.
+- **[`design-sync check`](#check--the-panels-drift-check-headlessly)** runs that
+  same check with no panel — for CI, for a schedule, for an agent. It drives your
+  own Storybook preview in a headless browser and reuses the panel's request
+  builder, engine and triage, so its verdict is the panel's verdict; a clear
+  exit-code contract keeps "no drift" and "I could not find out" apart.
 - One row per property with a **Value** status pill — does Figma resolve
   to the same px / color as the rendered CSS? The panel reports current
   state only. (The former **Wiring** column — declared-token vs
@@ -563,9 +568,11 @@ before.
 
 ## CLI
 
-The package ships a `design-sync` binary with four subcommands:
+The package ships a `design-sync` binary with five subcommands:
 
 ```
+design-sync check [--url http://localhost:6006]
+                                        Run the drift check headlessly against a RUNNING Storybook
 design-sync audit                       Diff stories on disk against the registry
 design-sync register [--hints <path>]   Bulk-register from hints; stub the rest
 design-sync ls                          Print title → node binding tree
@@ -573,8 +580,9 @@ design-sync export-graph --format json|dot
                                         Emit the binding graph for docs / visualizations
 ```
 
-All subcommands accept `--stories <glob>` (repeatable). When `--stories`
-isn't passed, the CLI uses `storyGlobs` from `design-sync.config.json`,
+`audit`, `register`, `ls` and `export-graph` accept `--stories <glob>`
+(repeatable). When `--stories` isn't passed, the CLI uses `storyGlobs` from
+`design-sync.config.json`,
 falling back to `src/**/*.stories.*` and `stories/**/*.stories.*`. In
 monorepos where stories live in sibling packages, set the config field
 so the bare commands work without flags:
@@ -588,6 +596,99 @@ so the bare commands work without flags:
   ]
 }
 ```
+
+### `check` — the panel's drift check, headlessly
+
+```sh
+# 1. a Storybook dev server, with FIGMA_PAT in ITS environment
+FIGMA_PAT=figd_… npx storybook dev -p 6006 --ci &
+
+# 2. the check
+npx design-sync check
+```
+
+`check` runs **the same check the panel runs**, over every registered story, with
+no browser for a human to click in. It is what makes drift gateable in CI,
+runnable on a schedule, and answerable by an agent.
+
+**What its green means: exactly what the panel's green means.** This is a
+property of how it is built, not a claim about it. A drift check is three
+processes talking over one channel — the manager asks, the *preview* measures the
+rendered story with `getComputedStyle`, the Node server reads Figma and answers —
+and only the middle one needs a browser. `check` does not re-implement any of
+them. It stands in for the **manager**: it opens the consumer's own Storybook
+preview in a headless Chromium, emits the same `checkDriftRequest` (built by the
+same single request builder the panel uses), and reads the same `driftReport`
+back. Same snapshot code, same engine, same triage, same row grouping, same
+counts, same per-story budget.
+
+Measured against the reference consumer (ten registered Button stories), `check`
+and a panel **Check all** produced identical reports for all ten stories —
+comparing every dimension's kind, property, element, status, both values, token
+name, divergence kind, note, class attribution, source advisory and token
+presence:
+
+```
+Panel   Check all  — 10/10 stories checked · 138 match · 13 drift · 85 name-only · 10 flag-only
+CLI     check      — 10/10 stories checked · 138 match · 13 drift · 85 name-only · 10 flag-only
+                     10/10 stories row-for-row identical
+```
+
+**Flags.**
+
+| Flag | Meaning |
+|---|---|
+| `--url <url>` | Storybook's dev-server URL. Default `http://localhost:6006`. |
+| `--story <id>` | Check only this story. Repeatable. An id the registry does not bind is an error, never a silent skip. |
+| `--component <name>` | Check every registered story of this component (matched against the story id's component segment). Repeatable. |
+| `--both-modes` | The **Both modes** checkbox. Snapshots each story in both themes and merges, and says so when the theme switch could not be verified. |
+| `--json` | Write the machine-readable report to **stdout**. The human summary always goes to stderr, so `design-sync check --json \| jq` works. |
+| `--out <file>` | Write the same JSON to a file. Combines with or replaces `--json`. |
+| `--full-report` | Embed each story's complete `DriftReport` in the JSON, alongside the triaged rows. |
+| `--timeout <ms>` | Per-story budget. Defaults to the panel's: 8000 single-mode, 16000 with `--both-modes`. |
+| `--headed` | Show the browser. For debugging a check that behaves differently headless. |
+| `--quiet` | Suppress the progress lines and the summary. Exit code and `--json` only. |
+
+**Exit codes.** The contract, in the order that matters — `2` outranks `1`,
+because "I found drift and checked everything" is a stronger claim than a run
+with a hole in it is entitled to make:
+
+| Code | Meaning |
+|---|---|
+| `0` | Every targeted story produced a complete report, and **no row drifted**. |
+| `1` | Every targeted story was checked; at least one row is drift. Name-only token divergences, `flag-only` and `unresolved` rows are **not** drift and do not produce this. |
+| `2` | **The run covers less than it set out to.** A story errored, ran out of its budget, or produced a report resting on a Figma read that failed (`incomplete`) — or `--both-modes` was asked for and the theme switch could not be verified. Whatever drift it found is real; the run is not a verdict on the selection. |
+| `3` | **Nothing was compared.** Bad usage, no reachable Storybook, no browser driver, nothing registered, or a filter that matched no registered story. Never a statement about drift. |
+
+A CI job that only distinguishes zero from non-zero gets the right answer from
+all four. One that branches can tell "the design and the code disagree" from "I
+could not find out" — which is the distinction a rate-limited run in CI depends
+on, and the reason `incomplete` has never been allowed to mean `0`.
+
+**What it needs.**
+
+- **A running `storybook dev`.** Not a static `storybook build`: the engine that
+  reads Figma is a Node module inside Storybook's dev server, and a static build
+  has no server channel to reach it through. This is why the check is not
+  standalone — a standalone one would need its own copy of the engine *and* its
+  own snapshotter, and a second definition of "matches Figma" is the thing this
+  command exists not to become.
+- **`FIGMA_PAT` in the Storybook process's environment**, not the CLI's, for the
+  same reason.
+- **Playwright**, an *optional* peer dependency:
+  ```sh
+  npm i -D playwright && npx playwright install chromium
+  ```
+  Optional because `audit`, `register`, `ls` and `export-graph` need no browser,
+  and a browser download must not be the price of running them in CI. A project
+  that already runs `storybook test` has Playwright installed already.
+
+**It never writes.** There is no code path from `check` to an edit, in any
+`apply` mode.
+
+**It reports the version Storybook is running.** A dev server keeps serving the
+bundle it started with, so if the CLI and the Storybook process are different
+releases, `check` says so and tells you the report is the server's answer.
 
 ### `audit` — surface drift, fail CI
 
@@ -943,9 +1044,23 @@ consumers, it never compares them.
   is configured. A name divergence whose value matches is reported as an
   advisory rather than drift, so the heuristic's misses are visible rather
   than alarming.
-- **No headless check.** Drift checking runs in the panel over the Storybook
-  channel. `design-sync audit` gates the *registry* in CI; CI cannot yet gate
-  on drift itself.
+- **The headless check needs a running dev server, and is the *bulk* path.**
+  `design-sync check` (v0.0.45) runs the panel's check with no panel, and its
+  green means what the panel's green means — same preview snapshot, same engine,
+  same triage, [demonstrated row for row](#check--the-panels-drift-check-headlessly).
+  Four respects in which it is narrower, none of them affecting a verdict:
+  it needs `storybook dev` and cannot run against a static `storybook build`
+  (a static build has no addon server, so there is no engine to answer); it takes
+  the **bulk** per-story budget (8s, 16s with `--both-modes`) rather than the
+  explicit check's 30s/60s; it sends `trigger: "bulk"`, so the engine may answer
+  from its TTL caches exactly as **Check all** does — the panel's single **Check
+  drift** is the only path that revalidates against Figma on demand; and it emits
+  no **fix prompts**, only the rows they are built from (`--full-report` carries
+  everything a prompt needs, but the prompt text is panel-only).
+- **`check` reads the story's declared args, not edited controls.** A headless run
+  has nobody to move a control, so there is nothing to lose here — but it does
+  mean `check` cannot reproduce a report the panel produced *after* a control
+  edit.
 - **Upgrading invalidates the drift cache.** `.design-sync/cache.json` carries a
   schema version, bumped whenever a release changes what a report contains or
   what its verdicts mean (v0.0.39 added the layout and opacity comparisons;
@@ -1085,7 +1200,10 @@ consumers, it never compares them.
 
 ## What this addon is NOT
 
-- Not a CLI. The addon IS the surface.
+- Not *only* a CLI. The panel is the surface a designer works in; the CLI
+  (`check`, `audit`, `register`, `ls`, `export-graph`) is the surface CI and
+  agents work in. Both go through the same engine — see
+  [`check`](#check--the-panels-drift-check-headlessly).
 - Not coupled to a specific engine. The figma-rest engine is one of many
   future engines.
 - Not coupled to a specific consumer stack. The diff is dimension-shaped,

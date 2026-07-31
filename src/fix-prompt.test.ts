@@ -87,7 +87,12 @@ describe("buildFixPrompt — self-contained agent prompt", () => {
       codeValue: { light: "8px", dark: "8px" },
       figmaValue: { light: "6px", dark: "4px" },
     });
-    expect(p).toContain('{"light":"8px","dark":"8px"}');
+    // Modes that AGREE collapse to the one value they both hold — printing
+    // `{"light":"8px","dark":"8px"}` in an instruction is noise, and the live panel
+    // produced exactly that for a copy row reading "Cancel" in both modes.
+    expect(p).toContain("`8px`");
+    expect(p).not.toContain('{"light":"8px"');
+    // Modes that DISAGREE keep the full map: the difference is the information.
     expect(p).toContain('{"light":"6px","dark":"4px"}');
   });
 
@@ -178,10 +183,14 @@ describe("buildFixPrompt — sibling context (item 2)", () => {
     expect(p).toMatch(/leaves the component in a state nobody designed/);
   });
 
-  it("says nothing about siblings when none drifted the same way", () => {
+  it("says nothing about sibling PROPERTIES when none drifted the same way", () => {
     const p = buildFixPrompt(padding("padding-top"));
-    expect(p).not.toMatch(/sibling/i);
+    expect(p).not.toMatch(/Sibling properties/);
     expect(p).not.toMatch(/one design change/);
+    // "sibling" alone is no longer a safe probe: every prompt now carries a
+    // blast-radius bullet about sibling *variants* (#68), which is a different
+    // axis from sibling properties in a family.
+    expect(p).toMatch(/sibling variant/i);
   });
 
   it("reads correctly for a single sibling (verb agreement, not '1 sibling(s)')", () => {
@@ -591,7 +600,9 @@ describe("buildBulkFixPrompt — token-layer rows are not code edits", () => {
   })!;
 
   it("puts the token-layer row in its own section, out of the code section", () => {
-    expect(bulk).toContain("## Token-layer findings — the token's value moved (do NOT edit this component)");
+    expect(bulk).toContain(
+      "## Token-layer findings — the token, not this component (do NOT edit this component)",
+    );
     const code = bulk.slice(
       bulk.indexOf("## What to change in code"),
       bulk.indexOf("## Token-layer findings"),

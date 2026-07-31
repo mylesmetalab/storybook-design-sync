@@ -209,3 +209,29 @@ describe("tokenAliases — validated loudly, never silently ignored", () => {
     );
   });
 });
+
+/**
+ * Issue #63 — the copy dimension is off-switchable, because Figma has no way to say
+ * "this string is a placeholder" and the addon must not guess. `off` means no rows
+ * at all; a validated, defaulted flag follows the `apply` precedent.
+ */
+describe("copy — the applicability switch the design source cannot express", () => {
+  it("defaults to on, so every existing consumer is unchanged", async () => {
+    const dir = await writeConfig({ fileKey: "abc" });
+    expect((await loadConfig(dir)).copy).toBe("on");
+  });
+
+  it("accepts both declared values", async () => {
+    expect((await loadConfig(await writeConfig({ fileKey: "a", copy: "off" }))).copy).toBe("off");
+    expect((await loadConfig(await writeConfig({ fileKey: "a", copy: "on" }))).copy).toBe("on");
+  });
+
+  it("refuses anything else loudly, and names the per-story alternative", async () => {
+    const dir = await writeConfig({ fileKey: "abc", copy: false });
+    // Silently ignoring it would be the worst outcome: the user believes they turned
+    // the dimension off, the panel keeps reporting 16 permanent rows, and nothing
+    // says why.
+    await expect(loadConfig(dir)).rejects.toThrow(/`copy` must be "on" or "off"/);
+    await expect(loadConfig(dir)).rejects.toThrow(/compareCopy/);
+  });
+});

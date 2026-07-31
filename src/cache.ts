@@ -58,8 +58,16 @@ import type { ChildTarget, CodeSnapshot } from "./engines/types.js";
  *    same story would ever have overwritten one. Explicit entries are unaffected,
  *    but nothing in a stored entry says which trigger wrote it, so the generation
  *    goes as a whole.
+ *  - **7** (v0.0.44): reports gained `source` — the provenance of the Figma read
+ *    they rest on (#76). A v6 entry has none, and a fix prompt built from one can
+ *    only say "the read time is unknown", which is honest but useless: the whole
+ *    point of the field is that an applier can tell a fresh reading from a stale
+ *    one. Rather than leave a generation of entries permanently unstampable until
+ *    the file's `lastModified` happens to move, the generation goes. (`copy: "off"`
+ *    is handled by the cache *key* instead — see `configKey` in `figma-rest.ts` —
+ *    because that is a per-check setting, not a schema change.)
  */
-export const CACHE_VERSION = 6;
+export const CACHE_VERSION = 7;
 
 export interface CacheFile {
   version: typeof CACHE_VERSION;

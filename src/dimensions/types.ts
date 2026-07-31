@@ -6,6 +6,8 @@
 import type { ModeAwareValue } from "@metalab/design-sync-core";
 export type { ModeAwareValue };
 import type { ChildBindingStatus } from "../child-bindings.js";
+import type { TokenPresence } from "../token-presence.js";
+import type { ContractReference } from "../contract.js";
 
 export type DimensionKind =
   | "token-value"
@@ -127,6 +129,27 @@ export interface DimensionDiff {
    * would be worse than no feature.
    */
   childSelector?: string;
+  /**
+   * Whether the project's own CSS declares a custom property for this row's
+   * `tokenName` — resolved by `token-presence.ts` against the startup scan and
+   * attached by the server *after* the engine (so it is never cached and never
+   * stale relative to the CSS).
+   *
+   * **Annotation, not a verdict.** Nothing about a row's status, values or
+   * partitioning depends on it. It exists so a fix prompt can tell "this project
+   * spells the token `--color-x`" from "this project has no such token" instead of
+   * presenting a convention-converted Figma name as though it existed (#66/#67).
+   */
+  tokenPresence?: TokenPresence;
+  /**
+   * What `contracts/<component>.spec.json` records about the other slots this
+   * row's token drives (#71). Attached by the server when a contract exists.
+   *
+   * **Annotation, not a verdict**, for the same reason as above and one more: the
+   * contract is validated by nothing, so it may inform a human and must never
+   * overrule either side of a comparison.
+   */
+  contract?: ContractReference;
 }
 
 export interface DriftTiming {
@@ -230,11 +253,44 @@ export interface CacheStatus {
   notPersisted?: string;
 }
 
+/**
+ * **When** the Figma values in this report were read, and from what (issue #76).
+ *
+ * `generatedAt` says when the report object was assembled, which for a cache hit is
+ * *now*. That is the right answer for the panel's "last checked" line and the wrong
+ * one for a fix prompt: a prompt is applied later and reviewed later still, and
+ * without the read's own timestamp it is indistinguishable from a statement about
+ * the present. starter PR #5 applied one faithfully and would have re-introduced
+ * drift, because the Figma edit it cited had been reverted while the PR sat open.
+ *
+ * So this field is the *read's* identity, and the one rule that makes it worth
+ * anything: **a cache hit must carry the cached read's `readAt`, never a fresh
+ * one.** Restamping it would turn a two-day-old reading into a confident statement
+ * about now, which is the bug rather than the fix.
+ */
+export interface FigmaReadSource {
+  /** ISO timestamp of the Figma read the values came from. */
+  readAt: string;
+  /** The file's `lastModified` as of that read, when it could be read. */
+  fileLastModified?: string;
+  /** The file's `version` as of that read, when it could be read. */
+  fileVersion?: string;
+  /** True when this report was replayed from `.design-sync/cache.json`. */
+  fromCache?: boolean;
+}
+
 export interface DriftReport {
   storyId: string;
   nodeId: string;
   dimensions: DimensionDiff[];
   generatedAt: string;
+  /**
+   * Provenance of the Figma read behind these values — see {@link FigmaReadSource}.
+   * Optional because a report replayed from a cache written by an older addon has
+   * none, and an unknown read time must be reported as unknown rather than
+   * defaulted to now.
+   */
+  source?: FigmaReadSource;
   /** Present when something this report covers could not be read from Figma. */
   incomplete?: ReportIncomplete;
   /** Present only when the check was asked for two modes. */

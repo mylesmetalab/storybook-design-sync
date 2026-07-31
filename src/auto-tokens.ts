@@ -2,6 +2,7 @@ import type { TailwindThemeVars } from "@metalab/design-sync-core";
 import type { AutoTokenMap } from "./scan-css.js";
 import type { TsxClassHintMap } from "./scan-tsx.js";
 import type { TailwindComponentScan } from "./tailwind-components.js";
+import type { CustomPropertyIndex } from "./token-presence.js";
 
 /**
  * Process-wide singleton holding everything the startup scan derived:
@@ -24,10 +25,17 @@ export interface AutoScan {
   themeVars: TailwindThemeVars;
   components: TailwindComponentScan[];
   classHints: TsxClassHintMap;
+  /**
+   * Every custom property the scanned CSS declares → the files declaring it.
+   * Read by `token-presence.ts` so a fix prompt can tell "this project spells the
+   * token like this" from "this project has no such token" (issues #66/#67)
+   * instead of presenting a converted Figma name as if it existed.
+   */
+  customProperties: CustomPropertyIndex;
 }
 
 function emptyScan(): AutoScan {
-  return { map: {}, themeVars: {}, components: [], classHints: {} };
+  return { map: {}, themeVars: {}, components: [], classHints: {}, customProperties: {} };
 }
 
 let cached: AutoScan = emptyScan();

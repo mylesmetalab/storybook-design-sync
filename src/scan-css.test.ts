@@ -157,3 +157,47 @@ describe("scanCss — anything still skipped is reported, never silent (#46)", (
     expect(Object.keys(result.map)).toEqual([".button"]);
   });
 });
+
+/**
+ * Issues #66/#67 — the index that lets a fix prompt tell "this project spells the
+ * token `--color-x`" from "this project has no such token".
+ *
+ * Deliberately wider than `themeVars`: that reads Tailwind's `@theme` block (the
+ * subset generating utilities), while this is every custom property anywhere in the
+ * scanned CSS. Both are needed, and `.dark` matters as much as `:root` — half of a
+ * mode-varying token's answer lives there, and an index stopping at `:root` would
+ * report a dark-only override as absent.
+ */
+describe("customProperties — every declared custom property, and where", () => {
+  it("collects from @theme, :root and .dark alike", async () => {
+    const dir = await fixture({
+      "src/index.css": [
+        "@theme inline { --color-primary: var(--primary); }",
+        ":root { --primary: #2c2c2c; --radius: 8px; }",
+        ".dark { --primary: #383838; }",
+      ].join("\n"),
+    });
+    const { customProperties } = await scanCss(dir, ["src/**/*.css"]);
+    expect(Object.keys(customProperties).sort()).toEqual([
+      "color-primary",
+      "primary",
+      "radius",
+    ]);
+  });
+
+  it("records the consumer-relative files declaring each one, deduplicated", async () => {
+    const dir = await fixture({
+      "src/index.css": ":root { --primary: #000; }\n.dark { --primary: #fff; }",
+      "src/tokens.css": ":root { --primary: #111; --radius-lg: 12px; }",
+    });
+    const { customProperties } = await scanCss(dir, ["src/**/*.css"]);
+    expect(customProperties["primary"]).toEqual(["src/index.css", "src/tokens.css"]);
+    expect(customProperties["radius-lg"]).toEqual(["src/tokens.css"]);
+  });
+
+  it("is empty, not absent, for CSS that declares none", async () => {
+    const dir = await fixture({ "src/a.css": ".btn { color: red; }" });
+    const { customProperties } = await scanCss(dir, ["src/**/*.css"]);
+    expect(customProperties).toEqual({});
+  });
+});

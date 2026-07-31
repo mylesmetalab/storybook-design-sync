@@ -112,6 +112,16 @@ export interface CheckDriftRequestPayload {
    * deliberate re-check is a request for the truth. See `CheckDriftInput.trigger`.
    */
   bulk?: boolean;
+  /**
+   * `parameters.designSync.compareCopy` — `false` turns the `copy` dimension off
+   * for this story (issue #63). Relayed through the preview so the engine can emit
+   * **no** copy rows rather than suppressed ones.
+   *
+   * Per-story because the common case is mixed: a component's structural text is
+   * placeholder in Figma while its labels are real. Project-wide control is
+   * `"copy": "off"` in `design-sync.config.json`.
+   */
+  compareCopy?: boolean;
 }
 
 export interface ChildBindingsRequestPayload {
@@ -205,6 +215,12 @@ export interface CodeSnapshotPayload {
     /** Why the switch produced nothing. Present when `applied` is false. */
     reason?: string;
   };
+  /**
+   * Relayed from the request: `false` means this story declared
+   * `parameters.designSync.compareCopy: false` and the engine must produce no
+   * `copy` rows (#63).
+   */
+  compareCopy?: boolean;
 }
 
 /**
@@ -291,6 +307,16 @@ export interface ConfigInfoPayload {
    * process is a version behind — restart it.
    */
   installedVersion?: string;
+  /**
+   * Every custom property the startup CSS scan found, keyed without the leading
+   * `--`, mapped to the consumer-relative files declaring it.
+   *
+   * Sent to the panel so a fix prompt can resolve a Figma variable name against
+   * the project's own theme instead of presenting a convention-converted spelling
+   * as if it existed (issues #66/#67). Names and relative paths only — no file
+   * contents, no values, nothing secret.
+   */
+  themeCustomProperties?: Record<string, string[]>;
 }
 
 /**

@@ -176,6 +176,7 @@ All fields except `fileKey` are optional:
 | --- | --- | --- |
 | `fileKey` | *(required)* | The Figma file key drift checks run against (from the file's URL: `figma.com/design/<fileKey>/...`). |
 | `apply` | `"off"` | Write gating. `"off"` = audit-only panel (drift detail, advisories, and Copy fix prompt, but no write buttons). `"experimental"` = enables the Apply / Preview-all / bulk-apply write surface, labeled experimental. |
+| `copy` | `"on"` | Whether the `copy` dimension compares text at all. `"off"` emits **no** copy rows anywhere. Figma has no way to mark a string as placeholder text while stories are expected to carry realistic product copy, so a component whose design holds lorem drifts on every story forever — only you know which you have. Per-story override: `parameters.designSync.compareCopy: false`. See [Coverage and limits](#coverage-and-limits). |
 | `engine` | `"figma-rest"` | Drift-engine adapter name. |
 | `registryPath` | `".design-sync/registry.json"` | Where the story ↔ Figma-node registry lives. |
 | `codeTargets` | `[]` | The files this component's code lives in. Two accepted shapes, mixable: a **glob/path string** (`"src/components/ui/**/*.tsx"`) or an **object** (`{ "path": "src/Button.css", "scopeSelector": ".btn" }`). Fix prompts name these files, so this is worth setting even in audit-only mode. For `apply: "experimental"` code writes (`.css` → PostCSS token swaps, `.tsx`/`.jsx` → inline-style and JSX-text edits) the entry must be a **concrete path** — the write engines open the file, so a glob is refused with a message saying so. An empty list rejects code-scope applies with a "configure codeTargets" message. Anything that is neither shape is a config error naming the offending entry (it used to become a silent `undefined` in every fix prompt). |
@@ -395,6 +396,11 @@ Fields the addon reads from `parameters.designSync`:
   console warning rather than half-applied. Documented since the dual-mode
   comparison landed but sent by neither check path until v0.0.43 ([#80]), so a
   project on `["day", "night"]` was silently measured as light/dark.
+- `compareCopy` *(boolean, default `true`)* — set `false` to stop comparing this
+  story's text against Figma's TEXT nodes. For the common case where a component's
+  structural text is placeholder in the design but its labels are real, so the
+  project-wide `"copy": "off"` would be too blunt. `false` emits **no** copy rows
+  for the story — see [Coverage and limits](#coverage-and-limits) ([#63]).
 - `tokens` — deprecated, see below.
 
 `target` is the only field most stories need. The addon's PostCSS scanner
@@ -830,6 +836,18 @@ is undeterminable and nothing is said.
   unbound child has no typography comparison at all — bind the text-bearing
   element as a child. Everything a wrapper paints itself (background, borders,
   radii, padding, gap, shadow, opacity) is compared exactly as before.
+- **Copy is compared until you say it shouldn't be** ([#63], v0.0.44). Text
+  comparison only means something when the design intends the literal string, and
+  **Figma cannot express "this is a placeholder"** — while a Storybook story is
+  expected to render realistic product copy. So a component whose Figma text is
+  lorem and whose stories carry real copy drifts on every story, permanently: on a
+  live Card that was 16 of 20 remaining rows. Turn it off with `"copy": "off"` in
+  `design-sync.config.json` (whole project) or
+  `parameters.designSync.compareCopy: false` (one story, for the common case where
+  a component's structural text is placeholder but its labels are not). Off means
+  **no rows**, not rows with the verdict withheld. Placeholder-ness is never
+  *inferred* from the string: lorem detection is a heuristic that misfires on real
+  copy, and a button Figma labels `Save` genuinely should say Save.
 - **A TEXT node's fill is its text colour, never a background.** Figma gives a
   TEXT node no background paint, so `background-color` is not compared against
   one — the code side reads transparent on any text element and the row could
@@ -869,6 +887,47 @@ is undeterminable and nothing is said.
   `storybook-design-inspector` addon grades contrast per element and across
   token pairings.
 
+**What a fix prompt asserts — and what it says it cannot** (v0.0.44).
+
+The fix prompt is the whole write path in v1: detection ships, and every change
+that reaches a codebase does so because a human or an agent pasted one. So a
+prompt may only assert a change it has *established*. Before proposing an edit it
+answers four questions, and **where it cannot answer one it says so** rather than
+emitting a confident instruction.
+
+- **Which layer owns this?** A `copy` row is routed to whoever owns the content
+  and never into a code edit — in the bulk prompt it has its own section and the
+  instructions say not to act on it. Rewriting a story's `args` to match a Figma
+  placeholder produces a plausible diff that destroys what the story was for
+  ([#63]). A token the project's scanned CSS does not declare is stated as absent,
+  with the file where custom properties *are* declared, and the prompt refuses both
+  a dangling `var()` and a hardcoded literal ([#67]). A token whose value moved is
+  a design-token PR, not a component edit (v0.0.38).
+- **What else does it affect?** Properties in one family are named as one change
+  (v0.0.36). Where a **Check all** has run, a prompt names the sibling stories that
+  expect a *different* value for the same element and property, and drops "keep the
+  change minimal" — applying such a row as written contradicted Figma on 7 of 8
+  sibling variants on a live Card ([#68]). Where no sibling was compared, the
+  prompt says the blast radius is **not established** and what to do about it. Slots
+  the component's contract binds to the same token are named too ([#71]).
+- **Is it complete across modes?** A mode-varying token carries **both** values and
+  says the change is half-applied until both are covered. A prompt with only the
+  light value looks right and leaves dark silently wrong ([#66]).
+- **Is it still true?** Every prompt carries the **ISO timestamp of the Figma
+  read**, the file's `version` and `lastModified` at that read, the node id and the
+  addon version, and instructs the applier to re-verify against Figma before
+  committing and to **stop** on a mismatch. A prompt built from a cached report
+  reports the *cache's* read time, never the moment it was copied; a report with no
+  recorded read time says the read time is unknown rather than implying freshness.
+  starter PR #5 applied a prompt faithfully and would have re-introduced drift,
+  because the Figma edit it cited had been reverted while the PR sat open ([#76]).
+
+Two limits of that machinery, stated plainly. The blast-radius check is only as
+wide as the **last Check all in this panel session** — it is not persisted, so a
+fresh panel reports "not established" until you run one. And the contract read is
+`contracts/<component>.spec.json` only, matched on the token name; it names
+consumers, it never compares them.
+
 **Known fragilities.**
 
 - **Story discovery is only as complete as `storyGlobs`.** CSF3 **autotitle**
@@ -892,7 +951,8 @@ is undeterminable and nothing is said.
   what its verdicts mean (v0.0.39 added the layout and opacity comparisons;
   v0.0.41 drops the generation that could contain partial passes; v0.0.43 drops
   the generation whose `Check all` entries were written from requests carrying
-  none of the story's context — [#80]). The first check
+  none of the story's context — [#80]; v0.0.44 drops the generation written before
+  a report carried the provenance of its Figma read — [#76]). The first check
   after an upgrade re-fetches rather than replaying a report that predates the new
   rows, and the panel's counters line says how many entries were discarded —
   silence there used to be indistinguishable from a clean cold run.
@@ -990,11 +1050,16 @@ is undeterminable and nothing is said.
   the header simply omits that story's rows, so a total compared against a known
   baseline can differ with no visible cause. The 8s budget sits inside the
   observed duration range for image-asset stories with five child bindings.
-- **Contract-declared siblings are invisible where a slot is unbound** ([#71]).
-  `contracts/*.spec.json` may record one Figma token driving several slots;
-  drift only compares the slots present in the registry. Fixing the reported row
-  can leave a declared pair split across two values, and nothing in the report
-  says the sibling exists.
+- **Contract-declared siblings are named, not compared** ([#71], v0.0.44).
+  `contracts/<component>.spec.json` may record one Figma token driving several
+  slots while drift compares only the slots present in the registry, so fixing the
+  reported row could leave a declared pair split across two values. The prompt now
+  reads the contract and names the other consumers, marking the ones this report
+  could not reach — but nothing *compares* them, and the contract is still
+  validated by nothing. It informs a human; it never overrules either side. Token
+  matching allows the contract's longer, collection-qualified path
+  (`size/space/200`) against the report's variable name (`Space/200`), and refuses
+  an **ambiguous** suffix match rather than pairing the wrong slot.
 - **The panel reports the version it is running, but cannot reload it** ([#62],
   reported since v0.0.41). The header shows the addon version this Storybook
   process loaded, the counters line says how many cache entries an upgrade
@@ -1005,11 +1070,16 @@ is undeterminable and nothing is said.
   bundle is cached).
 
 [#62]: https://github.com/mylesmetalab/storybook-design-sync/issues/62
+[#63]: https://github.com/mylesmetalab/storybook-design-sync/issues/63
+[#66]: https://github.com/mylesmetalab/storybook-design-sync/issues/66
+[#67]: https://github.com/mylesmetalab/storybook-design-sync/issues/67
+[#68]: https://github.com/mylesmetalab/storybook-design-sync/issues/68
 [#69]: https://github.com/mylesmetalab/storybook-design-sync/issues/69
 [#71]: https://github.com/mylesmetalab/storybook-design-sync/issues/71
 [#72]: https://github.com/mylesmetalab/storybook-design-sync/issues/72
 [#73]: https://github.com/mylesmetalab/storybook-design-sync/issues/73
 [#74]: https://github.com/mylesmetalab/storybook-design-sync/issues/74
+[#76]: https://github.com/mylesmetalab/storybook-design-sync/issues/76
 [#78]: https://github.com/mylesmetalab/storybook-design-sync/issues/78
 [#80]: https://github.com/mylesmetalab/storybook-design-sync/issues/80
 

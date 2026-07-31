@@ -74,6 +74,25 @@ export interface ScanResult {
    * file.
    */
   themeVars: TailwindThemeVars;
+  /**
+   * **Every** custom property declared anywhere in the scanned files, keyed
+   * without the leading `--`, mapped to the consumer-relative files declaring it.
+   *
+   * Distinct from `themeVars`, and both are needed. `themeVars` is Tailwind's
+   * `@theme` block — the subset that generates utilities, which is what turns
+   * `bg-primary` into a binding. This is the whole set: `:root`, `.dark`,
+   * `@theme`, a plain rule, anything. It answers a different question — "does this
+   * project declare a custom property by this name at all?" — which is what a fix
+   * prompt must know before it names one (issues #66/#67). A prompt that suggested
+   * `var(--text-positive-secondary)` in a project whose colours are `--color-*`,
+   * and which declared no such property, was the failure this collection exists to
+   * prevent.
+   *
+   * `.dark` is included deliberately: half of a mode-varying token's answer lives
+   * there, and an index that stopped at `:root` would report a dark-only override
+   * as absent.
+   */
+  customProperties: Record<string, string[]>;
 }
 
 /**
@@ -270,6 +289,7 @@ export async function scanCss(
 
   const map: AutoTokenMap = {};
   const themes: TailwindThemeVars[] = [];
+  const customProperties: Record<string, string[]> = {};
   for (const file of files) {
     let source: string;
     try {
@@ -292,6 +312,18 @@ export async function scanCss(
     root.walkRules((rule) => {
       processRule(rule, map);
     });
+    // Declarations, not rules: `@theme { --color-primary: … }` is an at-rule, so
+    // `walkRules` never reaches its children. `walkDecls` reaches every
+    // declaration wherever it sits, which is the point — the index must not depend
+    // on which block a consumer keeps its tokens in.
+    const rel = relative(cwd, file);
+    root.walkDecls((decl) => {
+      if (!decl.prop.startsWith("--")) return;
+      const name = decl.prop.slice(2).trim();
+      if (name === "") return;
+      const bucket = customProperties[name] ?? (customProperties[name] = []);
+      if (!bucket.includes(rel)) bucket.push(rel);
+    });
   }
 
   return {
@@ -300,6 +332,7 @@ export async function scanCss(
     scannedFiles: files,
     skipped,
     themeVars: mergeTailwindThemes(...themes),
+    customProperties,
   };
 }
 

@@ -35,6 +35,15 @@ import {
   type FigmaComponentPropertyValue,
 } from "./component-properties.js";
 import {
+  allPaintsHiddenNote,
+  hiddenPaintsSkippedNote,
+  isHiddenNode,
+  partialOpacityNote,
+  pickVisiblePaint,
+  type PaintKindWord,
+  type PaintSelection,
+} from "./paint-visibility.js";
+import {
   FigmaRateLimitError,
   describeFetchFailure,
   isRateLimitError,
@@ -168,6 +177,12 @@ interface FigmaNode {
 interface FigmaPaint {
   type: string;
   color?: { r: number; g: number; b: number; a?: number };
+  /**
+   * Optional, default `true`. Read only through `paint-visibility.ts` — a paint
+   * this is `false` on does not render, and reading it as the element's colour
+   * was issue #85.
+   */
+  visible?: boolean;
   opacity?: number;
   boundVariables?: Record<string, FigmaVariableAlias>;
 }
@@ -1041,8 +1056,16 @@ class FigmaRestEngine implements Engine {
     // right once. The `color` path below is the one that means something.
     if (node.type !== "TEXT") {
       const codeBg = snapshot.styles["background-color"];
-      const figmaBg = resolveFillColor(node, variables, activeMode);
+      // Which paint renders is a question of its own (#85): the first *visible*
+      // one, not `fills[0]`. `paint` carries the answer plus the note that
+      // explains a skipped, switched-off or blended paint.
+      const paint = readPaint(node.fills, "fill", variables, activeMode);
+      const figmaBg = paint.color;
       const fillStyle = fillStyleName(node);
+      // Every paint switched off is a fact about the design and belongs in a row —
+      // but only when the code paints something, which the first clause already
+      // covers. With both sides painting nothing the two agree and a row would be
+      // noise.
       if (!isTransparentColor(codeBg) || figmaBg !== undefined || fillStyle !== undefined) {
         const modes = figmaBg?.modes;
         const figmaValue = figmaBg?.value;
@@ -1056,10 +1079,16 @@ class FigmaRestEngine implements Engine {
         // the row has to say the read failed — `flag-only` would claim Figma
         // declares nothing, and `match` on an absent value is the false positive
         // the honesty invariant exists to forbid.
-        const unreadableStyle = figmaBg === undefined && fillStyle !== undefined;
-        const status: DimensionDiff["status"] = unreadableStyle
-          ? "unresolved"
-          : colorRowStatus(codeBg, figmaValue);
+        //
+        // Only when a paint actually renders, though: a style whose paints are all
+        // switched off was read fine, and its answer is "nothing is painted"
+        // (#85). That is the paint note's story to tell, not a failed read's.
+        const unreadableStyle =
+          figmaBg === undefined && fillStyle !== undefined && paint.selection.kind === "paint";
+        const status: DimensionDiff["status"] =
+          unreadableStyle || paint.incomparable
+            ? "unresolved"
+            : colorRowStatus(codeBg, figmaValue);
         const diff: DimensionDiff = {
           kind: "token-value",
           property: "background-color",
@@ -1070,7 +1099,12 @@ class FigmaRestEngine implements Engine {
         if (modes) diff.modes = modes;
         if (figmaBg?.tokenName) diff.tokenName = figmaBg.tokenName;
         if (sourceAdvisory) diff.sourceAdvisory = sourceAdvisory;
-        if (unreadableStyle) {
+        // Paint visibility outranks the paint-style notes: "every paint is off"
+        // and "this is the second paint, the first is off" are the facts that
+        // decide whether the rest of the row means anything (#85).
+        if (paint.note) {
+          diff.note = paint.note;
+        } else if (unreadableStyle) {
           diff.note =
             `Figma's fill comes from the shared paint style "${fillStyle}", but no colour could be ` +
             `read from it (the paint is not a readable solid), so no comparison was made.`;
@@ -1238,13 +1272,23 @@ class FigmaRestEngine implements Engine {
       }
     }
 
-    // Border width & color — only report when Figma actually has a visible
-    // border (non-empty `strokes` array OR a bound stroke variable). Figma's
-    // `strokeWeight` defaults to 1 on every variant template even when no
+    // Border width & color — only report when Figma actually draws a border.
+    // Figma's `strokeWeight` defaults to 1 on every variant template even when no
     // stroke is drawn, so guarding on `strokeWeight > 0` alone produces
     // false-positive rows for icon-only / borderless components.
-    const figmaHasVisibleStroke =
-      Array.isArray(node.strokes) && (node.strokes as FigmaPaint[]).length > 0;
+    //
+    // "Draws a border" means a *visible* stroke paint (#85). The old guard was
+    // `strokes.length > 0`, which called a switched-off stroke a border and then
+    // reported the template's 1px default as the design's intent.
+    const strokePaint = readPaint(
+      node.strokes as FigmaPaint[] | undefined,
+      "stroke",
+      variables,
+      activeMode,
+    );
+    const figmaHasVisibleStroke = strokePaint.selection.kind === "paint";
+    /** Strokes exist but every one is switched off — a deliberate no-stroke. */
+    const figmaStrokesAllHidden = strokePaint.selection.kind === "all-hidden";
 
     // The element may draw its border on any single edge (commonly
     // border-bottom for separator rows) rather than uniformly. Pick
@@ -1282,31 +1326,29 @@ class FigmaRestEngine implements Engine {
             : null,
           status,
           ...(figmaWeight?.tokenName ? { tokenName: figmaWeight.tokenName } : {}),
+          // Reached when the code draws a border and Figma's strokes are all
+          // switched off. Without the note the null Figma cell reads as "Figma
+          // says nothing", when in fact it says "draw nothing" (#85).
+          ...(figmaStrokesAllHidden && !figmaWeight && strokePaint.note
+            ? { note: strokePaint.note }
+            : {}),
         });
       }
     }
 
-    // Border color — same guard. `strokes[0]` mirrors `fills[0]` shape.
-    if (figmaHasVisibleStroke) {
-      const stroke = (node.strokes as FigmaPaint[])?.[0];
-      let figmaStroke: ResolvedFill | undefined;
-      let strokeTokenName: string | undefined;
-      let strokeVariableId: string | undefined;
-      if (stroke) {
-        const alias = stroke.boundVariables?.color;
-        if (alias && variables) {
-          figmaStroke = resolveColorVariable(alias.id, variables, activeMode);
-          const v = variables.meta.variables[alias.id];
-          if (v) strokeTokenName = v.name;
-          strokeVariableId = alias.id;
-        }
-        if (!figmaStroke && stroke.color) {
-          figmaStroke = { value: rgbaToCss(stroke.color) };
-        }
-      }
+    // Border color — same guard, and the same paint-selection question as the
+    // fill (#85): the stroke that renders, not `strokes[0]`. The block also runs
+    // for a deliberate no-stroke, so that a code border against a switched-off
+    // design stroke is reported instead of silently skipped.
+    if (figmaHasVisibleStroke || figmaStrokesAllHidden) {
+      const figmaStroke = strokePaint.color;
+      const strokeTokenName = figmaStroke?.tokenName;
+      const strokeVariableId = figmaStroke?.variableId;
       const codeValue = snapshot.styles[`border-${codeBorderEdge}-color`];
       if (figmaStroke || !isTransparentColor(codeValue)) {
-        const status = colorRowStatus(codeValue, figmaStroke?.value);
+        const status: DimensionDiff["status"] = strokePaint.incomparable
+          ? "unresolved"
+          : colorRowStatus(codeValue, figmaStroke?.value);
         const diff: DimensionDiff = {
           kind: "token-value",
           property: "border-color",
@@ -1321,6 +1363,7 @@ class FigmaRestEngine implements Engine {
           variables,
         });
         if (strokeAdvisory) diff.sourceAdvisory = strokeAdvisory;
+        if (strokePaint.note) diff.note = strokePaint.note;
         out.push(diff);
       }
     }
@@ -1564,25 +1607,19 @@ class FigmaRestEngine implements Engine {
         }
       }
 
-      // color — text node's first fill (color or alias to color variable).
+      // color — the text node's first VISIBLE fill (#85). A TEXT node's fill is
+      // its text colour, and a switched-off one is as invisible here as anywhere
+      // else, so the same predicate applies.
       {
         const codeValue = snapshot.styles["color"];
-        let figmaColor: ResolvedFill | undefined;
-        let colorTokenName: string | undefined;
-        const fill = textNode.fills?.[0];
-        let colorVariableId: string | undefined;
-        if (fill) {
-          const alias = fill.boundVariables?.color;
-          if (alias && variables) {
-            figmaColor = resolveColorVariable(alias.id, variables, activeMode);
-            const v = variables.meta.variables[alias.id];
-            if (v) colorTokenName = v.name;
-            colorVariableId = alias.id;
-          }
-          if (!figmaColor && fill.color) figmaColor = { value: rgbaToCss(fill.color) };
-        }
+        const textPaint = readPaint(textNode.fills, "fill", variables, activeMode);
+        const figmaColor = textPaint.color;
+        const colorTokenName = figmaColor?.tokenName;
+        const colorVariableId = figmaColor?.variableId;
         if (codeValue || figmaColor) {
-          const status = colorRowStatus(codeValue, figmaColor?.value);
+          const status: DimensionDiff["status"] = textPaint.incomparable
+            ? "unresolved"
+            : colorRowStatus(codeValue, figmaColor?.value);
           const diff: DimensionDiff = {
             kind: "token-value",
             property: "color",
@@ -1598,6 +1635,7 @@ class FigmaRestEngine implements Engine {
             variables,
           });
           if (sourceAdvisory) diff.sourceAdvisory = sourceAdvisory;
+          if (textPaint.note) diff.note = textPaint.note;
           out.push(diff);
         }
       }
@@ -2174,6 +2212,10 @@ function collectFigmaText(node: FigmaNode): string[] {
       // The root node itself can be an INSTANCE; only skip *descendant*
       // instances (i.e. depth > 0).
       if (child.type === "INSTANCE" && depth > 0) continue;
+      // A hidden layer renders no text, and hides its children with it (#85).
+      // Comparing a switched-off placeholder's `characters` against the story's
+      // rendered copy is the copy dimension's version of reading `fills[0]` blind.
+      if (isHiddenNode(child)) continue;
       walk(child, depth + 1);
     }
   }
@@ -2395,13 +2437,20 @@ function colorRowStatus(
   return normalizeColor(codeValue) === normalizeColor(figmaValue) ? "match" : "drift";
 }
 
-function resolveFillColor(
-  node: FigmaNode,
+/**
+ * Resolve one paint — the one that renders — to a colour.
+ *
+ * Takes a `Paint` rather than a node on purpose (issue #85). Choosing *which*
+ * paint is a separate question with its own answer in `paint-visibility.ts`, and
+ * every reader here had inlined `[0]` as if it weren't a question at all. The
+ * fill, stroke and TEXT-colour paths now all pick first, then resolve here, so
+ * none of them can drift back to index 0 on its own.
+ */
+function resolvePaintColor(
+  fill: FigmaPaint,
   variables: FigmaLocalVariablesResponse | null,
   activeMode?: string,
 ): ResolvedFill | undefined {
-  const fill = node.fills?.[0];
-  if (!fill) return undefined;
   // A paint delivered by a shared paint style arrives here already flattened:
   // Figma inlines the style's paint into `fills`, `boundVariables` included, so
   // there is no style indirection left to follow. `fillStyleName` reports which
@@ -2427,6 +2476,61 @@ function resolveFillColor(
     };
   }
   return undefined;
+}
+
+/**
+ * What a paint array yields for a colour row: the colour (when one paints), the
+ * note the row must carry, and whether a verdict may be claimed at all.
+ *
+ * One function for the fill, stroke and TEXT-colour paths so the three cannot
+ * answer #85 differently — they were three near-copies of the same eight lines,
+ * and all three read index 0 blind.
+ */
+interface PaintRead {
+  selection: PaintSelection<FigmaPaint>;
+  /** The rendering paint's colour, when there is one and it could be read. */
+  color?: ResolvedFill;
+  /** Note explaining a skipped, switched-off or blended paint. */
+  note?: string;
+  /**
+   * True when a paint renders but its colour is not what appears (partial
+   * opacity). The row reports; it must not compare.
+   */
+  incomparable: boolean;
+}
+
+function readPaint(
+  paints: FigmaPaint[] | undefined,
+  word: PaintKindWord,
+  variables: FigmaLocalVariablesResponse | null,
+  activeMode?: string,
+): PaintRead {
+  const selection = pickVisiblePaint(paints);
+  if (selection.kind === "all-hidden") {
+    return {
+      selection,
+      note: allPaintsHiddenNote(word, selection.hidden),
+      incomparable: false,
+    };
+  }
+  if (selection.kind !== "paint") return { selection, incomparable: false };
+  const color = resolvePaintColor(selection.paint, variables, activeMode);
+  if (selection.partialOpacity !== undefined) {
+    return {
+      selection,
+      ...(color ? { color } : {}),
+      note: partialOpacityNote(word, selection.partialOpacity),
+      incomparable: true,
+    };
+  }
+  return {
+    selection,
+    ...(color ? { color } : {}),
+    ...(selection.hiddenBefore > 0
+      ? { note: hiddenPaintsSkippedNote(word, selection.hiddenBefore) }
+      : {}),
+    incomparable: false,
+  };
 }
 
 /**
@@ -2841,6 +2945,21 @@ const FIGMA_CORNER_TO_CSS: Record<string, string> = {
   RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS: "border-bottom-right-radius",
 };
 
+/**
+ * The colour variable the **rendering** paint binds, for the wiring dimension.
+ *
+ * A switched-off paint may well bind a variable; that binding is not what the
+ * element is wired to, and reporting it made the Wiring column name a token the
+ * design had stopped using (#85).
+ */
+function visiblePaintColorAlias(
+  paints: FigmaPaint[] | undefined,
+): FigmaVariableAlias | undefined {
+  const selection = pickVisiblePaint(paints);
+  if (selection.kind !== "paint") return undefined;
+  return selection.paint.boundVariables?.color;
+}
+
 function collectFigmaBindings(
   node: FigmaNode,
   variables: FigmaLocalVariablesResponse | null,
@@ -2886,12 +3005,13 @@ function collectFigmaBindings(
     setBinding(cssProp, first);
   }
 
-  // Fall back to fills[0].boundVariables.color when the node has no top-level
-  // `fills` boundVariable (some shapes carry it on the paint instead). Same
-  // TEXT-node rule as above.
+  // Fall back to the rendering paint's `boundVariables.color` when the node has
+  // no top-level `fills` boundVariable (some shapes carry it on the paint
+  // instead). Same TEXT-node rule as above — and the *visible* paint, because a
+  // switched-off paint's variable is not what this element is wired to (#85).
   const fillProperty = node.type === "TEXT" ? "color" : "background-color";
   if (!out[fillProperty]) {
-    const fillAlias = node.fills?.[0]?.boundVariables?.color;
+    const fillAlias = visiblePaintColorAlias(node.fills);
     if (fillAlias) setBinding(fillProperty, fillAlias);
   }
 
@@ -2911,9 +3031,10 @@ function collectFigmaBindings(
         setBinding(cssProp, alias);
         continue;
       }
-      // `fills` on TEXT is the color paint — try fills[0].boundVariables.color.
+      // `fills` on TEXT is the color paint — try the visible paint's
+      // `boundVariables.color`.
       if (figmaKey === "fills" && !out["color"]) {
-        const fillAlias = textNode.fills?.[0]?.boundVariables?.color;
+        const fillAlias = visiblePaintColorAlias(textNode.fills);
         if (fillAlias) setBinding("color", fillAlias);
       }
     }
@@ -2937,13 +3058,20 @@ function collectFigmaBindings(
  *
  * Falls back to the first descendant when no candidate stands out (e.g.
  * single-glyph atoms like the Caret).
+ *
+ * Hidden descendants are not candidates (#85) — a switched-off label's
+ * typography is not the component's typography. The bound node itself is read
+ * even when hidden: see `isHiddenNode`.
  */
 function findFirstTextNode(node: FigmaNode): FigmaNode | undefined {
   if (node.type === "TEXT") return node;
   const all: FigmaNode[] = [];
   const walk = (n: FigmaNode): void => {
     if (n.type === "TEXT") all.push(n);
-    for (const child of n.children ?? []) walk(child);
+    for (const child of n.children ?? []) {
+      if (isHiddenNode(child)) continue;
+      walk(child);
+    }
   };
   walk(node);
   if (all.length === 0) return undefined;

@@ -919,6 +919,34 @@ nothing is followed by hand. Three things are now said out loud:
 - a style whose paint yields no readable colour at all (a gradient or image-only
   style) is `unresolved` with the reason, never `match` and never `flag-only`.
 
+**Which paint is compared** ([#85], v0.0.46). The **first visible** paint in
+`fills` / `strokes` — not `fills[0]`. A Figma `Paint` carries an optional
+`visible`, and a paint switched off with the current one below it is ordinary
+practice (last month's brand colour parked on top, an overlay off for this
+variant). Until v0.0.46 nothing read that field, so the switched-off paint was
+resolved, token-attributed and compared, while the paint that actually renders was
+never compared at all — a false finding *and* a real property silently unchecked,
+in one row, and unfalsifiable from the panel because the colour named genuinely is
+in the file. Now:
+
+- the rendering paint is the first one with `visible !== false` and a non-zero
+  `opacity`, and the row says when it was not the first paint in the array;
+- **a visible paint is never skipped for being unreadable** — a gradient above a
+  solid wins and resolves to nothing, because skipping to the solid would compare
+  something invisible all over again;
+- **every paint switched off is not "no fill".** The design paints nothing there
+  *on purpose*, which is a different fact from "Figma told us nothing", and the row
+  says which — with no verdict and no token attributed. A `strokeWeight` of 1 (the
+  variant-template default) is no longer reported as a border the design draws
+  when its strokes are all off;
+- the **Wiring** column takes its binding from the rendering paint too: a hidden
+  paint's variable is not what the element is wired to;
+- the same predicate applies to **hidden descendants** — a switched-off TEXT layer
+  is not the component's typography and its `characters` are not its copy. The
+  node a *story is bound to* is still read even if hidden: there the binding is
+  what is wrong, and silently comparing nothing would hide the misbinding instead
+  of surfacing it.
+
 **Token tier (colour only).** When a fill binds a variable whose collection has a
 single mode, **and** the same file themes colour in some other collection, the row
 says so: that colour cannot follow the theme, and any multi-mode variable that
@@ -997,10 +1025,18 @@ is undeterminable and nothing is said.
   mechanism.
 - **Anything Figma does not express as a bound variable on a supported
   property.** `strokeAlign`, hug/fill sizing (`layoutSizing*`, `layoutGrow`,
-  `layoutAlign`), blend modes, gradient and image fills, second and subsequent
-  fills, `textAlignVertical`, paragraph spacing, `INSTANCE_SWAP` properties. Only
-  `fills[0]` is read, and only when SOLID — so an image-backed variant is
-  uncheckable on that property.
+  `layoutAlign`), blend modes, gradient and image fills, paint stacks below the
+  rendering paint, `textAlignVertical`, paragraph spacing, `INSTANCE_SWAP`
+  properties. Only **the first visible SOLID paint** is read (see below) — so an
+  image-backed variant is uncheckable on that property.
+- **A paint at partial opacity** ([#85], v0.0.46). A paint with `0 < opacity < 1`
+  renders as its colour blended with whatever is behind it, so its own colour is
+  not what appears. The row reports the paint, its token and the opacity and says
+  **no comparison was made** (`unresolved`), rather than comparing the opaque
+  value. Folding the opacity into the alpha channel would produce a comparable
+  number, but one no token holds — and a fix prompt then pointing at the token
+  would route the fix to the wrong layer, when the design's intent is an
+  element-level blend.
 - **Accessibility.** Contrast is not a drift concern: both sides can agree
   perfectly on a pairing that fails WCAG. The sibling
   `storybook-design-inspector` addon grades contrast per element and across
@@ -1217,6 +1253,7 @@ consumers, it never compares them.
 [#76]: https://github.com/mylesmetalab/storybook-design-sync/issues/76
 [#78]: https://github.com/mylesmetalab/storybook-design-sync/issues/78
 [#80]: https://github.com/mylesmetalab/storybook-design-sync/issues/80
+[#85]: https://github.com/mylesmetalab/storybook-design-sync/issues/85
 
 ## What this addon is NOT
 

@@ -319,6 +319,72 @@ describe("check request — one construction site", () => {
     expect(manager).toContain('trigger: "explicit"');
     expect(manager).toContain('trigger: "bulk"');
   });
+
+  /**
+   * v0.0.45 added a **third caller** — `design-sync check`, the headless bulk run
+   * — and a third caller is fine. A third *construction site* is not: the payload
+   * is what the two paths silently disagreed about twice in one release cycle
+   * (#78, #80), and a CLI that assembled its own would reintroduce the same class
+   * of bug with a second consumer (CI) that has no panel to contradict it.
+   *
+   * The generic guard above already forbids emitting or typing the payload
+   * anywhere else. This pins the positive obligation: the headless path reaches
+   * the channel through `requestStoryCheck`, once.
+   */
+  it("the headless check reaches the channel through requestStoryCheck", async () => {
+    const headless = await readFile(join(SRC, "headless-check.ts"), "utf8");
+    // Call sites only — a `requestStoryCheck(...)` inside a doc comment is prose.
+    expect(headless.match(/^\s*requestStoryCheck\(/gm) ?? []).toHaveLength(1);
+    expect(headless).toContain('trigger: "bulk"');
+    // And it reuses the panel's sequencing and budget rather than its own, so a
+    // story that times out headlessly times out in the panel too.
+    expect(headless).toContain("runBulkCheck");
+    expect(headless).toContain("bulkBudgetMs");
+  });
+});
+
+/**
+ * The other half of "one story, one verdict" for the CLI: the panel and
+ * `design-sync check` must partition, group and count a report identically, or
+ * their numbers disagree over the same story with nothing to say which is right.
+ *
+ * Asserted at source level because the arithmetic itself is already covered
+ * (`row-triage.test.ts`, `check-report.test.ts`); what these protect is that
+ * neither consumer grows a private copy of the filter or the tally.
+ */
+describe("one triage, two consumers", () => {
+  it("only row-triage.ts decides which dimensions are visible", async () => {
+    const files = await glob(["**/*.ts", "**/*.tsx"], { cwd: SRC, absolute: true, onlyFiles: true });
+    const offenders: string[] = [];
+    for (const file of files) {
+      const name = relative(SRC, file);
+      if (name === "row-triage.ts" || name.includes(".test.")) continue;
+      const text = await readFile(file, "utf8");
+      if (/HIDDEN_DIMENSION_KINDS\s*[:=]/.test(text)) {
+        offenders.push(`${name}: declares its own HIDDEN_DIMENSION_KINDS`);
+      }
+      if (/function visibleDimensions\s*\(/.test(text)) {
+        offenders.push(`${name}: declares its own visibleDimensions`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("the CLI counts rows in the same unit the panel's table renders", async () => {
+    const reportSource = await readFile(join(SRC, "check-report.ts"), "utf8");
+    expect(reportSource).toMatch(/countRowStatuses\(groupDimensions\(visibleDimensions\(/);
+    // `countStatuses` counts comparisons, not findings — the inflation #80 fixed.
+    expect(reportSource).not.toMatch(/\bcountStatuses\(/);
+  });
+
+  it("the CLI never writes, in any apply mode", async () => {
+    // `check` reads and reports. There is no code path from it to an Edit, so
+    // `apply: "experimental"` changes nothing about it.
+    for (const file of ["check-command.ts", "check-report.ts", "headless-check.ts", "headless-driver.ts"]) {
+      const text = await readFile(join(SRC, file), "utf8");
+      expect(text).not.toMatch(/EVENTS\.ApplyCodeRequest|applyCodeEdit|buildEdit\(/);
+    }
+  });
 });
 
 describe("check request — contract coverage", () => {

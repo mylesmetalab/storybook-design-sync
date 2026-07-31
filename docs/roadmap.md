@@ -1,5 +1,22 @@
 # Roadmap
 
+> **Two things to know before reading, both decided after most of this was written.**
+>
+> **1. v1 ships detection, not mutation** (2026-07-27). "One click in either
+> direction" below describes the original intent; a full source review found every
+> silent failure mode in the suite living on the write path while detection came
+> back clean. Writes are gated behind `apply: "off"` (the default) and the fix
+> prompt *is* the write path — a complete instruction handed to a human or an
+> agent, applied as a reviewable diff. The pipeline and Figma plugin are parked.
+>
+> **2. The suite is consumer-agnostic.** It was originally built against one
+> private consumer, and that coupling was removed. Some **shipped-log rows below
+> still name `mde` / `Downmark#NN`** — those are historical records of which PR
+> landed which change and are kept for provenance, not because the tool knows
+> anything about that project. Nothing in the codebase does. Do not add
+> consumer-specific behaviour; consumer specifics belong in that consumer's
+> `design-sync.config.json` or its team's skills.
+
 ## Intent
 
 A bidirectional design-system sync layer that treats Figma as a peer
@@ -20,8 +37,10 @@ Implicit but load-bearing: **be honest.** No false-positive drift, no
 broken Update buttons, no UI that advertises features that aren't built.
 Trust in the report matters as much as the report existing.
 
-Stretch goal: **portable to other codebases.** Primary mission is mde,
-but the system should outlive a single project.
+**Consumer-agnostic by mandate** (decided 2026-07-27). The suite carries no
+assumptions about any single codebase. It was originally built against one
+private consumer; that coupling was removed and must not return. The reference
+consumer is now `design-sync-starter`, which exists to be replaceable.
 
 See [`design-sync-pipeline/ARCHITECTURE.md`](https://github.com/mylesmetalab/design-sync-pipeline/blob/main/ARCHITECTURE.md)
 for how the three repos (addon, pipeline, figma-plugin) fit together.
@@ -65,7 +84,7 @@ system. Highlights of the work already done:
 | S15 | Plugin handles paint / effect / TEXT-descendant binds | figma-plugin                             |
 | S16 | Stale check on Figma writes                        | figma-plugin                                |
 | S17 | Auto-recheck after successful Apply                | addon                                       |
-| S18 | Longhand `border-radius` corners across mde        | mde                                         |
+| S18 | Longhand `border-radius` corners across the consumer | consumer                                 |
 | P1.1 | Auto-derive tokens from CSS (kill the third copy) | addon v0.0.23 + Downmark#21                |
 | P1.2 | PostCSS AST code-write engine (replace regex swap) | pipeline v0.0.8                            |
 | H1   | Bulk drift export + Apply-all (dry-run default)    | addon #27                                   |
@@ -117,7 +136,7 @@ can't fulfil.
 
 ### Phase 3 — Codebase parity (~2.5 days)
 
-Apply per-variant-explicit uniformly across mde so the engine never has
+Apply per-variant-explicit uniformly across the consumer so the engine never has
 to special-case cascade.
 
 | #     | Title                                                    | Done when                                                              | Effort |
@@ -139,7 +158,10 @@ Things the intent calls for that aren't here yet.
 
 ### Phase 5 — Portability (~8–10 days, scope-dependent)
 
-Stretch goal — tackle only if Design Sync is used on non-mde projects.
+Largely overtaken by events: Tailwind/`cva()` scanning shipped in v0.0.32 and
+the reference consumer is a Tailwind + shadcn project, so "works on any
+codebase" is no longer a stretch goal but the baseline. What remains here is
+CSS-in-JS runtime themes.
 
 | #     | Title                              | Done when                                                            | Effort |
 | ----- | ---------------------------------- | -------------------------------------------------------------------- | ------ |
@@ -154,10 +176,10 @@ Stretch goal — tackle only if Design Sync is used on non-mde projects.
 | ---------------------- | ---------- | ------------------------------------------------------------- |
 | 1 — Foundation         | 3.5–4.5    | Honest, robust core. Regex fragility gone. Metadata lie gone. |
 | 2 — Finish dimensions  | 7.5        | Every panel row fully functional or honestly hidden.          |
-| 3 — Codebase parity    | 2.5        | mde matches design model 1:1.                                 |
+| 3 — Codebase parity    | 2.5        | The consumer matches the design model 1:1.                    |
 | 4 — New capabilities   | 4.5        | CI, audit, multi-file support, coverage view.                 |
 | 5 — Portability        | 8–10 (opt) | Works on Tailwind / CSS-in-JS / any codebase.                 |
-| **Total Phases 1–4**   | **~18d**   | Full system, mde-scoped.                                      |
+| **Total Phases 1–4**   | **~18d**   | Full system, single-consumer scope.                           |
 | **Total all phases**   | **~26–28d**| Plus portable.                                                |
 
 ## Execution principles
@@ -190,5 +212,5 @@ Stretch goal — tackle only if Design Sync is used on non-mde projects.
 
 - Stop after Phase 1 if the system feels complete enough as-is — the
   detection half is the real value, write-back is the bonus.
-- Phase 5 is opt-in. Only do it if Design Sync is actually being used
-  on non-mde projects.
+- Phase 5 is opt-in, and partly delivered early: Tailwind support shipped in
+  v0.0.32 because the reference consumer needed it.

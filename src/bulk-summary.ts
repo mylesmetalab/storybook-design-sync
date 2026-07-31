@@ -12,7 +12,14 @@ import { EMPTY_STATUS_COUNTS, type StatusCounts } from "./row-triage.js";
  *     reported as coverage.
  *  2. `149 match · 89 drift · 75 flag-only` where 80 of the "drift" were
  *     name-only binding divergences whose values matched. `advisory` and
- *     `unverified` are their own totals — see `row-triage.ts`' `countStatuses`.
+ *     `unverified` are their own totals — see `row-triage.ts`'
+ *     `countRowStatuses`.
+ *
+ * The rows fed in are counted in the same unit the per-story table renders — one
+ * entry per finding, not per comparison (`countRowStatuses`, not
+ * `countStatuses`). Counting comparisons made this summary disagree with the story
+ * a reviewer opens to confirm it: 7 drift here against 4 rows there, because three
+ * properties each drifted on both their value and their binding (#80).
  *
  * And a third, same shape, from issue #73: a story whose child nodes could not be
  * fetched produced a report, so it was `done` and counted as checked — a green

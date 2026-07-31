@@ -263,6 +263,75 @@ export function countStatuses(diffs: readonly DimensionDiff[]): StatusCounts {
   return counts;
 }
 
+/**
+ * Tally a report by the **rows the panel shows**, one entry per row.
+ *
+ * `countStatuses` counts comparisons; this counts findings. The difference is
+ * `groupDimensions`: a token property produces up to two dimensions (a value
+ * comparison and a binding comparison) and the table renders them as one row
+ * whose verdict is the value comparison's — a binding-name difference is not a
+ * defect (#57), and a Figma property detached from its variable is reported on
+ * the same row as the value it now holds.
+ *
+ * Counting dimensions therefore said something different from the table about the
+ * same story: `ui-button--neutral` rendered 4 drifted rows while the Check-all
+ * summary said 7 drift, because three properties each drifted on both their value
+ * and their binding. Same report, two numbers, nothing saying which was right —
+ * and the inflated one is the number a reviewer sees at the definition-of-done
+ * gate (#80).
+ *
+ * Precedence per row, strongest finding first: drift, then a name divergence,
+ * then whatever the row's substantive comparison said. Exactly one bucket per
+ * row, so the totals are row counts.
+ */
+export function countRowStatuses(rows: readonly GroupedRow[]): StatusCounts {
+  const counts: StatusCounts = { ...EMPTY_STATUS_COUNTS };
+  const countAdvisory = (kind: NameDivergenceKind | undefined): void => {
+    // Same rule as `countStatuses`: missing `nameDivergence` is unverified, so
+    // the weaker claim wins rather than the stronger one.
+    if (kind === "value-matched") counts.advisory++;
+    else counts.unverified++;
+  };
+  for (const row of rows) {
+    if (rowHasDrift(row)) {
+      counts.drift++;
+      continue;
+    }
+    const nameDivergence = bindingAdvisory(row);
+    if (nameDivergence) {
+      countAdvisory(nameDivergence.kind);
+      continue;
+    }
+    // What the row's verdict pill reads: the value comparison, or the binding
+    // comparison when no value comparison happened.
+    const primary = row.kind === "token" ? (row.value ?? row.binding) : row.diff;
+    switch (primary?.status) {
+      case "match":
+        counts.match++;
+        break;
+      case "advisory":
+        countAdvisory(primary.nameDivergence);
+        break;
+      case "flag-only":
+        counts.flagOnly++;
+        break;
+      case "unresolved":
+        counts.unresolved++;
+        break;
+      case "drift":
+        // Only reachable as a binding drift on a row with no value comparison:
+        // `rowHasDrift` refuses to call the render wrong when nothing compared
+        // it, and calling it a match would claim agreement that wasn't tested.
+        counts.unverified++;
+        break;
+      default:
+        // A row with no diff at all carries no finding to count.
+        break;
+    }
+  }
+  return counts;
+}
+
 /* ------------------------------------------------------------------------- *
  * which layer a fix belongs in
  * ------------------------------------------------------------------------- */

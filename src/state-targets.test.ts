@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildStateTargets } from "./server.js";
+import { buildStateTargets, chooseStateTargets, refusedStateTargets } from "./server.js";
 import type { StateSnapshotEntry } from "./channels.js";
 
 /**
@@ -157,5 +157,100 @@ describe("buildStateTargets", () => {
     expect(targets).toHaveLength(2);
     expect(targets.find((t) => t.selector === ":hover")!.snapshot).toBeDefined();
     expect(targets.find((t) => t.selector === ":error")!.problem).toBeDefined();
+  });
+});
+
+/**
+ * Dual mode + states. Found by a mutation probe: replacing the `dualMode`
+ * branch with `false` — i.e. claiming a state comparison that never happened —
+ * killed **zero** tests. The refusal was written carefully and then left
+ * unguarded, which is the same shape as the bug it exists to prevent.
+ */
+describe("refusedStateTargets", () => {
+  it("refuses every declared state, rather than dropping them", () => {
+    // The silent-drop this replaces: the dual-mode pass rebuilds `children`
+    // through `childTargetsForMode`, which knows only about child selectors, so
+    // state targets vanished with no row and no message.
+    const targets = refusedStateTargets(
+      { hover: "4185:3783", active: "4185:3790" },
+      ".design-sync/registry.json",
+      "ui-button--primary",
+    );
+    expect(targets.map((t) => t.selector)).toEqual([":hover", ":active"]);
+    expect(targets.every((t) => t.kind === "state")).toBe(true);
+    expect(targets.every((t) => t.snapshot === undefined)).toBe(true);
+  });
+
+  it("says why, and what to do instead", () => {
+    const [target] = refusedStateTargets(
+      { hover: "4185:3783" },
+      ".design-sync/registry.json",
+      "ui-button--primary",
+    );
+    const message = target!.problem!.message;
+    expect(message).toMatch(/NOT compared/);
+    expect(message).toMatch(/two modes/);
+    // The actionable half: a designer who ticked Both modes needs to know the
+    // states were skipped *and* how to get them.
+    expect(message).toMatch(/Both modes.*unticked/);
+    expect(message).toContain("ui-button--primary");
+  });
+
+  it("keeps the declared node id, so the row can still name the node", () => {
+    const [target] = refusedStateTargets({ hover: "4185:3783" }, "r.json", "s");
+    expect(target!.nodeId).toBe("4185:3783");
+  });
+
+  it("returns nothing for a story with no state bindings", () => {
+    expect(refusedStateTargets(undefined, "r.json", "s")).toEqual([]);
+  });
+
+  it("ignores a malformed declaration rather than refusing a state that is not real", () => {
+    // `error` is not a pseudo-state, so there is no state comparison to refuse.
+    // `buildStateTargets` reports it as malformed on the single-mode path; a
+    // dual-mode run must not invent a second, contradictory message for it.
+    expect(refusedStateTargets({ error: "1:1" }, "r.json", "s")).toEqual([]);
+  });
+});
+
+/**
+ * The decision, not just the two outcomes.
+ *
+ * This exists because of a specific mutation-probe result: with the `dualMode ?`
+ * branch inline in the CodeSnapshot handler, flipping it to `false` — claiming a
+ * state comparison that never happened — killed **zero** tests. Both branches
+ * were covered individually; nothing covered the choice between them.
+ */
+describe("chooseStateTargets", () => {
+  const BASE = {
+    storyId: "ui-button--primary",
+    registryPath: ".design-sync/registry.json",
+    declared: { hover: "4185:3783" },
+    received: [compared("hover")],
+  };
+
+  it("compares the state on a single-mode run", () => {
+    const [target] = chooseStateTargets({ ...BASE, dualMode: false });
+    expect(target!.snapshot).toBeDefined();
+    expect(target!.problem).toBeUndefined();
+  });
+
+  it("refuses instead of comparing on a dual-mode run", () => {
+    // Even though a perfectly good snapshot is available: it was measured in one
+    // mode, and a two-mode report has nowhere honest to put it.
+    const [target] = chooseStateTargets({ ...BASE, dualMode: true });
+    expect(target!.snapshot).toBeUndefined();
+    expect(target!.problem!.message).toMatch(/two modes/);
+  });
+
+  it("never reports a state as compared when two modes were requested", () => {
+    // The invariant, stated so it cannot be lost to a refactor of the branch.
+    const targets = chooseStateTargets({
+      ...BASE,
+      declared: { hover: "1:1", active: "2:2", disabled: "3:3" },
+      dualMode: true,
+    });
+    expect(targets).toHaveLength(3);
+    expect(targets.some((t) => t.snapshot !== undefined)).toBe(false);
   });
 });

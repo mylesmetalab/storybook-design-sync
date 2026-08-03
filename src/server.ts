@@ -336,14 +336,13 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       // through `childTargetsForMode`, which knows only about child selectors and
       // would drop these silently — the exact class of failure this feature is
       // supposed to close. Refuse per declared state, with the reason.
-      const stateTargets = dualMode
-        ? refusedStateTargets(entry.states, config.registryPath, storyId)
-        : buildStateTargets({
-            storyId,
-            registryPath: config.registryPath,
-            declared: entry.states,
-            received: stateSnapshots,
-          });
+      const stateTargets = chooseStateTargets({
+        dualMode,
+        storyId,
+        registryPath: config.registryPath,
+        declared: entry.states,
+        received: stateSnapshots,
+      });
       const allTargets = [...childTargets, ...stateTargets];
       if (allTargets.length > 0) baseInput.children = allTargets;
 
@@ -500,6 +499,33 @@ export function describeModeComparison(
  * reason — so it reaches the panel as a visible row instead of disappearing.
  */
 /**
+ * Which state targets a run gets: the comparison, or the refusal.
+ *
+ * Extracted from the `CodeSnapshot` handler so the *decision* is testable, not
+ * just the two things it chooses between. A mutation probe caught this: with the
+ * branch inline, replacing `dualMode` with `false` — claiming a state comparison
+ * that never happened — killed zero tests, because both branches were covered
+ * individually and nothing exercised the choice.
+ */
+export function chooseStateTargets(opts: {
+  dualMode: boolean;
+  storyId: string;
+  registryPath: string;
+  declared: Record<string, string> | undefined;
+  received: StateSnapshotEntry[] | undefined;
+}): ChildTarget[] {
+  if (opts.dualMode) {
+    return refusedStateTargets(opts.declared, opts.registryPath, opts.storyId);
+  }
+  return buildStateTargets({
+    storyId: opts.storyId,
+    registryPath: opts.registryPath,
+    declared: opts.declared,
+    received: opts.received,
+  });
+}
+
+/**
  * One refusal per declared state, for a run that cannot compare them.
  *
  * Used for dual mode: the preview forces states once, in the rendered mode, so a
@@ -507,7 +533,7 @@ export function describeModeComparison(
  * nothing would leave a designer who declared `states` believing the ticked
  * "Both modes" run covered them.
  */
-function refusedStateTargets(
+export function refusedStateTargets(
   declared: Record<string, string> | undefined,
   registryPath: string,
   storyId: string,

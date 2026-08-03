@@ -148,7 +148,7 @@ for binding writes, REST for variable values).
 ## Install
 
 ```sh
-npm i -D "github:mylesmetalab/storybook-design-sync#v0.0.48"
+npm i -D "github:mylesmetalab/storybook-design-sync#v0.0.49"
 npx design-sync init
 ```
 
@@ -798,6 +798,71 @@ on, and the reason `incomplete` has never been allowed to mean `0`.
 **It reports the version Storybook is running.** A dev server keeps serving the
 bundle it started with, so if the CLI and the Storybook process are different
 releases, `check` says so and tells you the report is the server's answer.
+
+### `verify` — are the assumptions still true?
+
+```sh
+npx design-sync verify                    # every contracts/*.spec.json
+npx design-sync verify --full             # show verified claims too, not just the rest
+npx design-sync verify --json
+npx design-sync verify --contracts "specs/*.json"
+```
+
+`check` and `verify` ask different questions, and one cannot answer the other:
+
+| | compares | answers |
+|---|---|---|
+| `check` | rendered code ↔ current Figma | does the build match the design **today**? |
+| `verify` | the contract's recorded **claims** ↔ current Figma | are the assumptions this component was **built on** still true? |
+
+The gap is **absence claims.** A drift check compares values that exist, so if
+design adds a mode after handoff the check has no row for a mode it was never told
+about — while `notInFigma: [...]` quietly becomes false. That is not hypothetical:
+two comments asserting the design source lacked something were both untrue, and
+licensed 24 invented theme values, 18 of them wrong. They survived review
+*because they read as settled findings*.
+
+**It is cheap, which is the point.** No browser and no rendered DOM — one Figma
+read per contract plus a JSON compare. So unlike `check` it needs no
+`storybook dev` and no Playwright, runs anywhere `audit` runs, and scales with
+*components* rather than stories. `FIGMA_PAT` is the only requirement.
+
+**Three verdicts, and the third is why this is worth having:**
+
+- **verified** — re-read, still true, with the evidence quoted.
+- **falsified** — the design has moved. A falsified `notInFigma` entry means the
+  design now specifies something the code was built to ignore, so it is a
+  design → code handoff, not a drift fix, and the report says so.
+- **unverifiable** — split, because only one half should block:
+  - *could not be read* — a genuine coverage hole. **Blocks** (exit 2), exactly as
+    a failed Figma read blocks `check`.
+  - *not stated checkably* — the contract words the claim in prose that names no
+    Figma fact ("Figma carries no heading semantics"). Re-running changes nothing,
+    so it does **not** block — but it is counted, printed, and the summary never
+    calls such a run fully verified. Re-word the entry if you want it gated.
+
+| Code | Meaning |
+|---|---|
+| `0` | every claim that could be re-read still holds |
+| `1` | at least one claim is **falsified** |
+| `2` | at least one claim **could not be re-read**. Outranks `1` |
+| `3` | could not run at all — no contracts matched, or no `FIGMA_PAT` |
+
+**What is checkable today.** The claims that get real verdicts are the ones naming
+a Figma fact: `variantNodeIds` / `childNodeIds` (does the node still resolve?), and
+`notInFigma` / `notSpecifiedByFigma` entries whose reason asserts something about
+the component set's **variant axes or component properties** — "defines no *Focus*
+state", "has no *State* axis", "*Asset* is a component property, not a variant".
+Those three shapes cover 4 of the 8 absence entries in the two contracts that
+exist. The rest are reported honestly as not-checkable with their own wording
+quoted, and the axes and properties are available so a human can settle them in
+seconds.
+
+`designSource` claims (collections/modes, literals, shared values, uncheckable
+properties) are **parsed but not yet re-checked**: no contract in this project
+carries that block — it was added on 2026-07-31, after both existing contracts were
+written — so there has been no real input to build the checker against. A contract
+without it is reported as a gap, never as a passing contract.
 
 ### `audit` — surface drift, fail CI
 

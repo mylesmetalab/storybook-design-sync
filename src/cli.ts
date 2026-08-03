@@ -30,6 +30,8 @@ import {
 import { parseCheckArgs, runCheck } from "./check-command.js";
 import { CHECK_EXIT } from "./check-report.js";
 import { INIT_EXIT, parseInitArgs, runInit } from "./init.js";
+import { VERIFY_EXIT } from "./contract-verify.js";
+import { parseVerifyArgs, runVerify } from "./verify-command.js";
 
 interface CommonOptions {
   cwd: string;
@@ -78,6 +80,16 @@ async function main(argv: string[]): Promise<number> {
       return register(parseRegisterArgs(rest));
     case "export-graph":
       return exportGraph(parseExportGraphArgs(rest));
+    case "verify":
+      // Same shape as `check` and `init`: a usage error must not be reported as a
+      // completed verification, so parsing happens inside the try and maps to the
+      // refusal code rather than falling through to the top-level catch.
+      try {
+        return await runVerify(parseVerifyArgs(rest));
+      } catch (err: unknown) {
+        console.error(err instanceof Error ? err.message : String(err));
+        return VERIFY_EXIT.CouldNotRun;
+      }
     case "check":
       // Argument parsing happens INSIDE the try so a usage error maps to
       // `CouldNotRun` rather than falling through to the top-level catch, which
@@ -144,6 +156,12 @@ function printHelp(): void {
       "                                          Exit: 0 clean · 1 drift · 2 coverage incomplete · 3 could not run",
       "                                          Needs Playwright (optional peer dep) and FIGMA_PAT in the",
       "                                          STORYBOOK process's environment, not the CLI's.",
+      "  design-sync verify                      Re-read `contracts/*.spec.json`'s claims against Figma — are the",
+      "                                          assumptions this component was built on still true? No browser,",
+      "                                          no Storybook: a Figma read plus a JSON compare, so it runs",
+      "                                          anywhere `audit` runs. Needs FIGMA_PAT.",
+      "                                          --full (show verified claims too), --json, --contracts <glob>",
+      "                                          Exit: 0 verified · 1 falsified · 2 could not be re-read · 3 could not run",
       "  design-sync audit                       Diff stories on disk against the registry (exits non-zero on drift)",
       "                                          Also validates the SHAPE of declared child and state bindings (not that they resolve)",
       "                                          Exits non-zero on any story file it could not read — a file that yields no",

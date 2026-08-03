@@ -388,7 +388,13 @@ function verdictLine(doc: CheckJsonDocument): string {
   }
   const gaps: string[] = [];
   if (s.timedOut > 0) gaps.push(`${s.timedOut} timed out`);
-  if (s.incomplete > 0) gaps.push(`${s.incomplete} incomplete (Figma unread)`);
+  // Deliberately does NOT name a cause. "(Figma unread)" was hardcoded here when
+  // a rate-limited read was the only way to be incomplete; a stylesheet missing
+  // from the preview (#96) is another, and Figma is read perfectly well in that
+  // case. A summary line that asserts the wrong cause is the same
+  // technically-adjacent-but-inapplicable failure the reports themselves avoid.
+  // The per-story `incompleteReason` carries the real cause.
+  if (s.incomplete > 0) gaps.push(`${s.incomplete} incomplete`);
   if (s.errored > 0) gaps.push(`${s.errored} errored`);
   if (s.pending > 0) gaps.push(`${s.pending} never ran`);
   const unperformed = doc.stories.filter((st) => st.modeComparison && !st.modeComparison.performed);

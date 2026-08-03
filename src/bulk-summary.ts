@@ -129,7 +129,10 @@ export function coverageLabel(summary: BulkSummary): string {
   // Named as its own outcome. "Incomplete" is the word for a story that produced
   // rows but could not read part of what it covers — folding it into `checked`
   // is precisely how a rate-limited story came to read as a pass (#73).
-  if (summary.incomplete > 0) parts.push(`${summary.incomplete} incomplete (Figma unread)`);
+  // No cause named here either — see the note in `check-report.ts`. Figma being
+  // unread is one reason a story is incomplete; a stylesheet missing from the
+  // preview (#96) is another, and that one reads Figma fine.
+  if (summary.incomplete > 0) parts.push(`${summary.incomplete} incomplete`);
   if (summary.errored > 0) parts.push(`${summary.errored} errored`);
   if (summary.pending > 0) parts.push(`${summary.pending} not yet run`);
   return parts.join(" · ");

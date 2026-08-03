@@ -18,6 +18,7 @@ import {
   type ChildBindingDeclaration,
 } from "./child-bindings.js";
 import { validateStateBindings } from "./state-bindings.js";
+import { PROBE_SAMPLE_SIZE } from "./stylesheet-presence.js";
 import type { ChildTarget } from "./engines/types.js";
 import { applyCodeEdit } from "./apply-code.js";
 import type { DimensionDiff, DriftReport, FigmaReadSource } from "./dimensions/types.js";
@@ -151,6 +152,25 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         const states = validateStateBindings(entry.states).declarations;
         if (states.length > 0) reply.states = states;
       }
+      // Independent of the registry entry: the stylesheet check is about the
+      // project, not about whether this story happens to be bound.
+      // `scan-css.ts` stores these with the `--` prefix STRIPPED
+      // (`decl.prop.slice(2)`), so it must be added back before anything asks the
+      // DOM for them. Getting this wrong is not a small bug: every probe returns
+      // "" for a name without the prefix, so the stylesheet check concludes
+      // "missing" on a perfectly healthy project and suppresses its whole
+      // comparison. Caught end to end, not by unit tests — their fixtures were
+      // already prefixed. `classifyStylesheetPresence` now also refuses to
+      // conclude anything from unprefixed names.
+      const declaredProps = Object.keys(getAutoScan().customProperties).map((n) =>
+        n.startsWith("--") ? n : `--${n}`,
+      );
+      if (declaredProps.length > 0) {
+        // A sample is enough for the predicate and keeps the payload small on a
+        // project with hundreds of tokens. Sorted so the sample is deterministic
+        // — a probe set that varies per run makes a refusal unreproducible.
+        reply.themeCustomProperties = declaredProps.sort().slice(0, PROBE_SAMPLE_SIZE);
+      }
     } catch {
       // Config/registry failures are reported by the CodeSnapshot handler with
       // the full message; swallowing here only means "no children to snapshot".
@@ -226,6 +246,7 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       target,
       childSnapshots,
       stateSnapshots,
+      stylesheetMissing,
       bulk,
       modeSwitch,
       compareCopy,
@@ -241,6 +262,36 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       }
       mergeChildAutoBindings(childSnapshots);
       const config = await loadConfig();
+
+      // #96 — refuse BEFORE the engine runs, not after.
+      //
+      // With no stylesheet in the preview every value measured is a browser
+      // default, so the comparison would be arithmetically correct and entirely
+      // meaningless: a fresh project reported 17 drift rows, 15 of which were
+      // this. Producing them and then flagging the report would still leave a
+      // reader 17 rows to disbelieve, so nothing is compared at all — the report
+      // carries `incomplete` and no dimensions, which is what makes `check` exit
+      // 2 rather than 1.
+      //
+      // The preview only sets this when it has evidence (see
+      // `stylesheet-presence.ts`); `unknown` never arrives here.
+      if (stylesheetMissing) {
+        const report: DriftReport = {
+          storyId,
+          nodeId: "",
+          generatedAt: new Date().toISOString(),
+          dimensions: [],
+          incomplete: {
+            reason: stylesheetMissing.reason,
+            targets: ["root"],
+            detail: stylesheetMissing.detail,
+          },
+        };
+        // Wrapped in `{ report }` — that is the event's shape, and emitting the
+        // report bare makes every consumer wait out its timeout instead.
+        channel.emit(EVENTS.DriftReport, { report });
+        return;
+      }
       const registry = await loadRegistry(config.registryPath);
       const entry = lookup(registry, storyId);
 

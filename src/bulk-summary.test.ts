@@ -114,7 +114,7 @@ describe("summarizeBulk — a story with unread Figma data is not checked", () =
     expect(s.incomplete).toBe(1);
     expect(s.errored).toBe(0);
     expect(s.timedOut).toBe(0);
-    expect(coverageLabel(s)).toBe("2/3 stories checked · 1 incomplete (Figma unread)");
+    expect(coverageLabel(s)).toBe("2/3 stories checked · 1 incomplete");
   });
 
   it("still totals the rows it did produce — they are real", () => {
@@ -149,7 +149,7 @@ describe("summarizeBulk — a story with unread Figma data is not checked", () =
       row({ status: "error", error: "Not registered." }),
     ]);
     expect(coverageLabel(s)).toBe(
-      "1/4 stories checked · 1 timed out · 1 incomplete (Figma unread) · 1 errored",
+      "1/4 stories checked · 1 timed out · 1 incomplete · 1 errored",
     );
   });
 });

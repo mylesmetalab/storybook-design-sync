@@ -249,6 +249,66 @@ describe("--json output shape", () => {
     ]);
   });
 
+  /**
+   * A forced-state row is the story **root** measured under a condition, not a
+   * sub-element. Reporting `element: ":hover"` would invite every consumer of
+   * this JSON to render a child element that does not exist — the
+   * technically-true-but-inapplicable failure this project keeps closing.
+   */
+  it("reports a forced state as a condition on the root, not as an element", () => {
+    const d = doc([
+      outcome({
+        report: report({
+          dimensions: [diff({ childSelector: ":hover", forcedState: "hover" })],
+        }),
+      }),
+    ]);
+    const row = d.stories[0]!.rows![0]!;
+    expect(row.state).toBe("hover");
+    expect(row.element).toBeNull();
+  });
+
+  it("keeps element and state independent, so a child row still reports its selector", () => {
+    const d = doc([
+      outcome({
+        report: report({
+          dimensions: [diff({ childSelector: "[data-slot=title]" })],
+        }),
+      }),
+    ]);
+    const row = d.stories[0]!.rows![0]!;
+    expect(row.element).toBe("[data-slot=title]");
+    expect(row.state).toBeNull();
+  });
+
+  it("distinguishes a default-state row from its forced counterpart", () => {
+    // Identity is the (element, state, property) triple. Keying on
+    // element+property alone collides these two into one contradictory row.
+    const d = doc([
+      outcome({
+        report: report({
+          dimensions: [
+            diff({ property: "background-color", codeValue: "rgb(44,44,44)" }),
+            diff({
+              property: "background-color",
+              codeValue: "rgb(30,30,30)",
+              childSelector: ":hover",
+              forcedState: "hover",
+            }),
+          ],
+        }),
+      }),
+    ]);
+    const rows = d.stories[0]!.rows!;
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => [r.element, r.state])).toEqual(
+      expect.arrayContaining([
+        [null, null],
+        [null, "hover"],
+      ]),
+    );
+  });
+
   it("has a stable per-row shape, grouped the way the table groups", () => {
     const d = doc([
       outcome({
@@ -263,6 +323,7 @@ describe("--json output shape", () => {
     expect(d.stories[0]!.rows).toEqual([
       {
         element: null,
+        state: null,
         property: "background-color",
         finding: "value-drift",
         informative: true,

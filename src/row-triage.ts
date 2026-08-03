@@ -793,6 +793,21 @@ export function rowChildSelector(row: GroupedRow): string | undefined {
   return row.diff.childSelector;
 }
 
+/**
+ * The forced pseudo-state a row was measured in, or `undefined` for the default
+ * state.
+ *
+ * Read this rather than inferring a state from `rowChildSelector`. A state row's
+ * `childSelector` is `":hover"` because that is its identity *within the report*,
+ * but the element measured is the story **root** — so treating the selector as a
+ * sub-element would report the root's hover values as belonging to some child
+ * that does not exist.
+ */
+export function rowForcedState(row: GroupedRow): string | undefined {
+  if (row.kind === "token") return row.value?.forcedState ?? row.binding?.forcedState;
+  return row.diff.forcedState;
+}
+
 export interface ElementGroup {
   /** `undefined` for the story root; otherwise the declared child selector. */
   selector: string | undefined;
@@ -859,9 +874,17 @@ export function groupRowsByElement(
   return groups;
 }
 
-/** `[data-slot=header] → "Card header"` when Figma named the node. */
+/**
+ * `[data-slot=header] → "Card header"` when Figma named the node.
+ *
+ * A state group reads as a *condition on the root*, not as an element: a
+ * `:hover` heading sitting in a list of element selectors invites the reader to
+ * think the component has a `:hover` child.
+ */
 export function childGroupLabel(child: ChildBindingReport): string {
-  return child.nodeName ? `${child.selector} → ${child.nodeName}` : child.selector;
+  const isState = child.selector.startsWith(":");
+  const subject = isState ? `Story root · ${child.selector} forced` : child.selector;
+  return child.nodeName ? `${subject} → ${child.nodeName}` : subject;
 }
 
 /**

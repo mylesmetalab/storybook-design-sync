@@ -67,6 +67,17 @@ export interface CodeSnapshot {
 export interface ChildTarget {
   /** CSS selector exactly as declared in the registry. Row identity + label. */
   selector: string;
+  /**
+   * What kind of target this is. Absent means `"child"` — a declared sub-element.
+   *
+   * `"state"` means the *same* element measured with a pseudo-state forced, and
+   * `selector` is then the state written as a pseudo-class (`":hover"`). The
+   * comparison is structurally identical — one snapshot against one node, with
+   * `variant-set` and `props` correctly skipped for both — which is why the
+   * transport is shared. The discriminator exists so the report can say which it
+   * is instead of presenting a forced state as a sub-element.
+   */
+  kind?: "child" | "state";
   /** Figma node id declared for it (empty string when the binding is malformed). */
   nodeId: string;
   /** Computed-style snapshot of the single matched element. */

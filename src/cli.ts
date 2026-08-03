@@ -14,6 +14,12 @@ import {
   validateChildBindings,
 } from "./child-bindings.js";
 import {
+  FORCEABLE_STATES,
+  auditStateBindings,
+  parseStateFlag,
+  validateStateBindings,
+} from "./state-bindings.js";
+import {
   discoverStories,
   explicitTitle,
   regexStoryExports,
@@ -35,10 +41,12 @@ interface CommonOptions {
 interface RegisterOptions extends CommonOptions {
   hintsPath: string;
   dryRun: boolean;
-  /** `--story <id>` — scopes `--child` to one already-registered story. */
+  /** `--story <id>` — scopes `--child` / `--state` to one already-registered story. */
   story: string | undefined;
   /** `--child "<selector>=<nodeId>"`, repeatable. */
   children: string[];
+  /** `--state "<pseudo-state>=<nodeId>"`, repeatable. */
+  states: string[];
 }
 
 interface ExportGraphOptions extends CommonOptions {
@@ -137,14 +145,21 @@ function printHelp(): void {
       "                                          Needs Playwright (optional peer dep) and FIGMA_PAT in the",
       "                                          STORYBOOK process's environment, not the CLI's.",
       "  design-sync audit                       Diff stories on disk against the registry (exits non-zero on drift)",
-      "                                          Also validates the SHAPE of declared child bindings (not that they resolve)",
+      "                                          Also validates the SHAPE of declared child and state bindings (not that they resolve)",
       "                                          Exits non-zero on any story file it could not read — a file that yields no",
       "                                          story ids is a coverage hole, not a warning",
       "  design-sync register [--hints <path>]   Bulk-register stories from .design-sync/hints.json; stubs the rest",
       "  design-sync register --story <id> --child \"<selector>=<nodeId>\" [--child …]",
       "                                          Declare child-element bindings so composed components are checked",
       "                                          beyond their root element. Repeatable; merges into any existing map.",
-      "  design-sync ls                          Print the title → node binding tree (child bindings nested under it)",
+      "  design-sync register --story <id> --state \"<pseudo-state>=<nodeId>\" [--state …]",
+      "                                          Declare which Figma node holds a pseudo-state's design.",
+      "                                          Repeatable; merges. NOT YET COMPARED — declaring is",
+      "                                          validated and safe, but no drift check reads these yet.",
+      "                                          States: " + FORCEABLE_STATES.join(", "),
+      "                                          A design's Error/Open/Checked state is a prop, not a pseudo-state —",
+      "                                          bind it as its own story instead.",
+      "  design-sync ls                          Print the title → node binding tree (child and state bindings nested)",
       "  design-sync export-graph --format json|dot",
       "                                          Emit the binding graph for docs / visualizations",
       "",
@@ -158,7 +173,13 @@ function parseCommon(rest: string[]): CommonOptions {
 }
 
 function parseRegisterArgs(rest: string[]): RegisterOptions {
-  const common = parseCommonAllowing(rest, ["--hints", "--dry-run", "--story", "--child"]);
+  const common = parseCommonAllowing(rest, [
+    "--hints",
+    "--dry-run",
+    "--story",
+    "--child",
+    "--state",
+  ]);
   return {
     cwd: common.cwd,
     storyGlobsOverride: common.storyGlobsOverride,
@@ -166,6 +187,7 @@ function parseRegisterArgs(rest: string[]): RegisterOptions {
     dryRun: common.flags.has("--dry-run"),
     story: common.extras.get("--story"),
     children: common.repeated.get("--child") ?? [],
+    states: common.repeated.get("--state") ?? [],
   };
 }
 
@@ -180,7 +202,7 @@ function parseExportGraphArgs(rest: string[]): ExportGraphOptions {
 
 const BOOLEAN_FLAGS = new Set(["--dry-run"]);
 /** Flags that may appear more than once; every value is kept, in order. */
-const REPEATABLE_FLAGS = new Set(["--child"]);
+const REPEATABLE_FLAGS = new Set(["--child", "--state"]);
 
 function parseCommonAllowing(
   rest: string[],
@@ -314,6 +336,7 @@ async function audit(opts: CommonOptions): Promise<number> {
   // Declared child bindings — shape validation only (see the note printed
   // below for what audit deliberately cannot check).
   const children = auditChildBindings(registry.stories);
+  const states = auditStateBindings(registry.stories);
 
   const autotitled = stories.filter((s) => s.titleSource === "autotitle").length;
   const storyFiles = new Set(stories.map((s) => s.file)).size;
@@ -337,6 +360,10 @@ async function audit(opts: CommonOptions): Promise<number> {
     `Child bindings:      ${children.declaredBindings} across ${children.storiesWithChildren} story(ies)` +
       (children.issues.length > 0 ? ` — ${children.issues.length} malformed` : ""),
   );
+  console.log(
+    `State bindings:      ${states.declaredBindings} across ${states.storiesWithStates} story(ies)` +
+      (states.issues.length > 0 ? ` — ${states.issues.length} malformed` : ""),
+  );
 
   if (missing.length > 0) {
     console.log("\nMissing from registry (in code, not registered):");
@@ -357,6 +384,12 @@ async function audit(opts: CommonOptions): Promise<number> {
       console.log(`  - ${issue.storyId}: ${issue.message}`);
     }
   }
+  if (states.issues.length > 0) {
+    console.log("\nMalformed state bindings:");
+    for (const issue of states.issues) {
+      console.log(`  - ${issue.storyId}  ${issue.state}: ${issue.detail}`);
+    }
+  }
   if (children.storiesWithChildren > 0) {
     // Say plainly what was NOT checked. Implying that a green audit means the
     // selectors resolve would be exactly the confident-but-inapplicable signal
@@ -368,6 +401,15 @@ async function audit(opts: CommonOptions): Promise<number> {
         `per binding.`,
     );
   }
+  if (states.storiesWithStates > 0) {
+    // Same honesty note as child bindings, for the same reason: a green audit
+    // here says the vocabulary and node-id shapes are valid, nothing more.
+    console.log(
+      `\nNote on state bindings: audit validates SHAPE only. It cannot tell you whether the state is ` +
+        `forceable on the rendered element, whether forcing it actually changes anything, or whether ` +
+        `the declared Figma node exists. Only a drift check reports those.`,
+    );
+  }
   reportDiscoveryProblems(outcome, globs);
 
   // An unreadable story file fails the audit. A green CI over stories nothing
@@ -376,6 +418,7 @@ async function audit(opts: CommonOptions): Promise<number> {
   return missing.length > 0 ||
     extra.length > 0 ||
     children.issues.length > 0 ||
+    states.issues.length > 0 ||
     unreadable.length > 0
     ? 1
     : 0;
@@ -432,6 +475,21 @@ async function ls(opts: CommonOptions): Promise<number> {
       }
       for (const m of malformed) {
         console.log(`${indent}⚠ ${m.selector.padEnd(28)} → ${m.detail}`);
+      }
+      // Declared state bindings, same treatment: nested, present-only, and a
+      // malformed one is shown rather than dropped.
+      const states = validateStateBindings(entry?.states);
+      if (states.fatal) console.log(`${indent}⚠ states: ${states.fatal}`);
+      for (let d = 0; d < states.declarations.length; d++) {
+        const decl = states.declarations[d]!;
+        const isLastState =
+          d === states.declarations.length - 1 && states.malformed.length === 0;
+        console.log(
+          `${indent}${isLastState ? "└" : "├"} :${decl.state.padEnd(27)} → ${decl.nodeId}`,
+        );
+      }
+      for (const m of states.malformed) {
+        console.log(`${indent}⚠ :${m.state.padEnd(27)} → ${m.detail}`);
       }
     }
   }
@@ -505,7 +563,90 @@ async function registerChildren(opts: RegisterOptions, storyId: string): Promise
   return 0;
 }
 
+/**
+ * `register --story <id> --state "<pseudo-state>=<nodeId>" [--state …]` — add or
+ * update declared state bindings on one already-registered story.
+ *
+ * Same precondition as child bindings: the story needs a real `nodeId` first. A
+ * state binding says "compare the forced state against *this other* node", which
+ * is meaningless without the default-state node it is a variant of.
+ */
+async function registerStates(opts: RegisterOptions, storyId: string): Promise<number> {
+  const config = await loadConfig(opts.cwd);
+  const registry = await loadRegistry(config.registryPath, opts.cwd);
+  const entry = registry.stories[storyId];
+  if (!entry) {
+    console.error(
+      `"${storyId}" is not in ${config.registryPath}. Register the story (and its Figma node) first — ` +
+        `a state binding is a variant of the default-state binding.`,
+    );
+    return 1;
+  }
+  if (isPending(entry)) {
+    console.error(
+      `"${storyId}" is a pending stub (no Figma node assigned). Set its "nodeId" before adding state bindings.`,
+    );
+    return 1;
+  }
+
+  const pairs = opts.states.map(parseStateFlag);
+  const merged: Record<string, string> = { ...(entry.states ?? {}) };
+  for (const { state, nodeId } of pairs) {
+    const previous = merged[state];
+    if (nodeId === entry.nodeId) {
+      // Binding a state to the same node as the default state would compare the
+      // forced rendering against the *unforced* design, reporting drift for
+      // every property the state deliberately changes. Always a mistake.
+      console.error(
+        `Refusing to bind :${state} to ${nodeId} — that is this story's own default-state node. ` +
+          `A state binding needs the Figma node for that state (e.g. the "State=Hover" variant).`,
+      );
+      return 1;
+    }
+    merged[state] = nodeId;
+    console.log(
+      previous && previous !== nodeId
+        ? `~ ${storyId}  :${state} → ${nodeId}  (was ${previous})`
+        : `+ ${storyId}  :${state} → ${nodeId}`,
+    );
+  }
+  const sorted: Record<string, string> = {};
+  for (const key of Object.keys(merged).sort()) sorted[key] = merged[key]!;
+
+  const { malformed, fatal } = validateStateBindings(sorted);
+  if (fatal || malformed.length > 0) {
+    console.error(`Refusing to write a malformed "states" map: ${fatal ?? malformed[0]!.detail}`);
+    return 1;
+  }
+
+  const updated: Registry = {
+    fileKey: registry.fileKey || config.fileKey,
+    stories: { ...registry.stories, [storyId]: { ...entry, states: sorted } },
+  };
+  console.log(
+    `\n${pairs.length} state binding(s) set on "${storyId}" (${Object.keys(sorted).length} total)` +
+      (opts.dryRun ? " (dry-run; nothing written)" : ""),
+  );
+  console.log(
+    `NOT YET COMPARED: no drift check reads "states" yet, so this declaration is inert for now. ` +
+      `It is validated and safe to commit — the comparison is being built against it.`,
+  );
+  if (!opts.dryRun) {
+    await saveRegistry(config.registryPath, updated, opts.cwd);
+    console.log(`Wrote ${config.registryPath}.`);
+  }
+  return 0;
+}
+
 async function register(opts: RegisterOptions): Promise<number> {
+  if (opts.children.length > 0 && opts.states.length > 0) {
+    // Both would work, but each prints its own summary and writes the registry
+    // once; interleaving them makes the output ambiguous about what was written.
+    console.error(
+      `Pass --child and --state in separate commands so each reports what it wrote.`,
+    );
+    return 1;
+  }
   if (opts.children.length > 0) {
     if (!opts.story) {
       console.error(
@@ -516,8 +657,18 @@ async function register(opts: RegisterOptions): Promise<number> {
     }
     return registerChildren(opts, opts.story);
   }
+  if (opts.states.length > 0) {
+    if (!opts.story) {
+      console.error(
+        `--state requires --story <storyId> so the binding lands on a specific story. ` +
+          `Example: design-sync register --story ui-button--primary --state "hover=4185:3783"`,
+      );
+      return 1;
+    }
+    return registerStates(opts, opts.story);
+  }
   if (opts.story) {
-    console.error(`--story is only meaningful together with --child.`);
+    console.error(`--story is only meaningful together with --child or --state.`);
     return 1;
   }
 

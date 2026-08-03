@@ -130,6 +130,20 @@ export interface DimensionDiff {
    */
   childSelector?: string;
   /**
+   * The forced pseudo-state this row was measured in, without the leading colon
+   * (`"hover"`). **Absent means the default state** — every row produced before
+   * state bindings existed, and every row for a story with no `states` key, has
+   * no `forcedState` and is byte-identical to what it was.
+   *
+   * Set alongside `childSelector` rather than instead of it, because the two
+   * answer different questions and a reader needs both: `childSelector` is the
+   * row's identity in the report, `forcedState` is the condition under which the
+   * measurement was taken. Labelling a forced state as though it were a child
+   * *element* would be the "technically true, doesn't apply" failure this project
+   * keeps closing — a `:hover` is not a sub-element of anything.
+   */
+  forcedState?: string;
+  /**
    * Whether the project's own CSS declares a custom property for this row's
    * `tokenName` — resolved by `token-presence.ts` against the startup scan and
    * attached by the server *after* the engine (so it is never cached and never

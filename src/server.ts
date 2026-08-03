@@ -6,6 +6,7 @@ import {
   type ChildBindingsInfoPayload,
   type ChildBindingsRequestPayload,
   type ChildSnapshotEntry,
+  type StateSnapshotEntry,
   type CodeSnapshotPayload,
   type ApplyCodeRequestPayload,
   type ConfigInfoPayload,
@@ -16,6 +17,7 @@ import {
   validateChildBindings,
   type ChildBindingDeclaration,
 } from "./child-bindings.js";
+import { validateStateBindings } from "./state-bindings.js";
 import type { ChildTarget } from "./engines/types.js";
 import { applyCodeEdit } from "./apply-code.js";
 import type { DimensionDiff, DriftReport, FigmaReadSource } from "./dimensions/types.js";
@@ -142,6 +144,12 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       const entry = lookup(registry, storyId);
       if (entry && !isPending(entry)) {
         reply.children = validateChildBindings(entry.children).declarations;
+        // Malformed state declarations are deliberately not forwarded: the
+        // preview can only force a state it can name, and a bad entry is
+        // reported by `audit` and by `ls`. Forwarding it would make the preview
+        // attempt a state that is not in the vocabulary.
+        const states = validateStateBindings(entry.states).declarations;
+        if (states.length > 0) reply.states = states;
       }
     } catch {
       // Config/registry failures are reported by the CodeSnapshot handler with
@@ -217,6 +225,7 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       additionalSnapshots,
       target,
       childSnapshots,
+      stateSnapshots,
       bulk,
       modeSwitch,
       compareCopy,
@@ -314,9 +323,29 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         declared: entry.children,
         received: childSnapshots,
       });
-      if (childTargets.length > 0) baseInput.children = childTargets;
-
+      // Declared state bindings, appended to the same `children` list. The
+      // comparison the engine runs is identical — one snapshot against one node,
+      // with `variant-set` and `props` skipped, which is right for a forced state
+      // for the same reasons it is right for a child element. `kind: "state"`
+      // keeps the report able to say which is which.
       const dualMode = Boolean(additionalSnapshots && additionalSnapshots.length > 0);
+
+      // Modes × states is not settled yet (addon#91 design question 4), and the
+      // preview forces states once, in whichever mode is rendered. So a dual-mode
+      // run must NOT claim a state comparison: the second pass rebuilds `children`
+      // through `childTargetsForMode`, which knows only about child selectors and
+      // would drop these silently — the exact class of failure this feature is
+      // supposed to close. Refuse per declared state, with the reason.
+      const stateTargets = dualMode
+        ? refusedStateTargets(entry.states, config.registryPath, storyId)
+        : buildStateTargets({
+            storyId,
+            registryPath: config.registryPath,
+            declared: entry.states,
+            received: stateSnapshots,
+          });
+      const allTargets = [...childTargets, ...stateTargets];
+      if (allTargets.length > 0) baseInput.children = allTargets;
 
       const runCheck = (): Promise<DriftReport> =>
         runModePasses({
@@ -470,6 +499,128 @@ export function describeModeComparison(
  * or that the preview never reported at all, still becomes a target carrying its
  * reason — so it reaches the panel as a visible row instead of disappearing.
  */
+/**
+ * One refusal per declared state, for a run that cannot compare them.
+ *
+ * Used for dual mode: the preview forces states once, in the rendered mode, so a
+ * two-mode report has no measurement to attribute to the second mode. Saying
+ * nothing would leave a designer who declared `states` believing the ticked
+ * "Both modes" run covered them.
+ */
+function refusedStateTargets(
+  declared: Record<string, string> | undefined,
+  registryPath: string,
+  storyId: string,
+): ChildTarget[] {
+  const { declarations } = validateStateBindings(declared);
+  return declarations.map((decl) => ({
+    selector: `:${decl.state}`,
+    kind: "state" as const,
+    nodeId: decl.nodeId,
+    problem: {
+      status: "snapshot-missing" as const,
+      message:
+        `:${decl.state} was NOT compared, because this run also asked for two modes. ` +
+        `States are forced once, in the mode that is rendered, so there is no measurement ` +
+        `to attribute to the second mode — and reporting one would be a comparison that did ` +
+        `not happen. Re-run with "Both modes" unticked to compare states for "${storyId}" ` +
+        `(declared in ${registryPath}).`,
+    },
+  }));
+}
+
+/**
+ * Turn declared state bindings + what the preview reported into engine targets.
+ *
+ * The registry is authoritative, exactly as for children: every declaration it
+ * carries produces a target, even when the preview reported nothing for it — so a
+ * state that was never measured cannot become silence.
+ *
+ * Three non-comparable outcomes, each carrying its reason to the report:
+ *
+ *  - `no-computed-change` — forcing moved nothing, so either the state is
+ *    genuinely identical or the forcing failed. Indistinguishable from here, so
+ *    never a match.
+ *  - `not-forceable` — the state is styled through a `data-*` attribute the
+ *    component library writes from its own state; a class cannot reproduce it.
+ *  - missing entirely — no `stateSnapshots` entry arrived for a declaration.
+ *
+ * All three are reported as `snapshot-missing`, the one `ChildBindingStatus` that
+ * means "we have no measurement for this". The status vocabulary is the child
+ * one; the *message* carries the state-specific reason, which is what a reader
+ * acts on. A dedicated status set would be better and is worth doing when the
+ * fix-prompt wording for states lands.
+ */
+export function buildStateTargets(opts: {
+  storyId: string;
+  registryPath: string;
+  declared: Record<string, string> | undefined;
+  received: StateSnapshotEntry[] | undefined;
+}): ChildTarget[] {
+  const { declarations, malformed, fatal } = validateStateBindings(opts.declared);
+  if (fatal) {
+    return [
+      {
+        selector: "states",
+        kind: "state",
+        nodeId: "",
+        problem: {
+          status: "binding-malformed",
+          message:
+            `"states" in ${opts.registryPath} is malformed for "${opts.storyId}": ${fatal} ` +
+            `No state comparison ran for this story.`,
+        },
+      },
+    ];
+  }
+
+  const byState = new Map((opts.received ?? []).map((e) => [e.state, e]));
+  const targets: ChildTarget[] = [];
+
+  for (const decl of declarations) {
+    const selector = `:${decl.state}`;
+    const received = byState.get(decl.state);
+    if (received && received.kind === "compared" && received.snapshot) {
+      targets.push({ selector, kind: "state", nodeId: decl.nodeId, snapshot: received.snapshot });
+      continue;
+    }
+    const message =
+      received === undefined
+        ? `No measurement arrived for the forced :${decl.state} state, so it was not compared. ` +
+          `The story declares it in ${opts.registryPath}; if this persists the preview did not ` +
+          `receive the declaration in time.`
+        : received.kind === "not-forceable"
+          ? `:${decl.state} was not compared — ${received.detail ?? "it cannot be forced faithfully on this element."}`
+          : `Forcing :${decl.state} changed no computed value, so it was NOT compared. Either the ` +
+            `design and code agree this state is visually identical, or the forcing did not take — ` +
+            `this cannot tell those apart, so it does not report a match. Check that the state's ` +
+            `styles are in a stylesheet this addon can read (a cross-origin sheet cannot be ` +
+            `rewritten) and that the rule really applies to the story root.`;
+    targets.push({
+      selector,
+      kind: "state",
+      nodeId: decl.nodeId,
+      problem: { status: "snapshot-missing", message },
+    });
+  }
+
+  for (const m of malformed) {
+    targets.push({
+      selector: `:${m.state}`,
+      kind: "state",
+      nodeId: "",
+      problem: {
+        status: "binding-malformed",
+        message:
+          `"states.${m.state}" in ${opts.registryPath} is not usable for "${opts.storyId}": ` +
+          `${m.detail}`,
+      },
+    });
+  }
+
+  return targets;
+}
+
 export function buildChildTargets(opts: {
   storyId: string;
   registryPath: string;

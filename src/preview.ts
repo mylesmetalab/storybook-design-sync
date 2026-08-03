@@ -4,9 +4,15 @@ import {
   type CheckDriftRequestPayload,
   type ChildBindingsInfoPayload,
   type ChildSnapshotEntry,
+  type StateSnapshotEntry,
   type CodeSnapshotPayload,
 } from "./channels.js";
 import type { CodeSnapshot } from "./engines/types.js";
+import {
+  clearForcedStates,
+  rewriteAllStyleSheetsForStates,
+  snapshotForcedStates,
+} from "./state-force.js";
 import {
   normalizeBindingKey,
   compositeBorderTokens,
@@ -336,10 +342,17 @@ const waitForStyleFlush = createStyleFlusher({
  */
 const CHILD_BINDINGS_TIMEOUT_MS = 2000;
 
-function requestChildBindings(storyId: string): Promise<ChildBindingDeclaration[]> {
+interface DeclaredBindings {
+  children: ChildBindingDeclaration[];
+  states: Array<{ state: string; nodeId: string }>;
+}
+
+const NO_BINDINGS: DeclaredBindings = { children: [], states: [] };
+
+function requestBindings(storyId: string): Promise<DeclaredBindings> {
   return new Promise((resolve) => {
     let settled = false;
-    const done = (value: ChildBindingDeclaration[]): void => {
+    const done = (value: DeclaredBindings): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -348,12 +361,60 @@ function requestChildBindings(storyId: string): Promise<ChildBindingDeclaration[
     };
     const onInfo = (info: ChildBindingsInfoPayload): void => {
       if (!info || info.storyId !== storyId) return;
-      done(Array.isArray(info.children) ? info.children : []);
+      done({
+        children: Array.isArray(info.children) ? info.children : [],
+        states: Array.isArray(info.states) ? info.states : [],
+      });
     };
-    const timer = setTimeout(() => done([]), CHILD_BINDINGS_TIMEOUT_MS);
+    const timer = setTimeout(() => done(NO_BINDINGS), CHILD_BINDINGS_TIMEOUT_MS);
     channel.on(EVENTS.ChildBindingsInfo, onInfo);
     channel.emit(EVENTS.ChildBindingsRequest, { storyId });
   });
+}
+
+/**
+ * Force each declared pseudo-state and snapshot the root in it.
+ *
+ * Wiring only — the mechanism, the honesty rule and the decline predicate live in
+ * `state-force.ts` where they are unit-tested. Three things this owns:
+ *
+ * 1. **The stylesheet rewrite happens here, lazily.** A `:hover` rule cannot be
+ *    triggered by a class until its selector has the parallel form appended, and
+ *    doing it only when a story actually declares a state means a project with no
+ *    state bindings pays nothing and has its stylesheets left alone.
+ * 2. **Transitions are suspended across the whole sequence**, not per state.
+ *    `getComputedStyle` mid-transition returns the interpolated value, so an
+ *    unsuspended read reports the rest value and a correctly-forced state looks
+ *    like it changed nothing — which the honesty rule would then report as "not
+ *    compared". Suspending removes the timing question rather than guessing at it.
+ * 3. **The document is restored even if a snapshot throws.** A surviving
+ *    `pseudo-hover` class would leave this story — and, because the preview
+ *    iframe persists, every story checked after it — reading as hovered.
+ */
+function snapshotDeclaredStates(
+  target: HTMLElement,
+  base: CodeSnapshot,
+  declarations: ReadonlyArray<{ state: string; nodeId: string }>,
+): StateSnapshotEntry[] {
+  if (declarations.length === 0) return [];
+  rewriteAllStyleSheetsForStates(document);
+  const restoreTransitions = suspendTransitions();
+  try {
+    return snapshotForcedStates({
+      element: target,
+      declarations,
+      base,
+      snapshot: () => snapshotElement(target),
+      flush: forceReflow,
+    });
+  } finally {
+    clearForcedStates(
+      target,
+      declarations.map((d) => d.state),
+    );
+    restoreTransitions();
+    forceReflow();
+  }
 }
 
 /**
@@ -480,7 +541,8 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
   // Declared child bindings, resolved once against the settled DOM. Resolution
   // is mode-independent (a theme toggle doesn't change which elements match), so
   // it happens here rather than inside each mode pass.
-  const declarations = await requestChildBindings(payload.storyId);
+  const declared = await requestBindings(payload.storyId);
+  const declarations = declared.children;
   const childResolutions =
     declarations.length > 0 ? resolveChildElements(target, declarations) : [];
 
@@ -691,6 +753,7 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     snapshot.bindings = { ...(snapshot.bindings ?? {}), ...payload.tokens };
   }
   const childSnapshots = snapshotChildren(childResolutions);
+  const stateSnapshots = snapshotDeclaredStates(target, snapshot, declared.states);
   const mode = readActiveMode(modeAttribute);
   const out: CodeSnapshotPayload = { storyId: payload.storyId, snapshot };
   if (mode) out.mode = mode;
@@ -699,5 +762,6 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
   if (payload.bulk) out.bulk = true;
   if (payload.compareCopy === false) out.compareCopy = false;
   if (childSnapshots.length > 0) out.childSnapshots = childSnapshots;
+  if (stateSnapshots.length > 0) out.stateSnapshots = stateSnapshots;
   channel.emit(EVENTS.CodeSnapshot, out);
 });

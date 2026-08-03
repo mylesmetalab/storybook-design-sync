@@ -970,7 +970,13 @@ class FigmaRestEngine implements Engine {
         // — and the same applicability guard.
         ...layoutRows(node, child.snapshot.styles),
       ];
-      for (const row of rows) row.childSelector = child.selector;
+      for (const row of rows) {
+        row.childSelector = child.selector;
+        // A forced-state target is the same element in a different condition, so
+        // the row carries the condition as well as its identity. See
+        // `ChildTarget.kind`.
+        if (child.kind === "state") row.forcedState = child.selector.replace(/^:/, "");
+      }
       dimensions.push(...rows);
       const report: ChildBindingReport = {
         selector: child.selector,

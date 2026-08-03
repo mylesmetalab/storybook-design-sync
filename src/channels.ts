@@ -137,6 +137,43 @@ export interface ChildBindingsInfoPayload {
    * the preview simply snapshots the root as before.
    */
   children: Array<{ selector: string; nodeId: string }>;
+  /**
+   * Declared state bindings for this story: pseudo-state → Figma node id.
+   *
+   * Deliberately carried on the **same** request/reply as `children` rather than
+   * a second handshake: the preview already pays one round trip and one 2s
+   * timeout here, and a second pair would double both for every story in a bulk
+   * run. Absent or empty means the preview forces nothing, which is the legacy
+   * behaviour exactly.
+   */
+  states?: Array<{ state: string; nodeId: string }>;
+}
+
+/**
+ * Per-state result of the preview's forcing attempt. One entry for every
+ * declaration the preview was told about.
+ *
+ * `kind` other than `"compared"` means **no comparison ran**, and the report has
+ * to say so rather than treating it as a clean state:
+ *
+ *  - `no-computed-change` — forcing moved nothing. Either the state is genuinely
+ *    identical or the forcing silently failed; the preview cannot tell those
+ *    apart, so it never reports a match. No snapshot rides along, on purpose.
+ *  - `not-forceable` — the state is styled through a `data-*` attribute the
+ *    component library writes from its own React state, so a class cannot
+ *    reproduce it faithfully. `detail` says so and routes to binding it as its
+ *    own story.
+ */
+export interface StateSnapshotEntry {
+  state: string;
+  nodeId: string;
+  kind: "compared" | "no-computed-change" | "not-forceable";
+  /** Present only when `kind === "compared"`. */
+  snapshot?: CodeSnapshot;
+  /** Properties that moved when the state was forced. Only when compared. */
+  changed?: string[];
+  /** Reason, when `kind === "not-forceable"`. */
+  detail?: string;
 }
 
 /**
@@ -171,6 +208,14 @@ export interface CodeSnapshotPayload {
    * reported as `snapshot-missing`, never ignored.
    */
   childSnapshots?: ChildSnapshotEntry[];
+  /**
+   * Declared state bindings the preview attempted, in the order the server sent
+   * them. Absent for a story with no `states` in the registry — which keeps the
+   * payload (and therefore the cache hash) byte-identical for legacy entries. A
+   * declaration the server knows about but that is missing here is reported,
+   * never ignored.
+   */
+  stateSnapshots?: StateSnapshotEntry[];
   /**
    * The selector the preview used to find the story root. Relayed so the
    * server can look up CSS-derived token bindings for that selector and

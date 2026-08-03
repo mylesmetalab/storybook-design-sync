@@ -19,6 +19,20 @@ export interface RegistryEntry {
    * validation and the honesty rules for bindings that don't resolve.
    */
   children?: Record<string, string>;
+  /**
+   * Declared state bindings: pseudo-state → Figma node id. Lets a forced
+   * `:hover` / `:active` / `:disabled` rendering be compared against the design's
+   * own node for that state, instead of only the default state.
+   *
+   * The key set is closed and covers **forced pseudo-states only** — a design's
+   * `State=Error` or `State=Open` is a prop the component renders itself and
+   * belongs on its own story binding, not here. `state-bindings.ts` owns the
+   * vocabulary, the validation and the reasoning.
+   *
+   * Absent is the legacy shape and behaves exactly as before — no forcing, no
+   * extra requests, no extra rows, no messages.
+   */
+  states?: Record<string, string>;
 }
 
 export interface Registry {

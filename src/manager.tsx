@@ -1074,6 +1074,9 @@ const DiffTable: React.FC<DiffTableProps> = ({ report, applyEnabled, fixContext,
       // Present when the scanner derived this property from a Tailwind utility
       // class; makes the prompt name the class instead of a CSS declaration.
       codeClassName: d.codeClassName,
+      // Which state this row was measured in, so the prompt tells the applier to
+      // edit the state's styling rather than the resting style.
+      forcedState: d.forcedState,
       filePaths: fixContext.filePaths,
       nodeId: child?.nodeId ?? report.nodeId,
       fileKey: fixContext.fileKey,

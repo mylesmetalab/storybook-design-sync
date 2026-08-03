@@ -224,6 +224,20 @@ export function resolveComponentBindings(
   args: Record<string, unknown> | undefined,
   themeVars: TailwindThemeVars,
   mode?: string,
+  /**
+   * Pseudo-states the caller has **actually forced** on the element being
+   * snapshotted, e.g. `["hover"]`.
+   *
+   * Without this, core grades `hover:` / `focus:` / `active:` variants as
+   * provably off — correct for a resting snapshot, and wrong for one taken with
+   * the state forced. The consequence is specific: while measuring a forced
+   * `:hover`, `hover:bg-primary-hover` is inactive, so the value the element is
+   * *actually painting* gets attributed to the base utility or to nothing, and a
+   * fix prompt names the wrong declaration. See core's `TailwindStateContext`.
+   *
+   * Empty or absent is the resting state, which is every pre-existing caller.
+   */
+  forcedStates?: readonly string[],
 ): ComponentResolution {
   const name = componentName.toLowerCase();
   const matches = scans.filter((s) => s.components.includes(name));
@@ -279,6 +293,11 @@ export function resolveComponentBindings(
   // attribute, which makes `dark:` classes indeterminate rather than assumed.
   const state: TailwindStateContext = { disabled: args?.["disabled"] === true };
   if (mode !== undefined) state.mode = mode;
+  // Only ever the states the caller really forced — naming one that is not
+  // forced claims a class applies when it does not.
+  if (forcedStates !== undefined && forcedStates.length > 0) {
+    state.forcedStates = forcedStates;
+  }
 
   const composed = composeTailwindBindings(scan.base, overlays, themeVars, state);
 

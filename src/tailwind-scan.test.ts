@@ -180,11 +180,62 @@ describe("resolveComponentBindings — per story", () => {
     expect(r.bindings["background-color"]).toBe("primary");
   });
 
-  it("never attributes a hover: token — nothing forces hover", () => {
+  it("never attributes a hover: token when nothing forces hover", () => {
     const r = resolveComponentBindings(components, "button", { variant: "primary" }, themeVars);
     expect(r.kind).toBe("resolved");
     if (r.kind !== "resolved") return;
     expect(Object.values(r.bindings)).not.toContain("primary-hover");
+  });
+
+  /**
+   * The other half, added with state comparison (#91). This used to be an
+   * unconditional truth — "the addon forces no states" — and once the auditor
+   * does force one, refusing to attribute the `hover:` class means the value the
+   * element is *actually painting* is credited to the base utility or to nothing,
+   * and the fix prompt names the wrong declaration.
+   */
+  it("attributes the hover: token when hover IS forced", () => {
+    const r = resolveComponentBindings(
+      components,
+      "button",
+      { variant: "primary" },
+      themeVars,
+      undefined,
+      ["hover"],
+    );
+    expect(r.kind).toBe("resolved");
+    if (r.kind !== "resolved") return;
+    expect(r.bindings["background-color"]).toBe("primary-hover");
+    expect(r.classes["background-color"]).toBe("hover:bg-primary-hover");
+  });
+
+  it("declares only the state that was forced", () => {
+    // Naming a state that is not forced claims a class applies when it does not.
+    const r = resolveComponentBindings(
+      components,
+      "button",
+      { variant: "primary" },
+      themeVars,
+      undefined,
+      ["focus"],
+    );
+    expect(r.kind).toBe("resolved");
+    if (r.kind !== "resolved") return;
+    expect(r.bindings["background-color"]).toBe("primary");
+  });
+
+  it("treats an empty forcedStates list as the resting state", () => {
+    const r = resolveComponentBindings(
+      components,
+      "button",
+      { variant: "primary" },
+      themeVars,
+      undefined,
+      [],
+    );
+    expect(r.kind).toBe("resolved");
+    if (r.kind !== "resolved") return;
+    expect(r.bindings["background-color"]).toBe("primary");
   });
 
   it("ignores data-disabled: classes when the story is not disabled", () => {

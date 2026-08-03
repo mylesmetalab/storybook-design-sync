@@ -252,6 +252,13 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
         }
       }
       mergeChildAutoBindings(childSnapshots);
+      // Each forced-state snapshot gets its OWN binding resolution, with that
+      // state declared as forced. Without this the state's rows are attributed
+      // from the resting-state pass, where core correctly grades `hover:`
+      // variants as provably off — so the value the element is actually painting
+      // is credited to the base utility or to nothing, and the fix prompt names
+      // the wrong declaration. Core v0.0.5's `forcedStates` exists for this.
+      const stateClasses = mergeStateAutoBindings(storyId, target, stateSnapshots, args, mode);
       const config = await loadConfig();
 
       // #96 — refuse BEFORE the engine runs, not after.
@@ -417,6 +424,7 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       if (modeComparison) report.modeComparison = modeComparison;
 
       annotateClassHints(report, autoBindings.classes);
+      annotateStateClassHints(report, stateClasses);
       // Two annotations, both applied HERE rather than in the engine, and the
       // placement is load-bearing: the engine writes its report to
       // `.design-sync/cache.json`, and neither of these belongs in a cached
@@ -860,6 +868,8 @@ function mergeAutoBindings(
   snapshot: import("./engines/types.js").CodeSnapshot | undefined,
   args: Record<string, unknown> | undefined,
   mode: string | undefined,
+  /** Pseudo-states forced on this snapshot; see `resolveComponentBindings`. */
+  forcedStates?: readonly string[],
 ): AutoBindingOutcome {
   if (!snapshot) return { classes: {} };
   const scan = getAutoScan();
@@ -882,6 +892,7 @@ function mergeAutoBindings(
       args,
       scan.themeVars,
       mode,
+      forcedStates,
     );
     if (resolution.kind === "resolved") {
       Object.assign(bindings, resolution.bindings);
@@ -1020,6 +1031,54 @@ function annotateClassHints(
  * attributing them to a child would put an authoritative-looking token name on
  * an element it doesn't style.
  */
+/**
+ * Enrich each forced-state snapshot's `bindings` in place, resolving with that
+ * state declared as forced.
+ *
+ * In place, and per state, for the same reason the root's own merge is: the
+ * engine reads `snapshot.bindings` to decide the code side's token, and a state's
+ * answer is genuinely different from the resting one.
+ */
+function mergeStateAutoBindings(
+  storyId: string,
+  target: string | undefined,
+  stateSnapshots: StateSnapshotEntry[] | undefined,
+  args: Record<string, unknown> | undefined,
+  mode: string | undefined,
+): Record<string, Record<string, string>> {
+  const byState: Record<string, Record<string, string>> = {};
+  if (!stateSnapshots) return byState;
+  for (const entry of stateSnapshots) {
+    if (entry.kind !== "compared" || !entry.snapshot) continue;
+    // Writes into `entry.snapshot.bindings` in place — that is what the engine
+    // reads to decide the code side's token.
+    const outcome = mergeAutoBindings(storyId, target, entry.snapshot, args, mode, [entry.state]);
+    if (Object.keys(outcome.classes).length > 0) byState[entry.state] = outcome.classes;
+  }
+  return byState;
+}
+
+/**
+ * Give each forced-state row the class that actually styles it.
+ *
+ * Kept separate from `annotateClassHints` because the two must not share a
+ * keyspace: a root row and its forced counterpart have the **same `property`**,
+ * so one map keyed by property alone would pin `hover:bg-primary-hover` onto the
+ * resting row — telling someone to edit the hover class to fix the default state.
+ * Keyed by (state, property) instead.
+ */
+export function annotateStateClassHints(
+  report: DriftReport,
+  byState: Record<string, Record<string, string>>,
+): void {
+  if (Object.keys(byState).length === 0) return;
+  for (const dim of report.dimensions) {
+    if (dim.forcedState === undefined) continue;
+    const cls = byState[dim.forcedState]?.[dim.property];
+    if (cls) dim.codeClassName = cls;
+  }
+}
+
 function mergeChildAutoBindings(childSnapshots: ChildSnapshotEntry[] | undefined): void {
   if (!childSnapshots) return;
   for (const child of childSnapshots) {

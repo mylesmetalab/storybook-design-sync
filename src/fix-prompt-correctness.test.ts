@@ -637,3 +637,122 @@ describe("#95 — a grouped prompt never names a custom property the project lac
     expect(p).not.toMatch(/not declared anywhere in this project/i);
   });
 });
+
+/* ------------------------------------------------------------------------- *
+ * #91 — a forced-state row must say which state it measured
+ * ------------------------------------------------------------------------- */
+
+describe("#91 — forced-state rows name the state, the selector and the resting verdict", () => {
+  const hoverRow = (over: Partial<FixPromptInput> = {}): FixPromptInput => ({
+    storyId: "ui-button--primary",
+    kind: "token-value" as DimensionKind,
+    property: "background-color",
+    codeValue: "rgb(227, 227, 227)",
+    figmaValue: "rgb(30, 30, 30)",
+    tokenName: "Background/Brand/Hover",
+    selector: "button",
+    filePaths: ["src/components/**/*.tsx"],
+    nodeId: "4185:3783",
+    fileKey: "abc",
+    provenance: PROVENANCE,
+    forcedState: "hover",
+    codeClassName: "hover:bg-primary-hover",
+    ...over,
+  });
+
+  function bulkOf(rows: FixPromptInput[]): string {
+    const out = buildBulkFixPrompt({
+      storyId: "ui-button--primary",
+      context: {
+        selector: "button",
+        filePaths: ["src/components/**/*.tsx"],
+        nodeId: "4185:3779",
+        fileKey: "abc",
+        provenance: PROVENANCE,
+      },
+      rows,
+    });
+    if (out === null) throw new Error("expected a bulk prompt");
+    return out;
+  }
+
+  /**
+   * The failure this prevents: an applier told to change a background that is
+   * actually the *hover* background edits the resting style. That changes a state
+   * the design did not ask about AND leaves the reported drift in place.
+   */
+  it("says the row was measured with the state forced", () => {
+    const p = buildFixPrompt(hoverRow());
+    expect(p).toMatch(/measured with `:hover` forced/);
+    expect(p).toMatch(/not the resting one/);
+  });
+
+  it("names the declaration responsible when the scan established it", () => {
+    // Asserts the SENTENCE, not just that the class name appears somewhere — the
+    // drift bullets already mention the class, so a bare `toContain` passes even
+    // if this bullet is removed entirely.
+    const p = buildFixPrompt(hoverRow());
+    expect(p).toMatch(/The declaration responsible is `hover:bg-primary-hover`/);
+  });
+
+  it("says the declaration is NOT established when the scan derived none", () => {
+    // "Edit the hover styling" with no target invites editing the base, so the
+    // absence has to be explicit rather than silent.
+    const row = hoverRow();
+    delete (row as { codeClassName?: string }).codeClassName;
+    const p = buildFixPrompt(row);
+    expect(p).toMatch(/not established/);
+    expect(p).not.toMatch(/The declaration responsible is/);
+  });
+
+  it("does not claim a resting verdict on a per-row copy", () => {
+    // A single-row prompt has no sibling context. Claiming the base is fine would
+    // be an unearned reassurance; claiming it drifted would invent a finding.
+    const p = buildFixPrompt(hoverRow());
+    expect(p).toMatch(/resting state drifted on this property is \*\*not established\*\*/);
+  });
+
+  it("adds nothing at all to a default-state row", () => {
+    const row = hoverRow();
+    delete (row as { forcedState?: string }).forcedState;
+    const p = buildFixPrompt(row);
+    expect(p).not.toMatch(/forced/);
+    expect(p).not.toMatch(/resting/);
+  });
+
+  describe("in a bulk prompt, where the resting verdict IS knowable", () => {
+    const resting = (): FixPromptInput => {
+      const row = hoverRow({
+        codeValue: "rgb(44, 44, 44)",
+        figmaValue: "rgb(44, 44, 44)",
+        tokenName: "Background/Brand/Default",
+        nodeId: "4185:3779",
+      });
+      delete (row as { forcedState?: string }).forcedState;
+      delete (row as { codeClassName?: string }).codeClassName;
+      return row;
+    };
+
+    it("says the resting state also drifted when it did", () => {
+      const p = bulkOf([resting(), hoverRow()]);
+      expect(p).toMatch(/resting state \*\*also\*\* drifted/);
+      expect(p).toMatch(/two separate design values/);
+    });
+
+    it("says the resting state did not drift when only the state row is present", () => {
+      // Only the hover row drifted, so the base is correct and must be left alone
+      // — the single most likely wrong edit.
+      const p = bulkOf([hoverRow()]);
+      expect(p).toMatch(/did not\*\* drift/);
+      expect(p).toMatch(/must not be changed/);
+    });
+
+    it("heads the group with the state, not as though :hover were an element", () => {
+      // The grouping key is the state's pseudo-selector, so without the fix the
+      // heading reads "on `:hover`" and implies a child element that cannot exist.
+      const p = bulkOf([hoverRow()]);
+      expect(p).toMatch(/in the `:hover` state/);
+      expect(p).not.toMatch(/on `:hover`/);
+    });
+  });
+});

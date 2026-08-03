@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buildStateTargets, chooseStateTargets, refusedStateTargets } from "./server.js";
+import {
+  annotateStateClassHints,
+  buildStateTargets,
+  chooseStateTargets,
+  refusedStateTargets,
+} from "./server.js";
 import type { StateSnapshotEntry } from "./channels.js";
 
 /**
@@ -252,5 +257,59 @@ describe("chooseStateTargets", () => {
     });
     expect(targets).toHaveLength(3);
     expect(targets.some((t) => t.snapshot !== undefined)).toBe(false);
+  });
+});
+
+/**
+ * State class hints. Probed: leaking them onto resting rows killed **zero**
+ * tests, and that leak is a specific wrong instruction — "edit
+ * `hover:bg-primary-hover`" to fix the *default* background.
+ */
+describe("annotateStateClassHints", () => {
+  const dim = (over: Record<string, unknown>) =>
+    ({
+      kind: "token-value",
+      property: "background-color",
+      codeValue: "x",
+      figmaValue: "y",
+      status: "drift",
+      ...over,
+    }) as never;
+
+  function report(dimensions: unknown[]) {
+    return {
+      storyId: "ui-button--primary",
+      nodeId: "1:2",
+      generatedAt: "2026-08-03T00:00:00.000Z",
+      dimensions,
+    } as never;
+  }
+
+  it("pins the state's class onto the state's row", () => {
+    const r = report([dim({ forcedState: "hover", childSelector: ":hover" })]);
+    annotateStateClassHints(r, { hover: { "background-color": "hover:bg-primary-hover" } });
+    expect((r as { dimensions: Array<{ codeClassName?: string }> }).dimensions[0]!.codeClassName).toBe(
+      "hover:bg-primary-hover",
+    );
+  });
+
+  it("never pins a state's class onto the resting row", () => {
+    // A root row and its forced counterpart share `property`, so a map keyed by
+    // property alone would tell someone to edit the hover class to fix the base.
+    const r = report([dim({})]);
+    annotateStateClassHints(r, { hover: { "background-color": "hover:bg-primary-hover" } });
+    expect((r as { dimensions: Array<{ codeClassName?: string }> }).dimensions[0]!.codeClassName).toBeUndefined();
+  });
+
+  it("does not cross states", () => {
+    const r = report([dim({ forcedState: "active", childSelector: ":active" })]);
+    annotateStateClassHints(r, { hover: { "background-color": "hover:bg-primary-hover" } });
+    expect((r as { dimensions: Array<{ codeClassName?: string }> }).dimensions[0]!.codeClassName).toBeUndefined();
+  });
+
+  it("is a no-op with no state classes", () => {
+    const r = report([dim({ forcedState: "hover", childSelector: ":hover" })]);
+    annotateStateClassHints(r, {});
+    expect((r as { dimensions: Array<{ codeClassName?: string }> }).dimensions[0]!.codeClassName).toBeUndefined();
   });
 });

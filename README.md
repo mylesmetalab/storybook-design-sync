@@ -558,8 +558,11 @@ nothing" table, are in
 **State modifiers are resolved, not blanket-ignored.** The bindings describe the
 state the story renders in, because that is what the snapshot measures:
 
-- `hover:`, `focus-visible:`, `active:` — provably off (nothing forces them), so
-  they contribute nothing.
+- `hover:`, `focus-visible:`, `active:` — provably off **unless the story
+  declares a state binding and the addon forced that state** for the pass being
+  measured. Resting snapshots are unchanged; a forced `:hover` pass attributes
+  `hover:bg-primary-hover` rather than crediting the value to the base utility.
+  See [Interaction states](#interaction-states).
 - `data-disabled:` / `disabled:` / `aria-disabled:` — applied when the story's
   `disabled` arg is set, and they outrank the variant slot's own classes. A
   `PrimaryDisabled` story reports `background-color → disabled` via
@@ -899,6 +902,24 @@ The story must already be registered against a real Figma node — a child bindi
 needs a parent binding to hang off. `--dry-run` previews without writing.
 `ls` prints declared child bindings nested under their story.
 
+**Declaring state bindings.** `--state "<pseudo-state>=<nodeId>"` (repeatable,
+scoped with `--story`) adds or updates the entry's `states` map, so a forced
+pseudo-state is compared against the design's node for that state:
+
+```sh
+npx design-sync register --story ui-button--primary --state "hover=4185:3783"
+```
+
+Split on the **first** `=` — a state name never contains one, so a second is a
+typo rather than part of a node id. Supported states: `hover`, `active`, `focus`,
+`focus-visible`, `focus-within`, `disabled`. A design's `Error` / `Open` /
+`Checked` state is a prop, not a pseudo-state, and is refused with the
+instruction to bind it as its own story. Binding a state to the story's **own**
+`nodeId` is also refused — that would compare the forced rendering against the
+unforced design and report drift for everything the state deliberately changes.
+`ls` prints state bindings nested under their story as `:hover → <node>`.
+See [Interaction states](#interaction-states) for what is and is not compared.
+
 ### Pending stubs
 
 Stories that don't yet have a Figma counterpart can be expressed
@@ -985,7 +1006,9 @@ font-weight · font-family · line-height · letter-spacing · text-align ·
 text-transform · text-decoration · font-style · box-shadow (including
 `INNER_SHADOW` → `inset`) · `opacity` · **layout: `flex-direction`,
 `justify-content`, `align-items`, `flex-wrap`** · copy (text content) · Figma
-variant axes · Figma component properties (BOOLEAN, TEXT).
+variant axes · Figma component properties (BOOLEAN, TEXT) · **every one of those
+again in a forced `:hover` / `:active` / `:focus` state, where the story declares
+the binding** — see [Interaction states](#interaction-states).
 
 **Layout (the `structure` dimension).** Figma auto-layout against computed CSS:
 `layoutMode` → `flex-direction`, `primaryAxisAlignItems` → `justify-content`,
@@ -1002,6 +1025,61 @@ primary axes don't correspond — Figma `VERTICAL` against a code `flex-directio
 row`, or any Figma `VERTICAL` against a grid — the alignment rows are reported as
 `unresolved` with the reason instead of a coincidental match. A property the code
 leaves at its default (`justify-content: normal`) is `flag-only`, never drift.
+
+### Interaction states
+
+**Compared, since v0.0.47, when you declare the binding.** A story's `states`
+map names the Figma node for each forced pseudo-state, and the addon measures the
+rendered element **in that state** against that node:
+
+```json
+"ui-button--primary": {
+  "nodeId": "4185:3779",
+  "states": { "hover": "4185:3783" }
+}
+```
+
+`npx design-sync register --story ui-button--primary --state "hover=4185:3783"`.
+Rows measured this way carry the state, not a fake element: `--json` reports
+`{ "element": null, "state": "hover", … }`, because a forced state is a
+**condition on the story root**, not a child of it.
+
+**The vocabulary is forced pseudo-states only** — `hover`, `active`, `focus`,
+`focus-visible`, `focus-within`, `disabled`. A design's `State=Error`,
+`State=Open` or `State=Checked` is a prop or a `data-state` attribute the
+component renders itself, so it needs no forcing: give a story the arg that
+renders it and bind *that story* to the node. Declaring one under `states` is
+refused with that instruction rather than silently forced.
+
+**How the state is forced, and why it is trustworthy.** Page JavaScript cannot
+trigger a real `:hover` — dispatching `pointerover`/`mouseover` moves nothing.
+So the stylesheet is rewritten (`.button:hover` gains a parallel
+`.button.pseudo-hover`) and the class is toggled. Measured in headless Chromium
+on a real component, the class form, a real pointer and CDP's
+`CSS.forcePseudoState` all produce identical computed values. Because it is pure
+DOM/CSS it behaves the same in the panel and in `design-sync check`, so the two
+surfaces agree by construction rather than by testing. Transitions are
+**suspended** during the pass, not waited out: `getComputedStyle` mid-transition
+returns the interpolated value, which would make a correctly-forced state look
+unchanged.
+
+**What is refused rather than approximated.** Each is reported per state, never
+folded into a pass:
+
+| Situation | Reported as |
+|---|---|
+| Forcing changed no computed value | **Not compared.** Either the state is genuinely identical or the forcing failed; the addon cannot tell those apart, so it never reports a match. |
+| The state is styled through a `data-*` attribute the component library writes from its own React state (shadcn on Base UI / Radix `data-disabled:*`) | **Not compared**, with the instruction to bind it as its own story. A class cannot make Base UI re-render, so the forced rendering would be missing the declarations the state is made of. |
+| **Both modes** was also requested | **Not compared.** States are forced once, in the rendered mode, so a two-mode report has no measurement to attribute to the second mode. Re-run with Both modes unticked. |
+| No `states` map on the story | No state rows at all, and no message. |
+
+**`focus` has no design source in the reference file.** Across all 78 component
+sets of the Simple Design System there is no `State=Focus` — focus styling is a
+code-side decision there. So a focus comparison is *possible* but will have
+nothing to compare against unless your design file specifies one. Nothing is
+inferred.
+
+**Modes × states is not combined yet.** See the table above.
 
 **Where a colour actually came from.** A fill delivered by a **shared paint
 style** is compared and attributed like any other: Figma flattens the style's
@@ -1104,10 +1182,6 @@ is undeterminable and nothing is said.
 
 **Not detected at all.**
 
-- **Interaction states.** Hover, focus and active are never checked: a story
-  cannot take a pseudo-state as an argument, so there is nothing to compare a
-  Figma `State=Hover` variant against. Disabled *is* checked, because it is a
-  real prop. This is a missing mechanism, not an oversight.
 - **Motion.** The `motion` dimension exists in the engine but is hidden, because
   it is not yet honest enough to show. (`structure` was in this list until
   v0.0.39 and is now compared — see the layout paragraph above.)

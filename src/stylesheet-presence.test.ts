@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   MIN_PROBES_FOR_MISSING,
+  PROBE_SAMPLE_SIZE,
   classifyStylesheetPresence,
+  probeNamesFromScan,
   type CustomPropertyProbe,
 } from "./stylesheet-presence.js";
 
@@ -137,5 +139,58 @@ describe("classifyStylesheetPresence", () => {
       const result = classifyStylesheetPresence([...absent(4), { name: "nope", value: "" }]);
       expect(result.kind).toBe("unknown");
     });
+  });
+});
+
+/**
+ * The caller-side normalisation. This has its own tests because removing it
+ * killed **zero** tests when probed — and it is the step whose absence made the
+ * check condemn every healthy project.
+ */
+describe("probeNamesFromScan", () => {
+  it("adds the -- prefix the CSS scan strips", () => {
+    // `scan-css.ts` stores `decl.prop.slice(2)`, so the index holds
+    // "color-primary", and `getPropertyValue("color-primary")` is always "".
+    expect(probeNamesFromScan({ "color-primary": [], "radius-md": [] })).toEqual([
+      "--color-primary",
+      "--radius-md",
+    ]);
+  });
+
+  it("leaves an already-prefixed name alone rather than doubling it", () => {
+    expect(probeNamesFromScan({ "--already": [] })).toEqual(["--already"]);
+  });
+
+  it("sorts, so the probe sample is deterministic across runs", () => {
+    // A sample that varied per run would make a refusal unreproducible.
+    expect(probeNamesFromScan({ zeta: [], alpha: [], mid: [] })).toEqual([
+      "--alpha",
+      "--mid",
+      "--zeta",
+    ]);
+  });
+
+  it("samples rather than sending hundreds of names", () => {
+    const many = Object.fromEntries(
+      Array.from({ length: 500 }, (_, i) => [`t${String(i).padStart(3, "0")}`, []]),
+    );
+    expect(probeNamesFromScan(many)).toHaveLength(PROBE_SAMPLE_SIZE);
+  });
+
+  it("samples the SAME names every time, not a moving window", () => {
+    const many = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`t${i}`, []]));
+    expect(probeNamesFromScan(many)).toEqual(probeNamesFromScan(many));
+  });
+
+  it("returns nothing for an empty index, so the predicate reports unknown", () => {
+    expect(probeNamesFromScan({})).toEqual([]);
+  });
+
+  it("produces names the predicate will actually accept", () => {
+    // The two halves have to agree: names from here must never trip the
+    // unprefixed-name guard in classifyStylesheetPresence.
+    const names = probeNamesFromScan({ "color-primary": [], "radius-md": [], "font-sans": [] });
+    const verdict = classifyStylesheetPresence(names.map((name) => ({ name, value: "" })));
+    expect(verdict.kind).toBe("missing");
   });
 });

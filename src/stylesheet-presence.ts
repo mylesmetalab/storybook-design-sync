@@ -89,6 +89,30 @@ export const MIN_PROBES_FOR_MISSING = 3;
  */
 export const PROBE_SAMPLE_SIZE = 24;
 
+/**
+ * Turn the CSS scan's custom-property index into names the DOM will answer for.
+ *
+ * Two jobs, both load-bearing:
+ *
+ * 1. **Add the `--` prefix back.** `scan-css.ts` stores names with it stripped
+ *    (`decl.prop.slice(2)`), and `getPropertyValue("color-primary")` returns `""`
+ *    for any name without it. Passing the scan's keys through unchanged made the
+ *    stylesheet check conclude "missing" on every healthy project and suppress
+ *    its entire comparison. That shipped in the first wiring and was caught only
+ *    by running it against a real project.
+ * 2. **Sort before sampling**, so the probe set is deterministic. A sample that
+ *    varied between runs would make a refusal unreproducible.
+ */
+export function probeNamesFromScan(
+  customProperties: Readonly<Record<string, unknown>>,
+  limit: number = PROBE_SAMPLE_SIZE,
+): string[] {
+  return Object.keys(customProperties)
+    .map((name) => (name.startsWith("--") ? name : `--${name}`))
+    .sort()
+    .slice(0, limit);
+}
+
 export function classifyStylesheetPresence(
   probes: readonly CustomPropertyProbe[],
   context: { cssEntries?: readonly string[] } = {},

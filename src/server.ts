@@ -18,7 +18,7 @@ import {
   type ChildBindingDeclaration,
 } from "./child-bindings.js";
 import { validateStateBindings } from "./state-bindings.js";
-import { PROBE_SAMPLE_SIZE } from "./stylesheet-presence.js";
+import { probeNamesFromScan } from "./stylesheet-presence.js";
 import type { ChildTarget } from "./engines/types.js";
 import { applyCodeEdit } from "./apply-code.js";
 import type { DimensionDiff, DriftReport, FigmaReadSource } from "./dimensions/types.js";
@@ -154,22 +154,13 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       }
       // Independent of the registry entry: the stylesheet check is about the
       // project, not about whether this story happens to be bound.
-      // `scan-css.ts` stores these with the `--` prefix STRIPPED
-      // (`decl.prop.slice(2)`), so it must be added back before anything asks the
-      // DOM for them. Getting this wrong is not a small bug: every probe returns
-      // "" for a name without the prefix, so the stylesheet check concludes
-      // "missing" on a perfectly healthy project and suppresses its whole
-      // comparison. Caught end to end, not by unit tests — their fixtures were
-      // already prefixed. `classifyStylesheetPresence` now also refuses to
-      // conclude anything from unprefixed names.
-      const declaredProps = Object.keys(getAutoScan().customProperties).map((n) =>
-        n.startsWith("--") ? n : `--${n}`,
-      );
+      //
+      // Prefixing, sorting and sampling all live in `probeNamesFromScan` — see
+      // there for why each one matters. The scan stores names with `--` stripped,
+      // and passing them through raw made the check condemn every healthy project.
+      const declaredProps = probeNamesFromScan(getAutoScan().customProperties);
       if (declaredProps.length > 0) {
-        // A sample is enough for the predicate and keeps the payload small on a
-        // project with hundreds of tokens. Sorted so the sample is deterministic
-        // — a probe set that varies per run makes a refusal unreproducible.
-        reply.themeCustomProperties = declaredProps.sort().slice(0, PROBE_SAMPLE_SIZE);
+        reply.themeCustomProperties = declaredProps;
       }
     } catch {
       // Config/registry failures are reported by the CodeSnapshot handler with

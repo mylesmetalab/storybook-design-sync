@@ -790,11 +790,19 @@ function absentTokenBullets(
   input: FixPromptInput,
   presence: Extract<TokenPresence, { kind: "absent" }>,
   figma: string,
+  /**
+   * Overrides how the edit site is described. The grouped path passes the whole
+   * family ("the declarations for padding-top, …") so the refusal covers every
+   * property in the group rather than naming one of four.
+   */
+  targetOverride?: string,
 ): string[] {
   const lines: string[] = [];
-  const target = input.codeClassName
-    ? `the utility class \`${input.codeClassName}\``
-    : `the declaration for \`${input.property}\``;
+  const target =
+    targetOverride ??
+    (input.codeClassName
+      ? `the utility class \`${input.codeClassName}\``
+      : `the declaration for \`${input.property}\``);
   lines.push(
     `- By convention Figma's \`${input.tokenName}\` converts to \`${presence.converted}\`, and that custom ` +
       `property is **not declared anywhere in this project's scanned CSS** — ${presence.declaredCount} custom ` +
@@ -1175,6 +1183,33 @@ function multiPropertyBullets(group: BulkGroup): string[] {
       .join("; ")}`,
   );
   if (first.tokenName) {
+    const presence = first.tokenPresence;
+    // #95 — the same rule the single-row path already follows. The scan PROVED
+    // there is no such custom property, so the prompt must not name one. This
+    // path did not check, so a bulk prompt told an applier to write
+    // `var(--space-300)` in a project that declares no spacing tokens at all:
+    // it resolves to nothing, and applying the prompt faithfully leaves the
+    // component worse than the drift did.
+    if (presence?.kind === "absent") {
+      lines.push(
+        `- Expected value from Figma for all ${n}: \`${figma}\`, which Figma backs with the design token \`${first.tokenName}\``,
+      );
+      const classes = rows.map((r) => r.codeClassName).filter((c): c is string => !!c);
+      const target =
+        classes.length > 0
+          ? `the utility class(es) ${codeList(classes)}`
+          : `the declarations for ${codeList(properties)}`;
+      lines.push(...absentTokenBullets(first, presence, figma, target));
+      lines.push(...modeLines(first));
+      lines.push(
+        `- All ${n} move together: if this is resolved at the token layer, every one of them points at the new token in the same edit.`,
+      );
+      lines.push(...contractLines(first));
+      for (const r of rows.filter((row) => row.note)) {
+        lines.push(`- Note from the drift engine on \`${r.property}\`: ${r.note}`);
+      }
+      return lines;
+    }
     const cssVar = cssVarFor(first);
     lines.push(
       `- Expected value from Figma for all ${n}: \`${figma}\`, backed by the design token \`${first.tokenName}\` (CSS custom property: \`var(${cssVar})\`)`,

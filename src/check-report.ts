@@ -6,6 +6,7 @@ import {
   countRowStatuses,
   groupDimensions,
   rowChildSelector,
+  rowForcedState,
   rowHasAnyValue,
   sortRowsByFinding,
   unresolvedChildBindings,
@@ -94,6 +95,16 @@ export interface CheckJsonComparison {
 export interface CheckJsonRow {
   /** Declared child selector, or `null` for the story root. */
   element: string | null;
+  /**
+   * The forced pseudo-state this row was measured in (`"hover"`), or `null` for
+   * the default state.
+   *
+   * A state row has `element: null` because the element measured **is** the story
+   * root — only the condition differs. So a row's identity is the triple
+   * (`element`, `state`, `property`); keying on element+property alone will
+   * collide a default-state row with its forced counterpart.
+   */
+  state: string | null;
   property: string;
   /** What kind of finding this is — the panel's row ordering key. */
   finding: RowFinding;
@@ -124,8 +135,13 @@ export function jsonRow(row: GroupedRow): CheckJsonRow {
       ? [row.value, row.binding].filter((d): d is DimensionDiff => d !== undefined)
       : [row.diff];
   const property = row.kind === "token" ? row.property : row.diff.property;
+  const forcedState = rowForcedState(row);
   return {
-    element: rowChildSelector(row) ?? null,
+    // A forced state is measured on the root, so `element` stays null and the
+    // condition is reported separately. Emitting `":hover"` here would present
+    // the state as a sub-element that does not exist.
+    element: forcedState === undefined ? rowChildSelector(row) ?? null : null,
+    state: forcedState ?? null,
     property,
     finding: classifyRow(row),
     informative: rowHasAnyValue(row),

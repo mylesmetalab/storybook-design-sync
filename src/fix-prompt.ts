@@ -169,6 +169,16 @@ export interface FixPromptInput {
    */
   codeClassName?: string | undefined;
   /**
+   * The forced pseudo-state this row was measured in, without the colon
+   * (`"hover"`). Absent means the default state.
+   *
+   * The prompt must say so: an applier told to change a background that is
+   * actually the **hover** background will edit the resting style, which changes
+   * the wrong thing and leaves the drift in place. Naming the state is not
+   * decoration, it is the difference between the edit landing and not.
+   */
+  forcedState?: string | undefined;
+  /**
    * Consumer-relative file paths the addon is configured to write
    * (config.codeTargets). Best available hint for where the fix lands.
    */
@@ -848,6 +858,11 @@ export function buildFixPrompt(input: FixPromptInput): string {
   lines.push("");
   lines.push(`## The drift`);
   lines.push(...driftBullets(input, { includeSiblings: true }));
+  // `undefined`: a per-row copy carries no sibling context, so whether the
+  // resting state also drifted is genuinely not established here. Saying so beats
+  // guessing in either direction — "the base is fine" would be an unearned
+  // reassurance, and "the base drifted too" would invent a second finding.
+  lines.push(...forcedStateBullets(input, undefined));
   lines.push(...blastRadiusLines(input));
   lines.push("");
   lines.push(...provenanceLines(input));
@@ -1156,13 +1171,75 @@ function groupRows(rows: readonly FixPromptInput[]): BulkGroup[] {
 /** Heading for one group of mechanical fixes. */
 function groupHeading(group: BulkGroup, rootSelector: string | undefined): string {
   const properties = group.rows.map((r) => r.property);
+  const forcedState = group.rows[0]?.forcedState;
+  // A forced state is a condition on the element, not a different element. The
+  // grouping key is the state's pseudo-selector, so without this the heading
+  // reads "on `:hover`" as though the component had a `:hover` child.
   const where =
-    group.element !== undefined && group.element !== rootSelector
-      ? ` on \`${group.element}\``
-      : "";
+    forcedState !== undefined
+      ? ` in the \`:${forcedState}\` state`
+      : group.element !== undefined && group.element !== rootSelector
+        ? ` on \`${group.element}\``
+        : "";
   if (group.rows.length === 1) return `### \`${properties[0]}\`${where}`;
   const label = group.family?.label ?? properties[0];
   return `### ${label}${where} — ${group.rows.length} properties, ONE design change`;
+}
+
+/**
+ * The bullets a forced-state row needs beyond the ordinary ones.
+ *
+ * Three things, and each has a specific failure it prevents:
+ *
+ *  1. **Which state**, so the applier does not edit the resting style. Changing
+ *     the base background to fix a hover row changes the wrong thing and leaves
+ *     the drift in place.
+ *  2. **Which selector is responsible** — the `hover:` utility or the
+ *     `:hover` rule — when the scan established it. When it did not, the prompt
+ *     says so rather than guessing, because "edit the hover styling" with no
+ *     target invites editing the base.
+ *  3. **That the resting state was compared separately and did not drift** — or
+ *     that this is not established. Otherwise an applier reasonably assumes the
+ *     property is wrong everywhere and "fixes" both.
+ */
+function forcedStateBullets(row: FixPromptInput, restingDrifted: boolean | undefined): string[] {
+  const state = row.forcedState;
+  if (state === undefined) return [];
+  const lines: string[] = [
+    `- **This row was measured with \`:${state}\` forced on the element.** The value above is the ` +
+      `\`:${state}\` value, not the resting one — so the edit belongs in whatever styles ` +
+      `\`:${state}\`, not in the element's base styling. Changing the base would alter a state the ` +
+      `design did not ask about and leave this row drifted.`,
+  ];
+  if (row.codeClassName) {
+    lines.push(
+      `- The declaration responsible is \`${row.codeClassName}\` — the scan attributed this ` +
+        `property, in this state, to that class.`,
+    );
+  } else {
+    lines.push(
+      `- **Which declaration styles \`:${state}\` here is not established.** The scan derived no ` +
+        `binding for this property in this state, so find the \`:${state}\` rule or \`${state}:\` ` +
+        `utility yourself rather than assuming it is the base declaration.`,
+    );
+  }
+  if (restingDrifted === undefined) {
+    lines.push(
+      `- Whether the resting state drifted on this property is **not established** by this prompt. ` +
+        `Check the default-state rows before assuming the property is wrong in every state.`,
+    );
+  } else if (restingDrifted) {
+    lines.push(
+      `- The resting state **also** drifted on \`${row.property}\`. Those are two separate design ` +
+        `values and two separate edits — do not collapse them into one.`,
+    );
+  } else {
+    lines.push(
+      `- The resting state was compared on \`${row.property}\` and **did not** drift, so the base ` +
+        `styling is correct and must not be changed.`,
+    );
+  }
+  return lines;
 }
 
 function multiPropertyBullets(group: BulkGroup): string[] {
@@ -1316,15 +1393,30 @@ export function buildBulkFixPrompt(input: BulkFixPromptInput): string | null {
       `Nothing here is a mechanical code fix — see the sections below, and report back rather than changing code.`,
     );
   } else {
+    // Which properties drifted in the DEFAULT state, so a forced-state row can
+    // say whether the resting value is also wrong. A bulk prompt is the only
+    // place this is knowable — the per-row copy has no sibling context, and there
+    // it is reported as not established rather than assumed either way.
+    const restingDrifted = new Set(
+      mechanical.filter((r) => r.forcedState === undefined).map((r) => r.property),
+    );
+    const restingCompared = new Set(mechanical.map((r) => r.property));
+    const restingVerdict = (row: FixPromptInput): boolean | undefined =>
+      row.forcedState === undefined || !restingCompared.has(row.property)
+        ? undefined
+        : restingDrifted.has(row.property);
     for (const group of groupRows(mechanical)) {
       lines.push("");
       lines.push(groupHeading(group, rootSelector));
+      const first = group.rows[0]!;
       if (group.rows.length === 1) {
-        lines.push(...driftBullets(group.rows[0]!, { includeSiblings: false }));
-        lines.push(...blastRadiusLines(group.rows[0]!));
+        lines.push(...driftBullets(first, { includeSiblings: false }));
+        lines.push(...forcedStateBullets(first, restingVerdict(first)));
+        lines.push(...blastRadiusLines(first));
       } else {
         lines.push(...multiPropertyBullets(group));
-        lines.push(...blastRadiusLines(group.rows[0]!));
+        lines.push(...forcedStateBullets(first, restingVerdict(first)));
+        lines.push(...blastRadiusLines(first));
       }
     }
   }

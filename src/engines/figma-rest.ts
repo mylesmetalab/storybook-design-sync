@@ -964,10 +964,17 @@ class FigmaRestEngine implements Engine {
           aliases,
           valueDiffs: childValueDiffs,
         }),
-        ...(compareCopy ? this.diffCopy(node, child.snapshot) : []),
-        // A declared child is very often the flex container that matters (a
-        // Card's header row), so it gets the same layout comparison as the root
-        // — and the same applicability guard.
+        // Copy is compared for a declared child element, and NOT for a forced
+        // state. A CSS pseudo-state cannot change an element's text content, so
+        // the state's copy row is byte-identical to the resting one by
+        // construction — reporting it again is a second, duplicate finding about
+        // one string, and re-states a disagreement the default-state row already
+        // made. Observed live: every Button story reported its label drift twice.
+        //
+        // Layout, by contrast, IS applicable: `:hover` can legitimately change
+        // padding or alignment, so it keeps the same comparison and the same
+        // applicability guard the root gets.
+        ...(compareCopy && child.kind !== "state" ? this.diffCopy(node, child.snapshot) : []),
         ...layoutRows(node, child.snapshot.styles),
       ];
       for (const row of rows) {

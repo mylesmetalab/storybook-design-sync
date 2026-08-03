@@ -468,3 +468,100 @@ describe("a bound child that cannot be compared is reported, never dropped", () 
     expect(report.children).toHaveLength(3);
   });
 });
+
+/* ------------------------------------------------------------------------- *
+ * Copy is compared for a child element and NOT for a forced state
+ * ------------------------------------------------------------------------- */
+
+/**
+ * A CSS pseudo-state cannot change an element's text content, so a forced
+ * state's copy row is byte-identical to the resting one **by construction**.
+ * Emitting it is a second, duplicate finding about one string, restating a
+ * disagreement the default-state row already made.
+ *
+ * Observed live before this gate: every Button story reported its label drift
+ * twice, once for the default state and once for `:hover`.
+ *
+ * Layout is deliberately NOT gated the same way — `:hover` can legitimately move
+ * padding or alignment, so that comparison stays applicable.
+ */
+describe("copy is skipped for a forced state, but not for a child element", () => {
+  const TEXT_ID = "2142:11999";
+
+  function textNode(id: string) {
+    return {
+      id,
+      name: "Label",
+      type: "TEXT",
+      characters: "Button",
+      strokes: [],
+      fills: [],
+      children: [],
+      boundVariables: {},
+    };
+  }
+
+  async function checkWith(target: ChildTarget): Promise<DriftReport> {
+    // Include the root: `nodes` replaces the default map wholesale.
+    installFetchStub({
+      nodes: { [ROOT_ID]: frame(ROOT_ID, "Button"), [TEXT_ID]: textNode(TEXT_ID) },
+    });
+    const engine = createFigmaRestEngine({ figmaPat: "test-pat" });
+    return engine.checkDrift({
+      storyId: "ui-button--primary",
+      nodeRef: { fileKey: FILE_KEY, nodeId: ROOT_ID },
+      snapshot: snapshot("16px"),
+      registryPath: ".design-sync/registry.json",
+      children: [target],
+    });
+  }
+
+  const withText: CodeSnapshot = {
+    styles: { "padding-top": "16px" },
+    texts: ["Save changes"],
+    ownText: "Save changes",
+  };
+
+  it("emits no copy row for a state target", async () => {
+    const report = await checkWith({
+      selector: ":hover",
+      kind: "state",
+      nodeId: TEXT_ID,
+      snapshot: withText,
+    });
+    const copy = report.dimensions.filter((d) => d.kind === "copy");
+    expect(copy).toEqual([]);
+  });
+
+  it("still emits a copy row for a declared child element", async () => {
+    // The gate is about the forced state, not about being a non-root target.
+    const report = await checkWith({
+      selector: "[data-slot=label]",
+      nodeId: TEXT_ID,
+      snapshot: withText,
+    });
+    expect(report.dimensions.some((d) => d.kind === "copy")).toBe(true);
+  });
+
+  it("still tags a state target's other rows with the state", async () => {
+    // A real state binding targets the component's own frame, which has plenty to
+    // compare. (A TEXT node has only copy, so gating it leaves nothing at all —
+    // correct, but it proves nothing about tagging.)
+    installFetchStub({
+      nodes: { [ROOT_ID]: frame(ROOT_ID, "Button"), [HEADER_ID]: frame(HEADER_ID, "Button Hover") },
+    });
+    const engine = createFigmaRestEngine({ figmaPat: "test-pat" });
+    const report = await engine.checkDrift({
+      storyId: "ui-button--primary",
+      nodeRef: { fileKey: FILE_KEY, nodeId: ROOT_ID },
+      snapshot: snapshot("16px"),
+      registryPath: ".design-sync/registry.json",
+      children: [
+        { selector: ":hover", kind: "state", nodeId: HEADER_ID, snapshot: snapshot("24px") },
+      ],
+    });
+    const tagged = report.dimensions.filter((d) => d.forcedState === "hover");
+    expect(tagged.length).toBeGreaterThan(0);
+    expect(tagged.every((d) => d.childSelector === ":hover")).toBe(true);
+  });
+});

@@ -507,3 +507,133 @@ function sectionOf(prompt: string, heading: string): string {
   const next = rest.indexOf("\n## ");
   return next === -1 ? rest : rest.slice(0, next);
 }
+
+/* ------------------------------------------------------------------------- *
+ * #95 — the BULK prompt must follow the same rule as the per-row one
+ * ------------------------------------------------------------------------- */
+
+describe("#95 — a grouped prompt never names a custom property the project lacks", () => {
+  /**
+   * The per-row path already refused to name an absent variable (#66/#67). The
+   * grouped path — the one behind "Copy fix prompt for all drift" — checked only
+   * `tokenName` and never `tokenPresence`, so on a fresh project it instructed
+   * an applier to `set each of them to var(--space-300)` where no spacing token
+   * is declared at all. That resolves to nothing: applying the prompt faithfully
+   * leaves the component worse than the drift did.
+   *
+   * Four paddings is the exact shape that produced it, so it is the fixture.
+   */
+  const PRESENCE = {
+    kind: "absent" as const,
+    converted: "--space-300",
+    declaredCount: 8,
+    themeFiles: ["src/index.css"],
+  };
+
+  const padding = (property: string): FixPromptInput => ({
+    storyId: "ui-button--primary",
+    kind: "token-value" as DimensionKind,
+    property,
+    codeValue: "8px",
+    figmaValue: "12px",
+    tokenName: "Space/300",
+    selector: "button",
+    filePaths: ["src/components/**/*.tsx"],
+    nodeId: "4185:3779",
+    fileKey: "abc",
+    provenance: PROVENANCE,
+    tokenPresence: PRESENCE,
+  });
+
+  const FAMILY = ["padding-top", "padding-right", "padding-bottom", "padding-left"];
+
+  function bulk(rows: FixPromptInput[]): string {
+    const out = buildBulkFixPrompt({
+      storyId: "ui-button--primary",
+      context: {
+        selector: "button",
+        filePaths: ["src/components/**/*.tsx"],
+        nodeId: "4185:3779",
+        fileKey: "abc",
+        provenance: PROVENANCE,
+      },
+      rows,
+    });
+    if (out === null) throw new Error("expected a bulk prompt");
+    return out;
+  }
+
+  it("does not instruct the applier to write var(--space-300)", () => {
+    const p = bulk(FAMILY.map(padding));
+    // The wiring instruction is what was wrong — "set each of them to
+    // var(--space-300)" in a project with no spacing tokens.
+    expect(p).not.toMatch(/Prefer wiring the token/);
+    expect(p).not.toMatch(/set each of them to/);
+  });
+
+  it("names the variable only to forbid it", () => {
+    // Naming it is not the bug; *instructing* it was. "Do NOT write
+    // var(--space-300)" is far more actionable than a vague warning, so the
+    // mention has to survive — bounded by the prohibition around it.
+    const p = bulk(FAMILY.map(padding));
+    expect(p).toMatch(/do NOT write `var\(--space-300\)`/);
+    expect(p).toMatch(/would resolve to nothing/);
+  });
+
+  it("says the property is not declared, and how many were scanned", () => {
+    const p = bulk(FAMILY.map(padding));
+    expect(p).toMatch(/not declared anywhere in this project/i);
+    expect(p).toMatch(/8 custom properties were scanned/);
+  });
+
+  it("still names the Figma token and the expected value", () => {
+    // Refusing to name a CSS variable is not the same as withholding the design
+    // decision — the applier still needs to know what Figma asks for.
+    const p = bulk(FAMILY.map(padding));
+    expect(p).toContain("Space/300");
+    expect(p).toContain("12px");
+  });
+
+  it("routes it to the token layer rather than the component files", () => {
+    const p = bulk(FAMILY.map(padding));
+    expect(p).toMatch(/\*\*token-layer\*\* change/);
+    expect(p).toMatch(/design-lead sign-off/);
+  });
+
+  it("covers the whole family in the refusal, not one of four", () => {
+    const p = bulk(FAMILY.map(padding));
+    for (const property of FAMILY) expect(p).toContain(property);
+  });
+
+  it("keeps the move-together instruction, so the group is not half-applied", () => {
+    const p = bulk(FAMILY.map(padding));
+    expect(p).toMatch(/All 4 move together/);
+  });
+
+  it("still wires the token when the project DOES declare it", () => {
+    // The refusal must be driven by evidence, not by grouping.
+    const declared = FAMILY.map((property) => ({
+      ...padding(property),
+      tokenPresence: {
+        kind: "declared" as const,
+        cssVar: "--space-300",
+        files: ["src/index.css"],
+      },
+    }));
+    const p = bulk(declared);
+    expect(p).toMatch(/Prefer wiring the token/);
+    expect(p).toContain("var(--space-300)");
+  });
+
+  it("says nothing about presence when the scan never ran", () => {
+    // `tokenPresence` undefined is "not established", which must behave as it did
+    // before this change rather than being read as absent.
+    const unknown = FAMILY.map((property) => {
+      const row = padding(property);
+      delete (row as { tokenPresence?: unknown }).tokenPresence;
+      return row;
+    });
+    const p = bulk(unknown);
+    expect(p).not.toMatch(/not declared anywhere in this project/i);
+  });
+});

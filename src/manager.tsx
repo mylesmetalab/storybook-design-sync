@@ -2367,7 +2367,7 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
                       "\n\nNot cached — re-running will retry."
                     }
                   >
-                    ⚠ incomplete — Figma unread
+                    ⚠ incomplete — not checked
                   </span>
                 )}
                 {r.status === "error" && r.timedOut && (

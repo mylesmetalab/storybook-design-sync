@@ -14,6 +14,10 @@ import {
   snapshotForcedStates,
 } from "./state-force.js";
 import {
+  classifyStylesheetPresence,
+  type CustomPropertyProbe,
+} from "./stylesheet-presence.js";
+import {
   normalizeBindingKey,
   compositeBorderTokens,
 } from "./binding-shape.js";
@@ -345,9 +349,15 @@ const CHILD_BINDINGS_TIMEOUT_MS = 2000;
 interface DeclaredBindings {
   children: ChildBindingDeclaration[];
   states: Array<{ state: string; nodeId: string }>;
+  /** Custom property names to probe for the stylesheet-presence check (#96). */
+  themeCustomProperties: string[];
 }
 
-const NO_BINDINGS: DeclaredBindings = { children: [], states: [] };
+const NO_BINDINGS: DeclaredBindings = {
+  children: [],
+  states: [],
+  themeCustomProperties: [],
+};
 
 function requestBindings(storyId: string): Promise<DeclaredBindings> {
   return new Promise((resolve) => {
@@ -364,12 +374,44 @@ function requestBindings(storyId: string): Promise<DeclaredBindings> {
       done({
         children: Array.isArray(info.children) ? info.children : [],
         states: Array.isArray(info.states) ? info.states : [],
+        themeCustomProperties: Array.isArray(info.themeCustomProperties)
+          ? info.themeCustomProperties
+          : [],
       });
     };
     const timer = setTimeout(() => done(NO_BINDINGS), CHILD_BINDINGS_TIMEOUT_MS);
     channel.on(EVENTS.ChildBindingsInfo, onInfo);
     channel.emit(EVENTS.ChildBindingsRequest, { storyId });
   });
+}
+
+/**
+ * Probe the rendered document for the project's own custom properties.
+ *
+ * The only DOM read for the stylesheet-presence check; the verdict is
+ * `classifyStylesheetPresence`, which is pure. Read from `documentElement`
+ * because that is where a `:root` block lands, and a theme file's tokens are
+ * declared at `:root` by every convention this addon supports.
+ */
+function attachStylesheetVerdict(
+  out: CodeSnapshotPayload,
+  names: readonly string[],
+): void {
+  const verdict = classifyStylesheetPresence(probeCustomProperties(names));
+  // Only `missing` travels. `loaded` needs no message, and `unknown` must not
+  // produce one — a refusal without evidence is the failure this guards against.
+  if (verdict.kind !== "missing") return;
+  out.stylesheetMissing = {
+    reason: verdict.reason,
+    detail: verdict.detail,
+    probed: verdict.probed,
+  };
+}
+
+function probeCustomProperties(names: readonly string[]): CustomPropertyProbe[] {
+  if (names.length === 0) return [];
+  const cs = window.getComputedStyle(document.documentElement);
+  return names.map((name) => ({ name, value: cs.getPropertyValue(name) }));
 }
 
 /**
@@ -744,6 +786,7 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     if (payload.bulk) out.bulk = true;
     if (payload.compareCopy === false) out.compareCopy = false;
     if (outcome.children.length > 0) out.childSnapshots = outcome.children;
+    attachStylesheetVerdict(out, declared.themeCustomProperties);
     channel.emit(EVENTS.CodeSnapshot, out);
     return;
   }
@@ -763,5 +806,6 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
   if (payload.compareCopy === false) out.compareCopy = false;
   if (childSnapshots.length > 0) out.childSnapshots = childSnapshots;
   if (stateSnapshots.length > 0) out.stateSnapshots = stateSnapshots;
+  attachStylesheetVerdict(out, declared.themeCustomProperties);
   channel.emit(EVENTS.CodeSnapshot, out);
 });

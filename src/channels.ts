@@ -147,6 +147,16 @@ export interface ChildBindingsInfoPayload {
    * behaviour exactly.
    */
   states?: Array<{ state: string; nodeId: string }>;
+  /**
+   * Names of the custom properties the project's own CSS declares (`--color-primary`
+   * …), so the preview can check whether the project's stylesheet is actually
+   * loaded before anything is compared. See `stylesheet-presence.ts` for why.
+   *
+   * Carried on this reply rather than a new event for the same reason `states` is:
+   * one round trip per story already exists. Capped by the server — the predicate
+   * only needs enough probes to be confident, not all 400 of them.
+   */
+  themeCustomProperties?: string[];
 }
 
 /**
@@ -216,6 +226,15 @@ export interface CodeSnapshotPayload {
    * never ignored.
    */
   stateSnapshots?: StateSnapshotEntry[];
+  /**
+   * Set only when the preview established that the project's stylesheet is NOT
+   * loaded. Carries the reason; the server then refuses the comparison for this
+   * story instead of reporting drift against browser defaults (#96).
+   *
+   * Absent means either loaded or not determinable — both of which proceed
+   * normally, because a refusal needs evidence.
+   */
+  stylesheetMissing?: { reason: string; detail: string; probed: number };
   /**
    * The selector the preview used to find the story root. Relayed so the
    * server can look up CSS-derived token bindings for that selector and

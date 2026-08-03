@@ -26,7 +26,7 @@ When run on a project that already has `.claude/skills/`, compare each local ski
 ### 1. Run `design-sync init`
 
 ```bash
-npm install --save-dev "github:mylesmetalab/storybook-design-sync#v0.0.48" "github:mylesmetalab/storybook-design-inspector#v0.2.6"
+npm install --save-dev "github:mylesmetalab/storybook-design-sync#v0.0.49" "github:mylesmetalab/storybook-design-inspector#v0.2.6"
 npx design-sync init --file-key <your Figma file key>
 ```
 

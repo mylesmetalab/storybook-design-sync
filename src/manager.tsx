@@ -1379,6 +1379,17 @@ function renderGroups(
               <th colSpan={5} style={styles.groupHeader}>
                 {group.selector === undefined ? (
                   <>Story root</>
+                ) : group.selector.startsWith(":") ? (
+                  // A forced state is a CONDITION on the story root, not a child
+                  // element. Rendering it in the same position as
+                  // `[data-slot=title]` puts `:hover` in a list of element
+                  // selectors and invites the reader to look for a `:hover` child
+                  // that cannot exist.
+                  <>
+                    Story root · <code>{group.selector}</code> forced
+                    {group.nodeName && <span style={styles.muted}> → {group.nodeName}</span>}
+                    {group.nodeId && <span style={styles.muted}> · node {group.nodeId}</span>}
+                  </>
                 ) : (
                   <>
                     <code>{group.selector}</code>

@@ -756,3 +756,89 @@ describe("#91 — forced-state rows name the state, the selector and the resting
     });
   });
 });
+
+/* ------------------------------------------------------------------------- *
+ * #93 — the prompt stops guessing when Figma states the name
+ * ------------------------------------------------------------------------- */
+
+describe("#93 — codeSyntax removes inference from the prompt's own words", () => {
+  const base = (): FixPromptInput => ({
+    storyId: "ui-button--primary",
+    kind: "token-value" as DimensionKind,
+    property: "background-color",
+    codeValue: "rgb(1, 1, 1)",
+    figmaValue: "rgb(30, 30, 30)",
+    tokenName: "Background/Brand/Hover",
+    selector: "button",
+    filePaths: ["src/components/**/*.tsx"],
+    nodeId: "4185:3783",
+    fileKey: "abc",
+    provenance: PROVENANCE,
+  });
+
+  /**
+   * NOT covered here: the authoritative wording for `source: "code-syntax"`.
+   *
+   * That bullet lives in `wiringBullets`, which only fires when the code side has
+   * no token binding at all, and building a fixture that reaches it means
+   * reproducing several unrelated conditions. The decision itself —
+   * `code-syntax` vs `convention` vs foreign vs heuristic — is covered directly in
+   * `code-syntax.test.ts` and `token-presence.test.ts`.
+   *
+   * It is also hard to reach with the reference file: SDS never names a property
+   * the starter declares, so the authoritative tier only fires for a consumer that
+   * adopts the design system's own CSS. Worth an end-to-end test when such a
+   * consumer exists.
+   */
+
+  it("treats an absent `source` as a conversion, never as authoritative", () => {
+    // A report cached before #93 carries no `source`. The weaker claim is safe.
+    const p = buildFixPrompt({
+      ...base(),
+      tokenPresence: { kind: "declared", cssVar: "--primary-hover", files: ["src/index.css"] },
+    });
+    expect(p).not.toMatch(/Figma itself declares/);
+  });
+
+  /**
+   * The case that made me rewrite the issue's rule: Figma names `--sds-*`, the
+   * consumer declares nothing of the sort. Not a disagreement — but the prompt
+   * can now quote Figma's name and hedge only the project-side half, instead of
+   * guessing at both.
+   */
+  it("quotes Figma's own name when this project does not declare it", () => {
+    const p = buildFixPrompt({
+      ...base(),
+      tokenPresence: {
+        kind: "absent",
+        converted: "--background-brand-hover",
+        declaredCount: 24,
+        themeFiles: ["src/index.css"],
+        figmaCodeSyntax: "--sds-color-background-brand-hover",
+      },
+    });
+    expect(p).toMatch(/Figma states its own code name/);
+    expect(p).toContain("--sds-color-background-brand-hover");
+    // It must NOT be presented as a defect — it is the design system's own CSS.
+    expect(p).toMatch(/not a mistake/);
+    // And it must forbid writing it, since it resolves to nothing here.
+    expect(p).toMatch(/do NOT write/);
+    // The project-side name is still explicitly unestablished.
+    expect(p).toMatch(/This project's own name is not established/);
+  });
+
+  it("says nothing about codeSyntax when Figma declared none", () => {
+    // 5 of 361 reference variables. The old wording is exactly right there.
+    const p = buildFixPrompt({
+      ...base(),
+      tokenPresence: {
+        kind: "absent",
+        converted: "--background-brand-hover",
+        declaredCount: 24,
+        themeFiles: ["src/index.css"],
+      },
+    });
+    expect(p).not.toMatch(/Figma states its own code name/);
+    expect(p).toMatch(/By convention/);
+  });
+});

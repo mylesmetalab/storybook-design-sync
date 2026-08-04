@@ -395,9 +395,29 @@ Declare the equivalence and the addon stops guessing:
 ```
 
 Keys are **Figma variable names**, values are **your project's token names**.
-The map is consulted *before* the heuristic, and the panel reports which
-mechanism resolved a name — `alias` (you declared it) or `heuristic` (we
-guessed) — so a reader knows how much to trust the match.
+
+Since v0.0.50 the addon also reads each variable's **`codeSyntax.WEB`** in Figma
+(*Variable → Code syntax → Web*), which gives four tiers, most to least trusted:
+
+| | how the name was decided | trusted? |
+|---|---|---|
+| 1 | Figma's `codeSyntax` names a custom property **your CSS declares** | authoritative |
+| 2 | your `tokenAliases` entry | authoritative |
+| 3 | Figma's `codeSyntax` names a property you **don't** declare | inferred, but Figma's own name is quoted |
+| 4 | no `codeSyntax` at all → `normalizeTokenName` | inferred |
+
+Tier 3 is the common case when you adopt a design system's Figma file but not its
+CSS — in the reference file **356 of 361** variables carry a `codeSyntax`, and
+every one names that design system's own `--sds-*` property rather than the
+consumer's. That is a legitimate re-mapping, **not a finding**: the addon quotes
+the design system's name (so only your half is still inferred) and tells the
+reader not to write it, because it would resolve to nothing.
+
+A tier-1 name that contradicts a `tokenAliases` entry is **reported, not
+silently resolved** — two explicit declarations disagreeing means one is stale.
+
+The panel and every fix prompt say which tier resolved a name, so an inferred
+name never reads like an asserted one.
 
 Defaults to `{}`, which is the heuristic alone. An unusable entry is rejected
 loudly and by name: an alias map exists to *suppress* a row, so a silently
@@ -1329,11 +1349,18 @@ consumers, it never compares them.
   `main.ts` is not applied (`storyGlobs` cannot express one), and a story file
   living outside every configured glob's directory has no derivable title. Both
   are reported per file, and an unreadable file fails `audit`.
-- **Token-name matching is heuristic** unless
+- **Token-name matching is authoritative only when Figma's `codeSyntax` names a
+  property your CSS declares, or you declared a
   [`tokenAliases`](#tokenaliases--when-figma-and-your-theme-name-the-same-token-differently)
-  is configured. A name divergence whose value matches is reported as an
-  advisory rather than drift, so the heuristic's misses are visible rather
-  than alarming.
+  entry.** Otherwise it is inferred, and labelled as inferred everywhere it is
+  shown. When Figma declares a `codeSyntax` your project does not use, the
+  addon can at least quote *Figma's* name instead of guessing at that half too
+  — but your name is still a guess. A name divergence whose value matches is
+  reported as an advisory rather than drift, so a miss is visible rather than
+  alarming.
+- **`codeSyntax` is read but never linted.** A variable with no `codeSyntax` is
+  not reported as a design-file problem — only as a name the addon had to infer.
+  Flagging the gap at handoff time is not built.
 - **The headless check needs a running dev server, and is the *bulk* path.**
   `design-sync check` (v0.0.45) runs the panel's check with no panel, and its
   green means what the panel's green means — same preview snapshot, same engine,

@@ -205,6 +205,16 @@ interface FigmaVariable {
   resolvedType: "FLOAT" | "COLOR" | "STRING" | "BOOLEAN";
   variableCollectionId: string;
   valuesByMode: Record<string, unknown>;
+  /**
+   * Per-platform code name a designer sets on the variable (#93). Returned by
+   * `/variables/local`, which this engine already calls — the field was simply
+   * being parsed away.
+   *
+   * On the reference file 356 of 361 variables populate `WEB`, uniformly as
+   * `var(--name)`. See `code-syntax.ts` for why a value here is authoritative
+   * only when the project also declares that property.
+   */
+  codeSyntax?: { WEB?: string } | undefined;
 }
 
 interface FigmaVariableCollection {
@@ -1111,6 +1121,9 @@ class FigmaRestEngine implements Engine {
         };
         if (modes) diff.modes = modes;
         if (figmaBg?.tokenName) diff.tokenName = figmaBg.tokenName;
+      // #93 — Figma's own code name, so the prompt can quote it instead of
+      // guessing at both halves of the naming.
+      if (figmaBg?.codeSyntax) diff.figmaCodeSyntax = figmaBg.codeSyntax;
         if (sourceAdvisory) diff.sourceAdvisory = sourceAdvisory;
         // Paint visibility outranks the paint-style notes: "every paint is off"
         // and "this is the second paint, the first is off" are the facts that
@@ -1156,6 +1169,9 @@ class FigmaRestEngine implements Engine {
         figmaValue: `${figmaPx}px (token: ${v.name})`,
         status,
         tokenName: v.name,
+        // Figma's own code name for this variable (#93). Preferred over name
+        // conversion downstream, and only when the project declares it.
+        ...(v.codeSyntax?.WEB !== undefined ? { figmaCodeSyntax: v.codeSyntax.WEB } : {}),
       });
     }
 
@@ -1371,6 +1387,7 @@ class FigmaRestEngine implements Engine {
         };
         if (figmaStroke?.modes) diff.modes = figmaStroke.modes;
         if (strokeTokenName) diff.tokenName = strokeTokenName;
+        if (figmaStroke?.codeSyntax) diff.figmaCodeSyntax = figmaStroke.codeSyntax;
         const strokeAdvisory = paintSourceAdvisory({
           variableId: strokeVariableId,
           variables,
@@ -1642,6 +1659,7 @@ class FigmaRestEngine implements Engine {
           };
           if (figmaColor?.modes) diff.modes = figmaColor.modes;
           if (colorTokenName) diff.tokenName = colorTokenName;
+          if (figmaColor?.codeSyntax) diff.figmaCodeSyntax = figmaColor.codeSyntax;
           const sourceAdvisory = paintSourceAdvisory({
             styleName: fillStyleName(textNode, node),
             variableId: colorVariableId,
@@ -1784,6 +1802,9 @@ class FigmaRestEngine implements Engine {
       if (nameDivergence) diff.nameDivergence = nameDivergence;
       if (nameResolvedBy) diff.nameResolvedBy = nameResolvedBy;
       if (figma?.modes) diff.modes = figma.modes;
+      // #93: the variable's own code name, so downstream can prefer what Figma
+      // states over what conversion would infer.
+      if (figma?.codeSyntax !== undefined) diff.figmaCodeSyntax = figma.codeSyntax;
       out.push(diff);
     }
     return out;
@@ -2428,6 +2449,8 @@ interface ResolvedFill {
   value: string;
   modes?: ModeAwareValue;
   tokenName?: string;
+  /** The bound variable's own `codeSyntax.WEB`, verbatim, when it declares one (#93). */
+  codeSyntax?: string;
   /**
    * Id of the variable the paint binds, when it binds one. Carried so the row
    * can say something about the variable's *tier* — the name alone can't, and
@@ -2708,6 +2731,18 @@ function asFigmaColor(raw: unknown): { r: number; g: number; b: number; a?: numb
   return undefined;
 }
 
+/**
+ * The variable's own `codeSyntax.WEB` as a spreadable fragment (#93).
+ *
+ * A helper rather than an inline spread because the colour path returns from more
+ * than one place, and a name Figma states must not be attached to some rows and
+ * omitted from others — an inconsistently-populated field reads as "Figma didn't
+ * declare one", which is a false absence claim.
+ */
+function codeSyntaxOf(v: FigmaVariable): { codeSyntax?: string } {
+  return v.codeSyntax?.WEB !== undefined ? { codeSyntax: v.codeSyntax.WEB } : {};
+}
+
 function resolveColorVariable(
   variableId: string,
   variables: FigmaLocalVariablesResponse,
@@ -2746,9 +2781,9 @@ function resolveColorVariable(
   if (value === undefined) return undefined;
 
   if (light && dark) {
-    return { value, modes: { light, dark } };
+    return { value, modes: { light, dark }, ...codeSyntaxOf(v) };
   }
-  return { value };
+  return { value, ...codeSyntaxOf(v) };
 }
 
 /* ------------------------------------------------------------------------- *
@@ -2899,6 +2934,8 @@ function resolveStringForMode(
 interface FigmaBinding {
   tokenName: string;
   modes?: ModeAwareValue;
+  /** The variable's own `codeSyntax.WEB`, verbatim, when it declares one (#93). */
+  codeSyntax?: string;
 }
 
 /**
@@ -2990,6 +3027,8 @@ function collectFigmaBindings(
     const resolved =
       v.resolvedType === "COLOR" ? resolveColorVariable(alias.id, variables!, activeMode) : undefined;
     const binding: FigmaBinding = { tokenName: v.name };
+    // See #93: carried so the row can prefer what Figma states over inference.
+    if (v.codeSyntax?.WEB !== undefined) binding.codeSyntax = v.codeSyntax.WEB;
     if (resolved?.modes) binding.modes = resolved.modes;
     out[property] = binding;
   };

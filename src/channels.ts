@@ -327,6 +327,14 @@ export interface DriftErrorPayload {
 export interface RegisteredStoryEntry {
   storyId: string;
   nodeId: string;
+  /**
+   * How many child + state bindings this story declares (#72).
+   *
+   * Sent so a bulk run can size each story's budget by the work it actually has:
+   * every binding is one more element to snapshot and one more Figma node to
+   * resolve. Absent means zero, which reproduces the previous flat budget exactly.
+   */
+  bindings?: number;
 }
 
 export interface RegisteredStoriesPayload {

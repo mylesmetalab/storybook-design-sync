@@ -594,7 +594,14 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
           alreadyRendered: plan.get(storyId) === true,
         }),
       // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
-      budgetMs: bulkBudgetMs(liveCheckOptions.get().dualMode),
+      // Per story, sized by its declared bindings (#72) — a flat budget sat inside
+      // the observed duration range for bound stories, so coverage depended on
+      // timing and the same click covered 17 of 18 stories on one run, 18 on the next.
+      budgetMs: (storyId) =>
+        bulkBudgetMs(
+          liveCheckOptions.get().dualMode,
+          stories.find((s) => s.storyId === storyId)?.bindings ?? 0,
+        ),
       onBudgetExpired: () => {
         // Drop the resolver for the abandoned check so a late report can't be
         // mistaken for the next story's.

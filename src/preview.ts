@@ -504,6 +504,31 @@ function snapshotChildren(
   });
 }
 
+/**
+ * Attach a second-mode snapshot to the matching *state* entry, by state name
+ * (#103). The child twin below keys by selector; states have no selector in the
+ * snapshot payload, so this is a separate function rather than a generic one.
+ *
+ * Only `compared` entries get a second mode, and only when the second pass also
+ * compared. A state that forced nothing in mode B has no measurement to attribute
+ * to mode B, and leaving `additionalSnapshots` unset is what makes the server
+ * refuse that specific combination instead of reusing mode A's numbers.
+ */
+function attachStateMode(
+  entries: StateSnapshotEntry[],
+  extra: StateSnapshotEntry[],
+  mode: string,
+): void {
+  const byState = new Map(extra.map((e) => [e.state, e]));
+  for (const entry of entries) {
+    if (entry.kind !== "compared") continue;
+    const other = byState.get(entry.state);
+    if (other?.kind === "compared" && other.snapshot) {
+      entry.additionalSnapshots = [{ mode, snapshot: other.snapshot }];
+    }
+  }
+}
+
 /** Attach a second-mode snapshot to the matching child entry, by selector. */
 function attachChildMode(
   entries: ChildSnapshotEntry[],
@@ -585,6 +610,11 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
   // it happens here rather than inside each mode pass.
   const declared = await requestBindings(payload.storyId);
   const declarations = declared.children;
+  // Captured under its own name because `runSwitchingPhase` below destructures a
+  // *different* `declared` out of `parseModeSwitch` (the mode-switch spec), which
+  // shadows this one. Reaching for `declared.states` inside that function silently
+  // resolves to the wrong binding.
+  const declaredStates = declared.states;
   const childResolutions =
     declarations.length > 0 ? resolveChildElements(target, declarations) : [];
 
@@ -619,12 +649,25 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
       forceReflow();
     };
 
+    // `states` is on BOTH variants on purpose. A run that asked for two modes and
+    // could not switch still asked for states, and dropping them here would send
+    // the server no `stateSnapshots` at all — which it reports as "no entry
+    // arrived", a true statement with the wrong cause. Capturing them on the
+    // single path keeps the reason accurate: one mode, states compared in it.
     type Outcome =
-      | { kind: "dual"; snapA: CodeSnapshot; snapB: CodeSnapshot; children: ChildSnapshotEntry[]; mechanism: string }
+      | {
+          kind: "dual";
+          snapA: CodeSnapshot;
+          snapB: CodeSnapshot;
+          children: ChildSnapshotEntry[];
+          states: StateSnapshotEntry[];
+          mechanism: string;
+        }
       | {
           kind: "single";
           snapshot: CodeSnapshot;
           children: ChildSnapshotEntry[];
+          states: StateSnapshotEntry[];
           mode: string | undefined;
           mechanism: string;
           reason: string;
@@ -636,14 +679,18 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
       return snap;
     };
 
-    const refuse = (mechanism: string, reason: string): Outcome => ({
-      kind: "single",
-      snapshot: snapshotWithTokens(),
-      children: snapshotChildren(childResolutions),
-      mode: readActiveMode(modeAttribute),
-      mechanism,
-      reason,
-    });
+    const refuse = (mechanism: string, reason: string): Outcome => {
+      const snapshot = snapshotWithTokens();
+      return {
+        kind: "single",
+        snapshot,
+        children: snapshotChildren(childResolutions),
+        states: snapshotDeclaredStates(target, snapshot, declaredStates),
+        mode: readActiveMode(modeAttribute),
+        mechanism,
+        reason,
+      };
+    };
 
     const runSwitchingPhase = async (): Promise<Outcome> => {
       // Which mechanism switches this project's theme, and — the part #69 was
@@ -693,6 +740,15 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
       const settledA = fingerprint(evidence, readComputed);
       const snapA = snapshotWithTokens();
       const childrenA = snapshotChildren(childResolutions);
+      // States forced *inside* this mode pass (#103). Before this they were
+      // captured once, after both passes, so a two-mode run had no measurement
+      // to attribute to the second mode and the server refused outright.
+      //
+      // Safe to run here: `snapshotDeclaredStates` restores the forced classes and
+      // the suspended transitions in its own `finally`, and it never touches the
+      // mode host — so the document is still in mode A when it returns, which the
+      // `settledA`/`settledB` divergence check below still relies on.
+      const statesA = snapshotDeclaredStates(target, snapA, declaredStates);
 
       phase = `measuring "${modeB}"`;
       undo.push(applyMode(hosts, switching.spec, modeB, modes, { forceReflow }));
@@ -701,6 +757,7 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
       const settledB = fingerprint(evidence, readComputed);
       const snapB = snapshotWithTokens();
       const childrenB = snapshotChildren(childResolutions);
+      const statesB = snapshotDeclaredStates(target, snapB, declaredStates);
 
       if (settledA === settledB) {
         // The mechanism was verified, yet the two passes read the same document.
@@ -715,9 +772,11 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
       }
 
       attachChildMode(childrenA, childrenB, modeB);
+      attachStateMode(statesA, statesB, modeB);
       return {
         kind: "dual",
         snapA,
+        states: statesA,
         snapB,
         children: childrenA,
         mechanism: switching.mechanism,
@@ -741,10 +800,16 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     } catch {
       const spentPhase = phase;
       restoreDocument();
+      const timedOutSnapshot = snapshotWithTokens();
       outcome = {
         kind: "single",
-        snapshot: snapshotWithTokens(),
+        snapshot: timedOutSnapshot,
         children: snapshotChildren(childResolutions),
+        // Deliberately NOT captured here. This branch is reached because the
+        // mode-switch phase blew its budget, and forcing states now would spend
+        // more time in a run that has already been declared over. The server
+        // reports the states as unmeasured, which is exactly what they are.
+        states: [],
         mode: readActiveMode(modeAttribute),
         mechanism: spentPhase,
         reason: switchUnavailableReason(spentPhase, `${MODE_SWITCH_PHASE_BUDGET_MS}ms`),
@@ -786,6 +851,7 @@ channel.on(EVENTS.CheckDriftRequest, async (payload: CheckDriftRequestPayload) =
     if (payload.bulk) out.bulk = true;
     if (payload.compareCopy === false) out.compareCopy = false;
     if (outcome.children.length > 0) out.childSnapshots = outcome.children;
+    if (outcome.states.length > 0) out.stateSnapshots = outcome.states;
     attachStylesheetVerdict(out, declared.themeCustomProperties);
     channel.emit(EVENTS.CodeSnapshot, out);
     return;

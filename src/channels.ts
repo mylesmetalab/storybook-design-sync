@@ -184,6 +184,17 @@ export interface StateSnapshotEntry {
   changed?: string[];
   /** Reason, when `kind === "not-forceable"`. */
   detail?: string;
+  /**
+   * The same state forced again in each additional mode (#103). Mirrors
+   * `ChildSnapshotEntry.additionalSnapshots` deliberately, so one remap covers
+   * both target kinds.
+   *
+   * **Absence is load-bearing.** A dual-mode run that finds this missing must
+   * refuse the state comparison rather than reuse `snapshot` for both modes —
+   * that would attribute a measurement taken in one mode to the other. The server
+   * keys its refusal off exactly this.
+   */
+  additionalSnapshots?: Array<{ mode: string; snapshot: CodeSnapshot }>;
 }
 
 /**

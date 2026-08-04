@@ -387,12 +387,12 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       // keeps the report able to say which is which.
       const dualMode = Boolean(additionalSnapshots && additionalSnapshots.length > 0);
 
-      // Modes × states is not settled yet (addon#91 design question 4), and the
-      // preview forces states once, in whichever mode is rendered. So a dual-mode
-      // run must NOT claim a state comparison: the second pass rebuilds `children`
-      // through `childTargetsForMode`, which knows only about child selectors and
-      // would drop these silently — the exact class of failure this feature is
-      // supposed to close. Refuse per declared state, with the reason.
+      // Modes × states, settled in v0.0.52 (#103). The preview now forces each
+      // state inside each mode pass and attaches the second mode's measurement to
+      // the state entry, so `chooseStateTargets` compares when that data is present
+      // and refuses per state when it is not. `runModePasses` remaps these through
+      // `stateTargetsForMode` — never through the child remap, which keys by
+      // selector and would drop them silently.
       const stateTargets = chooseStateTargets({
         dualMode,
         storyId,
@@ -411,6 +411,8 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
           additionalSnapshots,
           childTargets,
           childSnapshots,
+          stateTargets,
+          stateSnapshots,
         });
 
       // A ceiling on an explicit check, so the panel always leaves "Checking…"
@@ -487,8 +489,25 @@ export async function runModePasses(opts: {
     | undefined;
   childTargets: ChildTarget[];
   childSnapshots: ChildSnapshotEntry[] | undefined;
+  /**
+   * State targets and the preview's per-state results (#103). Kept separate from
+   * the child pair because they remap by state name, not by selector — passing
+   * them through the child remap is exactly the silent drop this issue was open
+   * to prevent.
+   */
+  stateTargets?: ChildTarget[];
+  stateSnapshots?: StateSnapshotEntry[] | undefined;
 }): Promise<DriftReport> {
-  const { engine, baseInput, mode, additionalSnapshots, childTargets, childSnapshots } = opts;
+  const {
+    engine,
+    baseInput,
+    mode,
+    additionalSnapshots,
+    childTargets,
+    childSnapshots,
+    stateTargets = [],
+    stateSnapshots,
+  } = opts;
   if (!additionalSnapshots || additionalSnapshots.length === 0) {
     return engine.checkDrift(baseInput);
   }
@@ -501,8 +520,18 @@ export async function runModePasses(opts: {
       snapshot: extra.snapshot,
       mode: extra.mode,
     };
-    if (childTargets.length > 0) {
-      extraInput.children = childTargetsForMode(childTargets, childSnapshots, extra.mode);
+    // Both remaps, appended in the same order the primary pass built them, so a
+    // row's identity is stable across modes and `mergeReports` pairs them up.
+    const perMode = [
+      ...(childTargets.length > 0
+        ? childTargetsForMode(childTargets, childSnapshots, extra.mode)
+        : []),
+      ...(stateTargets.length > 0
+        ? stateTargetsForMode(stateTargets, stateSnapshots, extra.mode)
+        : []),
+    ];
+    if (perMode.length > 0) {
+      extraInput.children = perMode;
     }
     reports.push({ mode: extra.mode, report: await engine.checkDrift(extraInput) });
   }
@@ -572,7 +601,18 @@ export function chooseStateTargets(opts: {
   declared: Record<string, string> | undefined;
   received: StateSnapshotEntry[] | undefined;
 }): ChildTarget[] {
-  if (opts.dualMode) {
+  // #103: a dual-mode run compares states when — and only when — the preview
+  // forced them *inside each mode pass* and said so by attaching
+  // `additionalSnapshots`. That is the whole condition, and it is deliberately a
+  // property of the received data rather than a version check: a preview that
+  // could not force a state in the second mode reports no second snapshot for it,
+  // and this then refuses that state specifically instead of the whole story.
+  //
+  // Before v0.0.52 this refused on `dualMode` alone, because states were forced
+  // once, after both passes, so there was no measurement to attribute to the
+  // second mode. Reusing one mode's snapshot for both would have been the
+  // comparison-that-did-not-happen the refusal existed to prevent.
+  if (opts.dualMode && !hasPerModeStates(opts.received)) {
     return refusedStateTargets(opts.declared, opts.registryPath, opts.storyId);
   }
   return buildStateTargets({
@@ -581,6 +621,18 @@ export function chooseStateTargets(opts: {
     declared: opts.declared,
     received: opts.received,
   });
+}
+
+/**
+ * True when at least one received state carries a second mode's measurement.
+ *
+ * "At least one" rather than "all": a state that forced nothing in the second
+ * mode is a per-state refusal, produced downstream by `stateTargetsForMode`, and
+ * refusing the entire story for it would discard the states that *were*
+ * measured in both modes.
+ */
+export function hasPerModeStates(received: StateSnapshotEntry[] | undefined): boolean {
+  return (received ?? []).some((e) => (e.additionalSnapshots?.length ?? 0) > 0);
 }
 
 /**
@@ -840,6 +892,46 @@ export function childTargetsForMode(
         message:
           `Not compared in mode "${mode}" — the preview captured no snapshot of ` +
           `\`${target.selector}\` in that mode.`,
+      },
+    };
+  });
+}
+
+/**
+ * The state-target twin of `childTargetsForMode` (#103).
+ *
+ * Separate from it rather than generic, because the two key differently: a child
+ * target is matched by CSS selector, a state target by state name — its
+ * `selector` is the synthetic `:hover`, which no snapshot entry carries.
+ *
+ * A state with no measurement in this mode becomes a refusal **naming the mode**,
+ * not a dropped row. That is the failure this whole issue was open to prevent: the
+ * pre-v0.0.52 code passed state targets through the child remap, which found no
+ * matching selector and silently rebuilt them without snapshots.
+ */
+export function stateTargetsForMode(
+  base: readonly ChildTarget[],
+  received: StateSnapshotEntry[] | undefined,
+  mode: string,
+): ChildTarget[] {
+  const byState = new Map((received ?? []).map((e) => [e.state, e]));
+  return base.map((target): ChildTarget => {
+    // Only `:state` targets belong to this remap, and only ones that carry a
+    // measurement — a target that already holds a refusal keeps it verbatim.
+    if (target.kind !== "state" || !target.snapshot) return target;
+    const state = target.selector.replace(/^:/, "");
+    const extra = byState.get(state)?.additionalSnapshots?.find((s) => s.mode === mode);
+    if (extra) return { ...target, snapshot: extra.snapshot };
+    const { snapshot: _unused, ...rest } = target;
+    return {
+      ...rest,
+      problem: {
+        status: "snapshot-missing",
+        message:
+          `:${state} was NOT compared in mode "${mode}". The state was forced in the ` +
+          `other mode, but forcing it in "${mode}" produced no measurement — so there is ` +
+          `nothing to compare, and reusing the other mode's numbers would be a comparison ` +
+          `that did not happen. The other mode's result for :${state} is still reported.`,
       },
     };
   });

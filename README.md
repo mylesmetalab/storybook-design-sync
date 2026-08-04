@@ -1155,8 +1155,30 @@ folded into a pass:
 |---|---|
 | Forcing changed no computed value | **Not compared.** Either the state is genuinely identical or the forcing failed; the addon cannot tell those apart, so it never reports a match. |
 | The state is styled through a `data-*` attribute the component library writes from its own React state (shadcn on Base UI / Radix `data-disabled:*`) | **Not compared**, with the instruction to bind it as its own story. A class cannot make Base UI re-render, so the forced rendering would be missing the declarations the state is made of. |
-| **Both modes** was also requested | **Not compared.** States are forced once, in the rendered mode, so a two-mode report has no measurement to attribute to the second mode. Re-run with Both modes unticked. |
+| **Both modes** was also requested, and the state could not be forced in one of them | **Not compared in that mode**, naming the mode — and the other mode's result is still reported, because one unmeasurable combination is not a reason to discard a measured one. |
 | No `states` map on the story | No state rows at all, and no message. |
+
+**Modes × states are compared as of v0.0.52** ([#103]). Each state is forced
+*inside each mode pass*, so a **Both modes** run reports every declared state
+twice — once per mode — with each mode's own measurement:
+
+```
+Story root · :hover forced → Variant=Neutral, State=Hover, Size=Medium · node 4185:3795
+background-color   light: rgb(205, 205, 205) · dark: rgb(36, 36, 36)   match
+```
+
+Two different values is the point: before this, states were forced once after both
+passes, and the run **refused them outright** rather than attribute one mode's
+measurement to the other. The refusal now applies only per state and per mode, and
+only when that specific combination produced nothing.
+
+**Cost, measured rather than assumed.** A dual-mode `Check all` over the reference
+consumer's 18 registered stories (6 declaring `hover`) completed 18/18 with no
+timeouts: 161s total, 8.7s average, slowest story 10.9s against its 17.2s budget.
+The per-story budget already scaled per binding and doubled in dual mode, so no
+budget change was needed — but a component declaring several states across many
+stories multiplies snapshots, and `--both-modes` on a large library is slow before
+it is wrong.
 
 **`focus` has no design source in the reference file.** Across all 78 component
 sets of the Simple Design System there is no `State=Focus` — focus styling is a
@@ -1539,3 +1561,4 @@ work, one PR per item.
 ## License
 
 MIT
+[#103]: https://github.com/mylesmetalab/storybook-design-sync/issues/103

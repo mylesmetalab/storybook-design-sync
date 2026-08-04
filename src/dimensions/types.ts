@@ -144,6 +144,16 @@ export interface DimensionDiff {
    */
   forcedState?: string;
   /**
+   * The Figma variable's own `codeSyntax.WEB`, verbatim, when it declared one
+   * (#93). `var(--sds-size-radius-200)`.
+   *
+   * Carried so name resolution can prefer what Figma *states* over what the tool
+   * would *infer*, and so a fix prompt can quote Figma's name even when this
+   * project uses a different one. Absent means the variable declares none — 5 of
+   * 361 on the reference file.
+   */
+  figmaCodeSyntax?: string;
+  /**
    * Whether the project's own CSS declares a custom property for this row's
    * `tokenName` — resolved by `token-presence.ts` against the startup scan and
    * attached by the server *after* the engine (so it is never cached and never

@@ -26,7 +26,12 @@ const THEME: CustomPropertyIndex = {
 describe("resolveTokenPresence", () => {
   it("finds a token the project declares under the converted name", () => {
     const p = resolveTokenPresence("Radius/Lg", THEME);
-    expect(p).toEqual({ kind: "declared", cssVar: "--radius-lg", files: ["src/tokens.css"] });
+    expect(p).toEqual({
+      kind: "declared",
+      cssVar: "--radius-lg",
+      files: ["src/tokens.css"],
+      source: "convention",
+    });
   });
 
   it("finds it under the project's OWN namespace when Figma's path differs", () => {
@@ -37,7 +42,7 @@ describe("resolveTokenPresence", () => {
     expect(p).toEqual({
       kind: "declared",
       cssVar: "--color-positive-secondary",
-      files: ["src/index.css"],
+      files: ["src/index.css"], source: "convention",
     });
   });
 
@@ -93,5 +98,64 @@ describe("resolveTokenPresence", () => {
     // must be absence — not a plausible-looking name nobody declared.
     const p = resolveTokenPresence("Elevation/High", THEME);
     expect(p.kind).toBe("absent");
+  });
+});
+
+/**
+ * #93 — Figma's own `codeSyntax`, checked before any conversion.
+ *
+ * The rule the issue specified had to change: it said a `codeSyntax` naming a
+ * property the project does not declare is "a finding". On the reference file
+ * that is **356 of 361 variables**, because SDS ships its own `--sds-*` CSS while
+ * the consumer maps it onto shadcn's names. See `code-syntax.ts`.
+ */
+describe("resolveTokenPresence + codeSyntax", () => {
+  it("is authoritative when Figma names a property the project declares", () => {
+    const p = resolveTokenPresence("Radius/200", THEME, "var(--radius-lg)");
+    expect(p).toEqual({
+      kind: "declared",
+      cssVar: "--radius-lg",
+      files: ["src/tokens.css"],
+      source: "code-syntax",
+    });
+  });
+
+  it("beats the conversion, so a name Figma states is never re-derived", () => {
+    // Conversion would give `--radius-200`, which is absent. Figma's name wins
+    // and the row resolves instead of reporting a missing token.
+    const p = resolveTokenPresence("Radius/200", THEME, "var(--radius-lg)");
+    expect(p.kind).toBe("declared");
+  });
+
+  it("does NOT treat a codeSyntax the project lacks as a finding", () => {
+    // The normal case on a design-system file. It falls through to the ordinary
+    // conversion path — `absent` here is about the CONVERTED name, exactly as
+    // before #93.
+    const p = resolveTokenPresence("Radius/200", THEME, "var(--sds-size-radius-200)");
+    expect(p.kind).toBe("absent");
+    if (p.kind !== "absent") throw new Error("unreachable");
+    expect(p.converted).toBe("--radius-200");
+    // …but Figma's own name is carried, so a message need not guess at that half.
+    expect(p.figmaCodeSyntax).toBe("--sds-size-radius-200");
+  });
+
+  it("carries no figmaCodeSyntax when Figma declared none", () => {
+    const p = resolveTokenPresence("Radius/200", THEME);
+    expect(p.kind).toBe("absent");
+    if (p.kind !== "absent") throw new Error("unreachable");
+    expect(p.figmaCodeSyntax).toBeUndefined();
+  });
+
+  it("ignores an unparseable codeSyntax rather than half-using it", () => {
+    const p = resolveTokenPresence("Radius/Lg", THEME, "rounded-lg");
+    expect(p.kind).toBe("declared");
+    if (p.kind !== "declared") throw new Error("unreachable");
+    // Fell back to the conversion, and says so.
+    expect(p.source).toBe("convention");
+  });
+
+  it("still returns unknown when nothing was scanned, even with a codeSyntax", () => {
+    // A scan that read no files is not evidence that a name matches.
+    expect(resolveTokenPresence("Radius/200", {}, "var(--radius-lg)")).toEqual({ kind: "unknown" });
   });
 });

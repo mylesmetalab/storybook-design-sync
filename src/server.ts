@@ -963,7 +963,10 @@ function annotateTokenPresence(report: DriftReport): void {
   if (Object.keys(index).length === 0) return;
   for (const dim of report.dimensions) {
     if (!dim.tokenName) continue;
-    const presence = resolveTokenPresence(dim.tokenName, index);
+    // `figmaCodeSyntax` is what Figma itself calls this variable in code (#93).
+    // Checked before any name conversion, and only accepted when the project
+    // declares that property — see `code-syntax.ts`.
+    const presence = resolveTokenPresence(dim.tokenName, index, dim.figmaCodeSyntax);
     if (presence.kind !== "unknown") dim.tokenPresence = presence;
   }
 }

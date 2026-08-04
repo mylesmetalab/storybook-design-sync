@@ -1,4 +1,5 @@
 import { tokenNameToCssVar } from "@metalab/design-sync-core";
+import { customPropertyFromCodeSyntax } from "./code-syntax.js";
 
 /**
  * Does the CSS custom property a Figma variable name converts to actually exist
@@ -46,6 +47,20 @@ export type TokenPresence =
       cssVar: string;
       /** Consumer-relative files declaring it. */
       files: readonly string[];
+      /**
+       * How the name was arrived at (#93).
+       *
+       * `"code-syntax"` means **Figma itself named this custom property** and the
+       * project declares it — nothing was inferred, and a prompt must not say
+       * "by convention". `"convention"` is the pre-existing path: the Figma name
+       * was converted and the converted name happened to be declared, which is
+       * good evidence but still a conversion.
+       *
+       * **Optional, and absent means `"convention"`.** A report cached before
+       * #93 has no `source`, and it must not be read as authoritative — the
+       * weaker claim is the safe default.
+       */
+      source?: "code-syntax" | "convention" | undefined;
     }
   | {
       kind: "absent";
@@ -57,6 +72,17 @@ export type TokenPresence =
       themeFiles: readonly string[];
       /** Something true about the namespace the converted name would land in. */
       namespaceNote?: string | undefined;
+      /**
+       * Figma's own `codeSyntax` custom property, when it declared one that this
+       * project does not have (#93).
+       *
+       * On the reference file this is the **normal** case, not an error: 356 of
+       * 361 variables name `--sds-*` properties from the design system's own CSS,
+       * while the consumer maps them onto its own vocabulary. Carried so the
+       * message can quote Figma's name instead of guessing at that half too —
+       * never presented as a disagreement.
+       */
+      figmaCodeSyntax?: string | undefined;
     }
   | { kind: "unknown" };
 
@@ -75,15 +101,41 @@ const NAMESPACE_MIN = 2;
 export function resolveTokenPresence(
   tokenName: string | undefined,
   index: CustomPropertyIndex | undefined,
+  /**
+   * The Figma variable's `codeSyntax.WEB`, when it has one (#93).
+   *
+   * Checked **first**, and only ever accepted when the property it names is
+   * actually declared here. A `codeSyntax` this project does not declare is not a
+   * finding — see `code-syntax.ts` for why that rule had to change.
+   */
+  codeSyntax?: string | undefined,
 ): TokenPresence {
   if (!tokenName || tokenName.trim() === "") return { kind: "unknown" };
   if (!index || Object.keys(index).length === 0) return { kind: "unknown" };
+
+  // Tier 1: Figma names the property and this project declares it. Authoritative,
+  // and it short-circuits every conversion below.
+  const declaredByFigma = customPropertyFromCodeSyntax(codeSyntax);
+  const figmaBare = declaredByFigma?.replace(/^--/, "");
+  if (figmaBare !== undefined) {
+    const files = index[figmaBare];
+    if (files) {
+      return {
+        kind: "declared",
+        cssVar: `--${figmaBare}`,
+        files: [...files],
+        source: "code-syntax",
+      };
+    }
+  }
 
   const converted = tokenNameToCssVar(tokenName);
   const bare = converted.replace(/^--/, "");
 
   const direct = index[bare];
-  if (direct) return { kind: "declared", cssVar: `--${bare}`, files: [...direct] };
+  if (direct) {
+    return { kind: "declared", cssVar: `--${bare}`, files: [...direct], source: "convention" };
+  }
 
   // Alternative spellings, each one CHECKED against the index. The two shapes
   // that occur in practice: a project that prefixes the whole Figma path with its
@@ -95,7 +147,14 @@ export function resolveTokenPresence(
     for (const candidate of [`${ns}-${bare}`, withoutFirst ? `${ns}-${withoutFirst}` : null]) {
       if (!candidate) continue;
       const files = index[candidate];
-      if (files) return { kind: "declared", cssVar: `--${candidate}`, files: [...files] };
+      if (files) {
+        return {
+          kind: "declared",
+          cssVar: `--${candidate}`,
+          files: [...files],
+          source: "convention",
+        };
+      }
     }
   }
 
@@ -105,6 +164,9 @@ export function resolveTokenPresence(
     declaredCount: Object.keys(index).length,
     themeFiles: themeFilesOf(index),
     ...(namespaceNote(bare, index) ? { namespaceNote: namespaceNote(bare, index)! } : {}),
+    // Present when Figma named a property this project does not declare — the
+    // normal case on a design-system file with its own CSS.
+    ...(declaredByFigma !== undefined ? { figmaCodeSyntax: declaredByFigma } : {}),
   };
 }
 

@@ -568,6 +568,8 @@ function contractLines(input: FixPromptInput): string[] {
  */
 function cssVarFor(input: FixPromptInput): string {
   const presence = input.tokenPresence;
+  // `declared` already means the property exists here; #93 adds that it may have
+  // been named by Figma rather than converted, which `wiringBullets` reports.
   if (presence?.kind === "declared") return presence.cssVar;
   return tokenNameToCssVar(input.tokenName ?? "");
 }
@@ -773,7 +775,11 @@ function wiringBullets(input: FixPromptInput, figma: string, cssVar: string): st
     );
   } else {
     lines.push(
-      `- \`${cssVar}\` is Figma's token name converted by convention; the addon found no token binding on the code side, so it cannot confirm this project spells it that way. If your theme names the same token differently, use the project's name.`,
+      input.tokenPresence?.kind === "declared" && input.tokenPresence.source === "code-syntax"
+        ? // #93: not a conversion. Figma's own `codeSyntax` names this property and
+          // this project declares it, so there is nothing to hedge about.
+          `- \`${cssVar}\` is the code name **Figma itself declares** for this token (\`codeSyntax\`), and this project declares that custom property. No convention was applied.`
+        : `- \`${cssVar}\` is Figma's token name converted by convention; the addon found no token binding on the code side, so it cannot confirm this project spells it that way. If your theme names the same token differently, use the project's name.`,
     );
   }
   return lines;
@@ -813,8 +819,19 @@ function absentTokenBullets(
     (input.codeClassName
       ? `the utility class \`${input.codeClassName}\``
       : `the declaration for \`${input.property}\``);
+  // #93: when Figma declares a `codeSyntax`, the prompt no longer has to guess at
+  // BOTH halves. It can state what Figma calls the token and only mark the
+  // project-side name as unconfirmed. On a design-system file this is the normal
+  // case — SDS names `--sds-*` while the consumer uses its own vocabulary.
+  if (presence.figmaCodeSyntax) {
+    lines.push(
+      `- **Figma states its own code name for this token: \`${presence.figmaCodeSyntax}\`.** This project ` +
+        `does not declare it — that is the design system's own implementation, not a mistake — so do NOT ` +
+        `write \`var(${presence.figmaCodeSyntax})\` either. It would resolve to nothing here.`,
+    );
+  }
   lines.push(
-    `- By convention Figma's \`${input.tokenName}\` converts to \`${presence.converted}\`, and that custom ` +
+    `- ${presence.figmaCodeSyntax ? "This project's own name is not established. By" : "By"} convention Figma's \`${input.tokenName}\` converts to \`${presence.converted}\`, and that custom ` +
       `property is **not declared anywhere in this project's scanned CSS** — ${presence.declaredCount} custom ` +
       `propert${presence.declaredCount === 1 ? "y was" : "ies were"} scanned and none of them is it (the addon ` +
       `also tried this project's own namespaces before saying so). So do NOT write ` +

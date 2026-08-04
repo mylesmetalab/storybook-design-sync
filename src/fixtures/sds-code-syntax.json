@@ -1,0 +1,1072 @@
+{
+  "Family Sans": {
+    "codeSyntax": "var(--sds-typography-family-sans)"
+  },
+  "Family Serif": {
+    "codeSyntax": "var(--sds-typography-family-serif)"
+  },
+  "Family Mono": {
+    "codeSyntax": "var(--sds-typography-family-mono)"
+  },
+  "Scale 01": {
+    "codeSyntax": "var(--sds-typography-scale-01)"
+  },
+  "Scale 02": {
+    "codeSyntax": "var(--sds-typography-scale-02)"
+  },
+  "Scale 03": {
+    "codeSyntax": "var(--sds-typography-scale-03)"
+  },
+  "Scale 04": {
+    "codeSyntax": "var(--sds-typography-scale-04)"
+  },
+  "Scale 05": {
+    "codeSyntax": "var(--sds-typography-scale-05)"
+  },
+  "Scale 06": {
+    "codeSyntax": "var(--sds-typography-scale-06)"
+  },
+  "Scale 07": {
+    "codeSyntax": "var(--sds-typography-scale-07)"
+  },
+  "Scale 08": {
+    "codeSyntax": "var(--sds-typography-scale-08)"
+  },
+  "Scale 09": {
+    "codeSyntax": "var(--sds-typography-scale-09)"
+  },
+  "Scale 10": {
+    "codeSyntax": "var(--sds-typography-scale-10)"
+  },
+  "Weight Thin": {
+    "codeSyntax": "var(--sds-typography-weight-thin)"
+  },
+  "Weight Thin Italic": {
+    "codeSyntax": "var(--sds-typography-weight-thin-italic)"
+  },
+  "Weight Extra Light": {
+    "codeSyntax": "var(--sds-typography-weight-extra-light)"
+  },
+  "Weight Extralight Italic": {
+    "codeSyntax": "var(--sds-typography-weight-extralight-italic)"
+  },
+  "Weight Light": {
+    "codeSyntax": "var(--sds-typography-weight-light)"
+  },
+  "Weight Light Italic": {
+    "codeSyntax": "var(--sds-typography-weight-light-italic)"
+  },
+  "Weight Regular": {
+    "codeSyntax": "var(--sds-typography-weight-regular)"
+  },
+  "Weight Regular Italic": {
+    "codeSyntax": "var(--sds-typography-weight-regular-italic)"
+  },
+  "Weight Medium": {
+    "codeSyntax": "var(--sds-typography-weight-medium)"
+  },
+  "Weight Medium Italic": {
+    "codeSyntax": "var(--sds-typography-weight-medium-italic)"
+  },
+  "Weight Semibold": {
+    "codeSyntax": "var(--sds-typography-weight-semibold)"
+  },
+  "Weight Semibold Italic": {
+    "codeSyntax": "var(--sds-typography-weight-semibold-italic)"
+  },
+  "Weight Bold": {
+    "codeSyntax": "var(--sds-typography-weight-bold)"
+  },
+  "Weight Bold Italic": {
+    "codeSyntax": "var(--sds-typography-weight-bold-italic)"
+  },
+  "Weight Extra Bold": {
+    "codeSyntax": "var(--sds-typography-weight-extra-bold)"
+  },
+  "Weight Extra Bold Italic": {
+    "codeSyntax": "var(--sds-typography-weight-extra-bold-italic)"
+  },
+  "Weight Black": {
+    "codeSyntax": "var(--sds-typography-weight-black)"
+  },
+  "Weight Black Italic": {
+    "codeSyntax": "var(--sds-typography-weight-black-italic)"
+  },
+  "Title Hero/Font Family": {
+    "codeSyntax": "var(--sds-typography-title-hero-font-family)"
+  },
+  "Title Hero/Size": {
+    "codeSyntax": "var(--sds-typography-title-hero-size)"
+  },
+  "Title Hero/Font Weight": {
+    "codeSyntax": "var(--sds-typography-title-hero-font-weight)"
+  },
+  "Title Page/Font Family": {
+    "codeSyntax": "var(--sds-typography-title-page-font-family)"
+  },
+  "Title Page/Size Small": {
+    "codeSyntax": "var(--sds-typography-title-page-size-small)"
+  },
+  "Title Page/Size Base": {
+    "codeSyntax": "var(--sds-typography-title-page-size-base)"
+  },
+  "Title Page/Size Large": {
+    "codeSyntax": "var(--sds-typography-title-page-size-large)"
+  },
+  "Title Page/Font Weight": {
+    "codeSyntax": "var(--sds-typography-title-page-font-weight)"
+  },
+  "Subtitle/Font Family": {
+    "codeSyntax": "var(--sds-typography-subtitle-font-family)"
+  },
+  "Subtitle/Size Small": {
+    "codeSyntax": "var(--sds-typography-subtitle-size-small)"
+  },
+  "Subtitle/Size Base": {
+    "codeSyntax": "var(--sds-typography-subtitle-size-base)"
+  },
+  "Subtitle/Size Large": {
+    "codeSyntax": "var(--sds-typography-subtitle-size-large)"
+  },
+  "Subtitle/Font Weight": {
+    "codeSyntax": "var(--sds-typography-subtitle-font-weight)"
+  },
+  "Heading/Font Family": {
+    "codeSyntax": "var(--sds-typography-heading-font-family)"
+  },
+  "Heading/Size Small": {
+    "codeSyntax": "var(--sds-typography-heading-size-small)"
+  },
+  "Heading/Size Base": {
+    "codeSyntax": "var(--sds-typography-heading-size-base)"
+  },
+  "Heading/Size Large": {
+    "codeSyntax": "var(--sds-typography-heading-size-large)"
+  },
+  "Heading/Font Weight": {
+    "codeSyntax": "var(--sds-typography-heading-font-weight)"
+  },
+  "Subheading/Font Family": {
+    "codeSyntax": "var(--sds-typography-subheading-font-family)"
+  },
+  "Subheading/Size Small": {
+    "codeSyntax": "var(--sds-typography-subheading-size-small)"
+  },
+  "Subheading/Size Medium": {
+    "codeSyntax": "var(--sds-typography-subheading-size-medium)"
+  },
+  "Subheading/Size Large": {
+    "codeSyntax": "var(--sds-typography-subheading-size-large)"
+  },
+  "Subheading/Font Weight": {
+    "codeSyntax": "var(--sds-typography-subheading-font-weight)"
+  },
+  "Body/Font Family": {
+    "codeSyntax": "var(--sds-typography-body-font-family)"
+  },
+  "Body/Size Small": {
+    "codeSyntax": "var(--sds-typography-body-size-small)"
+  },
+  "Body/Size Medium": {
+    "codeSyntax": "var(--sds-typography-body-size-medium)"
+  },
+  "Body/Size Large": {
+    "codeSyntax": "var(--sds-typography-body-size-large)"
+  },
+  "Body/Font Weight Regular": {
+    "codeSyntax": "var(--sds-typography-body-font-weight-regular)"
+  },
+  "Body/Font Weight Strong": {
+    "codeSyntax": "var(--sds-typography-body-font-weight-strong)"
+  },
+  "Body/Font Style Italic": {
+    "codeSyntax": "var(--sds-typography-body-font-style-italic)"
+  },
+  "Code/Font Family": {
+    "codeSyntax": "var(--sds-typography-code-font-family)"
+  },
+  "Code/Size Small": {
+    "codeSyntax": "var(--sds-typography-code-size-small)"
+  },
+  "Code/Size Base": {
+    "codeSyntax": "var(--sds-typography-code-size-base)"
+  },
+  "Code/Size Large": {
+    "codeSyntax": "var(--sds-typography-code-size-large)"
+  },
+  "Code/Font Weight": {
+    "codeSyntax": "var(--sds-typography-code-font-weight)"
+  },
+  "Device": {
+    "codeSyntax": "var(--sds-responsive-device)"
+  },
+  "Device Width": {
+    "codeSyntax": "var(--sds-responsive-device-width)"
+  },
+  "Root Font Size": {
+    "codeSyntax": "var(--sds-responsive-root-font-size)"
+  },
+  "border-width": {
+    "codeSyntax": "var(--sds-responsive-border-width)"
+  },
+  "Scale": {
+    "codeSyntax": "var(--sds-responsive-scale)"
+  },
+  "Space/0": {
+    "codeSyntax": "var(--sds-size-space-0)"
+  },
+  "Space/050": {
+    "codeSyntax": "var(--sds-size-space-050)"
+  },
+  "Space/100": {
+    "codeSyntax": "var(--sds-size-space-100)"
+  },
+  "Space/150": {
+    "codeSyntax": "var(--sds-size-space-150)"
+  },
+  "Space/200": {
+    "codeSyntax": "var(--sds-size-space-200)"
+  },
+  "Space/300": {
+    "codeSyntax": "var(--sds-size-space-300)"
+  },
+  "Space/400": {
+    "codeSyntax": "var(--sds-size-space-400)"
+  },
+  "Space/600": {
+    "codeSyntax": "var(--sds-size-space-600)"
+  },
+  "Space/800": {
+    "codeSyntax": "var(--sds-size-space-800)"
+  },
+  "Space/1200": {
+    "codeSyntax": "var(--sds-size-space-1200)"
+  },
+  "Space/1600": {
+    "codeSyntax": "var(--sds-size-space-1600)"
+  },
+  "Space/2400": {
+    "codeSyntax": "var(--sds-size-space-2400)"
+  },
+  "Space/4000": {
+    "codeSyntax": "var(--sds-size-space-4000)"
+  },
+  "Space/Negative 100": {
+    "codeSyntax": "var(--sds-size-space-negative-100)"
+  },
+  "Space/Negative 200": {
+    "codeSyntax": "var(--sds-size-space-negative-200)"
+  },
+  "Space/Negative 300": {
+    "codeSyntax": "var(--sds-size-space-negative-300)"
+  },
+  "Space/Negative 400": {
+    "codeSyntax": "var(--sds-size-space-negative-400)"
+  },
+  "Space/Negative 600": {
+    "codeSyntax": "var(--sds-size-space-negative-600)"
+  },
+  "Padding/xs": {
+    "codeSyntax": "var(--sds-size-padding-xs)"
+  },
+  "Padding/sm": {
+    "codeSyntax": "var(--sds-size-padding-sm)"
+  },
+  "Padding/lg": {
+    "codeSyntax": "var(--sds-size-padding-lg)"
+  },
+  "Padding/xl": {
+    "codeSyntax": "var(--sds-size-padding-xl)"
+  },
+  "Padding/xxl": {
+    "codeSyntax": "var(--sds-size-padding-xxl)"
+  },
+  "Radius/100": {
+    "codeSyntax": "var(--sds-size-radius-100)"
+  },
+  "Radius/200": {
+    "codeSyntax": "var(--sds-size-radius-200)"
+  },
+  "Radius/400": {
+    "codeSyntax": "var(--sds-size-radius-400)"
+  },
+  "Radius/xl": {
+    "codeSyntax": "var(--sds-size-radius-xl)"
+  },
+  "Blur/100": {
+    "codeSyntax": "var(--sds-size-blur-100)"
+  },
+  "Radius/Full": {
+    "codeSyntax": "var(--sds-size-radius-full)"
+  },
+  "Depth/0": {
+    "codeSyntax": "var(--sds-size-depth-0)"
+  },
+  "Depth/025": {
+    "codeSyntax": "var(--sds-size-depth-025)"
+  },
+  "Depth/100": {
+    "codeSyntax": "var(--sds-size-depth-100)"
+  },
+  "Depth/200": {
+    "codeSyntax": "var(--sds-size-depth-200)"
+  },
+  "Depth/400": {
+    "codeSyntax": "var(--sds-size-depth-400)"
+  },
+  "Depth/800": {
+    "codeSyntax": "var(--sds-size-depth-800)"
+  },
+  "Depth/1200": {
+    "codeSyntax": "var(--sds-size-depth-1200)"
+  },
+  "Depth/Negative 025": {
+    "codeSyntax": "var(--sds-size-depth-negative-025)"
+  },
+  "Depth/Negative 100": {
+    "codeSyntax": "var(--sds-size-depth-negative-100)"
+  },
+  "Depth/Negative 200": {
+    "codeSyntax": "var(--sds-size-depth-negative-200)"
+  },
+  "Depth/Negative 400": {
+    "codeSyntax": "var(--sds-size-depth-negative-400)"
+  },
+  "Depth/Negative 800": {
+    "codeSyntax": "var(--sds-size-depth-negative-800)"
+  },
+  "Depth/Negative 1200": {
+    "codeSyntax": "var(--sds-size-depth-negative-1200)"
+  },
+  "Stroke/Border": {
+    "codeSyntax": "var(--sds-size-stroke-border)"
+  },
+  "Stroke/Focus Ring": {
+    "codeSyntax": "var(--sds-size-stroke-focus-ring)"
+  },
+  "Icon/Small": {
+    "codeSyntax": "var(--sds-size-icon-small)"
+  },
+  "Icon/Medium": {
+    "codeSyntax": "var(--sds-size-icon-medium)"
+  },
+  "Icon/Large": {
+    "codeSyntax": "var(--sds-size-icon-large)"
+  },
+  "Fonts/Font Sans": {},
+  "Size/Text Sm": {},
+  "Weight/Font Normal": {},
+  "Leading/Leading Tight": {},
+  "Brand/100": {
+    "codeSyntax": "var(--sds-color-brand-100)"
+  },
+  "Brand/200": {
+    "codeSyntax": "var(--sds-color-brand-200)"
+  },
+  "Brand/300": {
+    "codeSyntax": "var(--sds-color-brand-300)"
+  },
+  "Brand/400": {
+    "codeSyntax": "var(--sds-color-brand-400)"
+  },
+  "Brand/500": {
+    "codeSyntax": "var(--sds-color-brand-500)"
+  },
+  "Brand/600": {
+    "codeSyntax": "var(--sds-color-brand-600)"
+  },
+  "Brand/700": {
+    "codeSyntax": "var(--sds-color-brand-700)"
+  },
+  "Brand/800": {
+    "codeSyntax": "var(--sds-color-brand-800)"
+  },
+  "Brand/900": {
+    "codeSyntax": "var(--sds-color-brand-900)"
+  },
+  "Brand/1000": {
+    "codeSyntax": "var(--sds-color-brand-1000)"
+  },
+  "Black/100": {
+    "codeSyntax": "var(--sds-color-black-100)"
+  },
+  "Black/200": {
+    "codeSyntax": "var(--sds-color-black-200)"
+  },
+  "Black/300": {
+    "codeSyntax": "var(--sds-color-black-300)"
+  },
+  "Black/400": {
+    "codeSyntax": "var(--sds-color-black-400)"
+  },
+  "Black/500": {
+    "codeSyntax": "var(--sds-color-black-500)"
+  },
+  "Black/600": {
+    "codeSyntax": "var(--sds-color-black-600)"
+  },
+  "Black/700": {
+    "codeSyntax": "var(--sds-color-black-700)"
+  },
+  "Black/800": {
+    "codeSyntax": "var(--sds-color-black-800)"
+  },
+  "Black/900": {
+    "codeSyntax": "var(--sds-color-black-900)"
+  },
+  "Black/1000": {
+    "codeSyntax": "var(--sds-color-black-1000)"
+  },
+  "White/100": {
+    "codeSyntax": "var(--sds-color-white-100)"
+  },
+  "Green/100": {
+    "codeSyntax": "var(--sds-color-green-100)"
+  },
+  "Green/200": {
+    "codeSyntax": "var(--sds-color-green-200)"
+  },
+  "Green/300": {
+    "codeSyntax": "var(--sds-color-green-300)"
+  },
+  "Green/400": {
+    "codeSyntax": "var(--sds-color-green-400)"
+  },
+  "Green/500": {
+    "codeSyntax": "var(--sds-color-green-500)"
+  },
+  "Green/600": {
+    "codeSyntax": "var(--sds-color-green-600)"
+  },
+  "Green/700": {
+    "codeSyntax": "var(--sds-color-green-700)"
+  },
+  "Green/800": {
+    "codeSyntax": "var(--sds-color-green-800)"
+  },
+  "Green/900": {
+    "codeSyntax": "var(--sds-color-green-900)"
+  },
+  "Green/1000": {
+    "codeSyntax": "var(--sds-color-green-1000)"
+  },
+  "Gray/100": {
+    "codeSyntax": "var(--sds-color-gray-100)"
+  },
+  "Gray/200": {
+    "codeSyntax": "var(--sds-color-gray-200)"
+  },
+  "Gray/300": {
+    "codeSyntax": "var(--sds-color-gray-300)"
+  },
+  "Gray/400": {
+    "codeSyntax": "var(--sds-color-gray-400)"
+  },
+  "Gray/500": {
+    "codeSyntax": "var(--sds-color-gray-500)"
+  },
+  "Gray/600": {
+    "codeSyntax": "var(--sds-color-gray-600)"
+  },
+  "Gray/700": {
+    "codeSyntax": "var(--sds-color-gray-700)"
+  },
+  "Gray/800": {
+    "codeSyntax": "var(--sds-color-gray-800)"
+  },
+  "Gray/900": {
+    "codeSyntax": "var(--sds-color-gray-900)"
+  },
+  "Gray/1000": {
+    "codeSyntax": "var(--sds-color-gray-1000)"
+  },
+  "White/200": {
+    "codeSyntax": "var(--sds-color-white-200)"
+  },
+  "White/300": {
+    "codeSyntax": "var(--sds-color-white-300)"
+  },
+  "White/400": {
+    "codeSyntax": "var(--sds-color-white-400)"
+  },
+  "White/500": {
+    "codeSyntax": "var(--sds-color-white-500)"
+  },
+  "White/600": {
+    "codeSyntax": "var(--sds-color-white-600)"
+  },
+  "White/700": {
+    "codeSyntax": "var(--sds-color-white-700)"
+  },
+  "White/800": {
+    "codeSyntax": "var(--sds-color-white-800)"
+  },
+  "White/900": {
+    "codeSyntax": "var(--sds-color-white-900)"
+  },
+  "White/1000": {
+    "codeSyntax": "var(--sds-color-white-1000)"
+  },
+  "Pink/100": {
+    "codeSyntax": "var(--sds-color-pink-100)"
+  },
+  "Pink/200": {
+    "codeSyntax": "var(--sds-color-pink-200)"
+  },
+  "Pink/300": {
+    "codeSyntax": "var(--sds-color-pink-300)"
+  },
+  "Pink/400": {
+    "codeSyntax": "var(--sds-color-pink-400)"
+  },
+  "Pink/500": {
+    "codeSyntax": "var(--sds-color-pink-500)"
+  },
+  "Pink/600": {
+    "codeSyntax": "var(--sds-color-pink-600)"
+  },
+  "Pink/700": {
+    "codeSyntax": "var(--sds-color-pink-700)"
+  },
+  "Pink/800": {
+    "codeSyntax": "var(--sds-color-pink-800)"
+  },
+  "Pink/900": {
+    "codeSyntax": "var(--sds-color-pink-900)"
+  },
+  "Pink/1000": {
+    "codeSyntax": "var(--sds-color-pink-1000)"
+  },
+  "Red/100": {
+    "codeSyntax": "var(--sds-color-red-100)"
+  },
+  "Red/200": {
+    "codeSyntax": "var(--sds-color-red-200)"
+  },
+  "Red/300": {
+    "codeSyntax": "var(--sds-color-red-300)"
+  },
+  "Red/400": {
+    "codeSyntax": "var(--sds-color-red-400)"
+  },
+  "Red/500": {
+    "codeSyntax": "var(--sds-color-red-500)"
+  },
+  "Red/600": {
+    "codeSyntax": "var(--sds-color-red-600)"
+  },
+  "Red/700": {
+    "codeSyntax": "var(--sds-color-red-700)"
+  },
+  "Red/800": {
+    "codeSyntax": "var(--sds-color-red-800)"
+  },
+  "Red/900": {
+    "codeSyntax": "var(--sds-color-red-900)"
+  },
+  "Red/1000": {
+    "codeSyntax": "var(--sds-color-red-1000)"
+  },
+  "Slate/100": {
+    "codeSyntax": "var(--sds-color-slate-100)"
+  },
+  "Slate/200": {
+    "codeSyntax": "var(--sds-color-slate-200)"
+  },
+  "Slate/300": {
+    "codeSyntax": "var(--sds-color-slate-300)"
+  },
+  "Slate/400": {
+    "codeSyntax": "var(--sds-color-slate-400)"
+  },
+  "Slate/500": {
+    "codeSyntax": "var(--sds-color-slate-500)"
+  },
+  "Slate/600": {
+    "codeSyntax": "var(--sds-color-slate-600)"
+  },
+  "Slate/700": {
+    "codeSyntax": "var(--sds-color-slate-700)"
+  },
+  "Slate/800": {
+    "codeSyntax": "var(--sds-color-slate-800)"
+  },
+  "Slate/900": {
+    "codeSyntax": "var(--sds-color-slate-900)"
+  },
+  "Slate/1000": {
+    "codeSyntax": "var(--sds-color-slate-1000)"
+  },
+  "Yellow/100": {
+    "codeSyntax": "var(--sds-color-yellow-100)"
+  },
+  "Yellow/200": {
+    "codeSyntax": "var(--sds-color-yellow-200)"
+  },
+  "Yellow/300": {
+    "codeSyntax": "var(--sds-color-yellow-300)"
+  },
+  "Yellow/400": {
+    "codeSyntax": "var(--sds-color-yellow-400)"
+  },
+  "Yellow/500": {
+    "codeSyntax": "var(--sds-color-yellow-500)"
+  },
+  "Yellow/600": {
+    "codeSyntax": "var(--sds-color-yellow-600)"
+  },
+  "Yellow/700": {
+    "codeSyntax": "var(--sds-color-yellow-700)"
+  },
+  "Yellow/800": {
+    "codeSyntax": "var(--sds-color-yellow-800)"
+  },
+  "Yellow/900": {
+    "codeSyntax": "var(--sds-color-yellow-900)"
+  },
+  "Yellow/1000": {
+    "codeSyntax": "var(--sds-color-yellow-1000)"
+  },
+  "Blue/100": {
+    "codeSyntax": "var(--sds-color-pink-100)"
+  },
+  "Blue/200": {
+    "codeSyntax": "var(--sds-color-pink-200)"
+  },
+  "Blue/300": {
+    "codeSyntax": "var(--sds-color-pink-300)"
+  },
+  "Blue/400": {
+    "codeSyntax": "var(--sds-color-pink-400)"
+  },
+  "Blue/500": {
+    "codeSyntax": "var(--sds-color-pink-500)"
+  },
+  "Blue/600": {
+    "codeSyntax": "var(--sds-color-pink-600)"
+  },
+  "Blue/700": {
+    "codeSyntax": "var(--sds-color-pink-700)"
+  },
+  "Blue/800": {
+    "codeSyntax": "var(--sds-color-pink-800)"
+  },
+  "Blue/900": {
+    "codeSyntax": "var(--sds-color-pink-900)"
+  },
+  "Blue/1000": {
+    "codeSyntax": "var(--sds-color-pink-1000)"
+  },
+  "Background/Default/Default": {
+    "codeSyntax": "var(--sds-color-background-default-default)"
+  },
+  "Background/Neutral/Default": {
+    "codeSyntax": "var(--sds-color-background-neutral-default)"
+  },
+  "Background/Neutral/Hover": {
+    "codeSyntax": "var(--sds-color-background-neutral-hover)"
+  },
+  "Background/Neutral/Secondary": {
+    "codeSyntax": "var(--sds-color-background-neutral-secondary)"
+  },
+  "Background/Neutral/Secondary Hover": {
+    "codeSyntax": "var(--sds-color-background-neutral-secondary-hover)"
+  },
+  "Background/Neutral/Tertiary": {
+    "codeSyntax": "var(--sds-color-background-neutral-tertiary)"
+  },
+  "Background/Neutral/Tertiary Hover": {
+    "codeSyntax": "var(--sds-color-background-neutral-tertiary-hover)"
+  },
+  "Background/Default/Default Hover": {
+    "codeSyntax": "var(--sds-color-background-default-default-hover)"
+  },
+  "Background/Default/Secondary": {
+    "codeSyntax": "var(--sds-color-background-default-secondary)"
+  },
+  "Background/Default/Secondary Hover": {
+    "codeSyntax": "var(--sds-color-background-default-secondary-hover)"
+  },
+  "Background/Default/Tertiary": {
+    "codeSyntax": "var(--sds-color-background-default-tertiary)"
+  },
+  "Background/Default/Tertiary Hover": {
+    "codeSyntax": "var(--sds-color-background-default-tertiary-hover)"
+  },
+  "Background/Brand/Default": {
+    "codeSyntax": "var(--sds-color-background-brand-default)"
+  },
+  "Background/Brand/Hover": {
+    "codeSyntax": "var(--sds-color-background-brand-hover)"
+  },
+  "Background/Brand/Secondary": {
+    "codeSyntax": "var(--sds-color-background-brand-secondary)"
+  },
+  "Background/Brand/Secondary Hover": {
+    "codeSyntax": "var(--sds-color-background-brand-secondary-hover)"
+  },
+  "Background/Brand/Tertiary": {
+    "codeSyntax": "var(--sds-color-background-brand-tertiary)"
+  },
+  "Background/Brand/Tertiary Hover": {
+    "codeSyntax": "var(--sds-color-background-brand-tertiary-hover)"
+  },
+  "Background/Positive/Default": {
+    "codeSyntax": "var(--sds-color-background-positive-default)"
+  },
+  "Background/Positive/Hover": {
+    "codeSyntax": "var(--sds-color-background-positive-hover)"
+  },
+  "Background/Positive/Secondary": {
+    "codeSyntax": "var(--sds-color-background-positive-secondary)"
+  },
+  "Background/Positive/Secondary Hover": {
+    "codeSyntax": "var(--sds-color-background-positive-secondary-hover)"
+  },
+  "Background/Positive/Tertiary": {
+    "codeSyntax": "var(--sds-color-background-positive-tertiary)"
+  },
+  "Background/Positive/Tertiary Hover": {
+    "codeSyntax": "var(--sds-color-background-positive-tertiary-hover)"
+  },
+  "Background/Warning/Default": {
+    "codeSyntax": "var(--sds-color-background-warning-default)"
+  },
+  "Background/Warning/Hover": {
+    "codeSyntax": "var(--sds-color-background-warning-hover)"
+  },
+  "Background/Warning/Secondary": {
+    "codeSyntax": "var(--sds-color-background-warning-secondary)"
+  },
+  "Background/Warning/Secondary Hover": {
+    "codeSyntax": "var(--sds-color-background-warning-secondary-hover)"
+  },
+  "Background/Warning/Tertiary": {
+    "codeSyntax": "var(--sds-color-background-warning-tertiary)"
+  },
+  "Background/Warning/Tertiary Hover": {
+    "codeSyntax": "var(--sds-color-background-warning-tertiary-hover)"
+  },
+  "Background/Danger/Default": {
+    "codeSyntax": "var(--sds-color-background-danger-default)"
+  },
+  "Background/Danger/Hover": {
+    "codeSyntax": "var(--sds-color-background-danger-hover)"
+  },
+  "Background/Danger/Secondary": {
+    "codeSyntax": "var(--sds-color-background-danger-secondary)"
+  },
+  "Background/Danger/Secondary Hover": {
+    "codeSyntax": "var(--sds-color-background-danger-secondary-hover)"
+  },
+  "Background/Danger/Tertiary": {
+    "codeSyntax": "var(--sds-color-background-danger-tertiary)"
+  },
+  "Background/Danger/Tertiary Hover": {
+    "codeSyntax": "var(--sds-color-background-danger-tertiary-hover)"
+  },
+  "Background/Disabled/Default": {
+    "codeSyntax": "var(--sds-color-background-disabled-default)"
+  },
+  "Background/Utilities/Scrim": {
+    "codeSyntax": "var(--sds-color-background-utilities-scrim)"
+  },
+  "Background/Utilities/Blanket": {
+    "codeSyntax": "var(--sds-color-background-utilities-blanket)"
+  },
+  "Background/Utilities/Overlay": {
+    "codeSyntax": "var(--sds-color-background-utilities-overlay)"
+  },
+  "Background/Utilities/Measurement": {
+    "codeSyntax": "var(--sds-color-background-utilities-measurement)"
+  },
+  "Text/Default/Default": {
+    "codeSyntax": "var(--sds-color-text-default-default)"
+  },
+  "Text/Default/Secondary": {
+    "codeSyntax": "var(--sds-color-text-default-secondary)"
+  },
+  "Text/Default/Tertiary": {
+    "codeSyntax": "var(--sds-color-text-default-tertiary)"
+  },
+  "Text/Neutral/Default": {
+    "codeSyntax": "var(--sds-color-text-neutral-default)"
+  },
+  "Text/Neutral/Secondary": {
+    "codeSyntax": "var(--sds-color-text-neutral-secondary)"
+  },
+  "Text/Neutral/Tertiary": {
+    "codeSyntax": "var(--sds-color-text-neutral-tertiary)"
+  },
+  "Text/Neutral/On Neutral": {
+    "codeSyntax": "var(--sds-color-text-neutral-on-neutral)"
+  },
+  "Text/Neutral/On Neutral Secondary": {
+    "codeSyntax": "var(--sds-color-text-neutral-on-neutral-secondary)"
+  },
+  "Text/Neutral/On Neutral Tertiary": {
+    "codeSyntax": "var(--sds-color-text-neutral-on-neutral-tertiary)"
+  },
+  "Text/Brand/Default": {
+    "codeSyntax": "var(--sds-color-text-brand-default)"
+  },
+  "Text/Brand/Secondary": {
+    "codeSyntax": "var(--sds-color-text-brand-secondary)"
+  },
+  "Text/Brand/Tertiary": {
+    "codeSyntax": "var(--sds-color-text-brand-tertiary)"
+  },
+  "Text/Brand/On Brand": {
+    "codeSyntax": "var(--sds-color-text-brand-on-brand)"
+  },
+  "Text/Brand/On Brand Secondary": {
+    "codeSyntax": "var(--sds-color-text-brand-on-brand-secondary)"
+  },
+  "Text/Brand/On Brand Tertiary": {
+    "codeSyntax": "var(--sds-color-text-brand-on-brand-tertiary)"
+  },
+  "Text/Positive/Default": {
+    "codeSyntax": "var(--sds-color-text-positive-default)"
+  },
+  "Text/Positive/Secondary": {
+    "codeSyntax": "var(--sds-color-text-positive-secondary)"
+  },
+  "Text/Positive/Tertiary": {
+    "codeSyntax": "var(--sds-color-text-positive-tertiary)"
+  },
+  "Text/Positive/On Positive": {
+    "codeSyntax": "var(--sds-color-text-positive-on-positive)"
+  },
+  "Text/Positive/On Positive Secondary": {
+    "codeSyntax": "var(--sds-color-text-positive-on-positive-secondary)"
+  },
+  "Text/Positive/On Positive Tertiary": {
+    "codeSyntax": "var(--sds-color-text-positive-on-positive-tertiary)"
+  },
+  "Text/Warning/Default": {
+    "codeSyntax": "var(--sds-color-text-warning-default)"
+  },
+  "Text/Warning/Secondary": {
+    "codeSyntax": "var(--sds-color-text-warning-secondary)"
+  },
+  "Text/Warning/Tertiary": {
+    "codeSyntax": "var(--sds-color-text-warning-tertiary)"
+  },
+  "Text/Warning/On Warning": {
+    "codeSyntax": "var(--sds-color-text-warning-on-warning)"
+  },
+  "Text/Warning/On Warning Secondary": {
+    "codeSyntax": "var(--sds-color-text-warning-on-warning-secondary)"
+  },
+  "Text/Warning/On Warning Tertiary": {
+    "codeSyntax": "var(--sds-color-text-warning-on-warning-tertiary)"
+  },
+  "Text/Danger/Default": {
+    "codeSyntax": "var(--sds-color-text-danger-default)"
+  },
+  "Text/Danger/Secondary": {
+    "codeSyntax": "var(--sds-color-text-danger-secondary)"
+  },
+  "Text/Danger/Tertiary": {
+    "codeSyntax": "var(--sds-color-text-danger-tertiary)"
+  },
+  "Text/Danger/On Danger": {
+    "codeSyntax": "var(--sds-color-text-danger-on-danger)"
+  },
+  "Text/Danger/On Danger Secondary": {
+    "codeSyntax": "var(--sds-color-text-danger-on-danger-secondary)"
+  },
+  "Text/Danger/On Danger Tertiary": {
+    "codeSyntax": "var(--sds-color-text-danger-on-danger-tertiary)"
+  },
+  "Text/Disabled/Default": {
+    "codeSyntax": "var(--sds-color-text-disabled-default)"
+  },
+  "Text/Utilities/Text On Overlay": {
+    "codeSyntax": "var(--sds-color-text-utilities-text-on-overlay)"
+  },
+  "Text/Utilities/Text On Measurement": {
+    "codeSyntax": "var(--sds-color-text-utilities-text-on-measurement)"
+  },
+  "Text/Disabled/On Disabled": {
+    "codeSyntax": "var(--sds-color-text-disabled-on-disabled)"
+  },
+  "Border/Default/Default": {
+    "codeSyntax": "var(--sds-color-border-default-default)"
+  },
+  "Border/Default/Secondary": {
+    "codeSyntax": "var(--sds-color-border-default-secondary)"
+  },
+  "Border/Default/tertiary": {
+    "codeSyntax": "var(--sds-color-border-default-tertiary)"
+  },
+  "Border/Neutral/Default": {
+    "codeSyntax": "var(--sds-color-border-neutral-default)"
+  },
+  "Border/Neutral/Secondary": {
+    "codeSyntax": "var(--sds-color-border-neutral-secondary)"
+  },
+  "Border/Neutral/tertiary": {
+    "codeSyntax": "var(--sds-color-border-neutral-tertiary)"
+  },
+  "Border/Brand/Default": {
+    "codeSyntax": "var(--sds-color-border-brand-default)"
+  },
+  "Border/Brand/Secondary": {
+    "codeSyntax": "var(--sds-color-border-brand-secondary)"
+  },
+  "Border/Brand/Tertiary": {
+    "codeSyntax": "var(--sds-color-border-brand-tertiary)"
+  },
+  "Border/Positive/Default": {
+    "codeSyntax": "var(--sds-color-border-positive-default)"
+  },
+  "Border/Positive/Secondary": {
+    "codeSyntax": "var(--sds-color-border-positive-secondary)"
+  },
+  "Border/Positive/tertiary": {
+    "codeSyntax": "var(--sds-color-border-positive-tertiary)"
+  },
+  "Border/Warning/Default": {
+    "codeSyntax": "var(--sds-color-border-warning-default)"
+  },
+  "Border/Warning/Secondary": {
+    "codeSyntax": "var(--sds-color-border-warning-secondary)"
+  },
+  "Border/Warning/tertiary": {
+    "codeSyntax": "var(--sds-color-border-warning-tertiary)"
+  },
+  "Border/Danger/Default": {
+    "codeSyntax": "var(--sds-color-border-danger-default)"
+  },
+  "Border/Danger/Secondary": {
+    "codeSyntax": "var(--sds-color-border-danger-secondary)"
+  },
+  "Border/Danger/Tertiary": {
+    "codeSyntax": "var(--sds-color-border-danger-tertiary)"
+  },
+  "Border/Disabled/default": {
+    "codeSyntax": "var(--sds-color-border-disabled-default)"
+  },
+  "Border/Utilities/Measurement": {
+    "codeSyntax": "var(--sds-color-border-utilities-measurement)"
+  },
+  "Border/Utilities/Swatch": {
+    "codeSyntax": "var(--sds-color-border-utilities-swatch)"
+  },
+  "Icon/Default/Default": {
+    "codeSyntax": "var(--sds-color-icon-default-default)"
+  },
+  "Icon/Neutral/Default": {
+    "codeSyntax": "var(--sds-color-icon-neutral-default)"
+  },
+  "Icon/Neutral/Secondary": {
+    "codeSyntax": "var(--sds-color-icon-neutral-secondary)"
+  },
+  "Icon/Neutral/Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-neutral-tertiary)"
+  },
+  "Icon/Neutral/On Neutral": {
+    "codeSyntax": "var(--sds-color-icon-neutral-on-neutral)"
+  },
+  "Icon/Neutral/On Neutral Secondary": {
+    "codeSyntax": "var(--sds-color-icon-neutral-on-neutral-secondary)"
+  },
+  "Icon/Neutral/On Neutral Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-neutral-on-neutral-tertiary)"
+  },
+  "Icon/Default/Secondary": {
+    "codeSyntax": "var(--sds-color-icon-default-secondary)"
+  },
+  "Icon/Default/Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-default-tertiary)"
+  },
+  "Icon/Brand/Default": {
+    "codeSyntax": "var(--sds-color-icon-brand-default)"
+  },
+  "Icon/Brand/Secondary": {
+    "codeSyntax": "var(--sds-color-icon-brand-secondary)"
+  },
+  "Icon/Brand/Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-brand-tertiary)"
+  },
+  "Icon/Brand/On Brand": {
+    "codeSyntax": "var(--sds-color-icon-brand-on-brand)"
+  },
+  "Icon/Brand/On Brand Secondary": {
+    "codeSyntax": "var(--sds-color-icon-brand-on-brand-secondary)"
+  },
+  "Icon/Brand/On Brand Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-brand-on-brand-tertiary)"
+  },
+  "Icon/Positive/Default": {
+    "codeSyntax": "var(--sds-color-icon-positive-default)"
+  },
+  "Icon/Positive/Secondary": {
+    "codeSyntax": "var(--sds-color-icon-positive-secondary)"
+  },
+  "Icon/Positive/Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-positive-tertiary)"
+  },
+  "Icon/Positive/On Positive": {
+    "codeSyntax": "var(--sds-color-icon-positive-on-positive)"
+  },
+  "Icon/Positive/On Positive Secondary": {
+    "codeSyntax": "var(--sds-color-icon-positive-on-positive-secondary)"
+  },
+  "Icon/Positive/On Positive Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-positive-on-positive-tertiary)"
+  },
+  "Icon/Warning/Default": {
+    "codeSyntax": "var(--sds-color-icon-warning-default)"
+  },
+  "Icon/Warning/Secondary": {
+    "codeSyntax": "var(--sds-color-icon-warning-secondary)"
+  },
+  "Icon/Warning/Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-warning-tertiary)"
+  },
+  "Icon/Warning/On Warning": {
+    "codeSyntax": "var(--sds-color-icon-warning-on-warning)"
+  },
+  "Icon/Warning/On Warning Secondary": {
+    "codeSyntax": "var(--sds-color-icon-warning-on-warning-secondary)"
+  },
+  "Icon/Warning/On Warning Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-warning-on-warning-tertiary)"
+  },
+  "Icon/Danger/Default": {
+    "codeSyntax": "var(--sds-color-icon-danger-default)"
+  },
+  "Icon/Danger/Secondary": {
+    "codeSyntax": "var(--sds-color-icon-danger-secondary)"
+  },
+  "Icon/Danger/Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-danger-tertiary)"
+  },
+  "Icon/Danger/On Danger": {
+    "codeSyntax": "var(--sds-color-icon-danger-on-danger)"
+  },
+  "Icon/Danger/On Danger Secondary": {
+    "codeSyntax": "var(--sds-color-icon-danger-on-danger-secondary)"
+  },
+  "Icon/Danger/On Danger Tertiary": {
+    "codeSyntax": "var(--sds-color-icon-danger-on-danger-tertiary)"
+  },
+  "Icon/Disabled/Default": {
+    "codeSyntax": "var(--sds-color-icon-disabled-default)"
+  },
+  "Icon/Utilities/Icon": {
+    "codeSyntax": "var(--sds-color-icon-utilities-icon)"
+  },
+  "Icon/Utilities/Icon On Measurement": {
+    "codeSyntax": "var(--sds-color-icon-utilities-icon-on-measurement)"
+  },
+  "Icon/Disabled/On Disabled": {
+    "codeSyntax": "var(--sds-color-icon-disabled-on-disabled)"
+  },
+  "border/disabled/secondary": {
+    "codeSyntax": "var(--sds-color-border-disabled-secondary)"
+  },
+  "black/100": {}
+}

@@ -4,6 +4,7 @@ import {
   runHasGaps,
   summarizeBulk,
   type BulkSummaryRow,
+  exclusionNote,
 } from "./bulk-summary.js";
 import { EMPTY_STATUS_COUNTS } from "./row-triage.js";
 
@@ -164,5 +165,55 @@ describe("runHasGaps — whether the numbers describe the whole registry", () =>
     expect(runHasGaps(summarizeBulk([row(), row({ status: "error", timedOut: true })]))).toBe(true);
     expect(runHasGaps(summarizeBulk([row(), row({ status: "error" })]))).toBe(true);
     expect(runHasGaps(summarizeBulk([row(), row({ status: "pending" })]))).toBe(true);
+  });
+});
+
+/**
+ * #72 — the totals silently excluded uncounted stories.
+ *
+ * `coverageLabel` said how many were checked; nothing said the drift and match
+ * numbers beside it therefore covered fewer stories. Reported by a designer who
+ * saw 34 become 32 with no visible cause — the two missing rows belonged to a
+ * story that had timed out.
+ */
+describe("exclusionNote", () => {
+  it("says nothing when the run covered everything", () => {
+    // A complete run must gain no text it does not need.
+    expect(exclusionNote(summarizeBulk([row({ status: "done" }), row({ status: "done" })]))).toBeUndefined();
+  });
+
+  it("names the shortfall when a story timed out", () => {
+    const note = exclusionNote(
+      summarizeBulk([row({ status: "done" }), row({ status: "error", timedOut: true })]),
+    );
+    expect(note).toMatch(/cover 1 of 2 stories/);
+    expect(note).toMatch(/contributed nothing/);
+  });
+
+  it("explains the symptom the reader actually notices", () => {
+    // The point is not "coverage is 1/2" — the header already says that. It is
+    // that a lower drift count is the cause, not evidence of a fix.
+    const note = exclusionNote(summarizeBulk([row({ status: "error", timedOut: true })]));
+    expect(note).toMatch(/lower drift count/);
+    expect(note).toMatch(/not a fix/);
+  });
+
+  it.each(["incomplete", "error", "pending"] as const)(
+    "counts a %s story as uncounted",
+    (status) => {
+      const note = exclusionNote(summarizeBulk([row({ status: "done" }), row({ status })]));
+      expect(note).toMatch(/1 story contributed nothing/);
+    },
+  );
+
+  it("pluralises correctly", () => {
+    const note = exclusionNote(
+      summarizeBulk([
+        row({ status: "done" }),
+        row({ status: "error", timedOut: true }),
+        row({ status: "incomplete" }),
+      ]),
+    );
+    expect(note).toMatch(/2 stories contributed nothing/);
   });
 });

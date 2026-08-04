@@ -1,6 +1,6 @@
 import type { DimensionDiff, DimensionKind, DimensionStatus, DriftReport } from "./dimensions/types.js";
 import type { BulkStoryOutcome, WarmOutcome } from "./bulk-run.js";
-import { coverageLabel, runHasGaps, summarizeBulk, type BulkSummary, type BulkSummaryRow } from "./bulk-summary.js";
+import { coverageLabel, exclusionNote, runHasGaps, summarizeBulk, type BulkSummary, type BulkSummaryRow } from "./bulk-summary.js";
 import {
   classifyRow,
   countRowStatuses,
@@ -356,6 +356,10 @@ export function formatCheckSummary(doc: CheckJsonDocument): string {
   }
   lines.push("");
   lines.push(`Coverage: ${coverageLabel(s)}`);
+  // Same reasoning as the panel (#72): the coverage line says what was checked,
+  // not that the findings below therefore exclude the rest.
+  const exclusion = exclusionNote(s);
+  if (exclusion) lines.push(exclusion);
   lines.push(
     `Findings: ${s.drift} drift · ${s.advisory} name-only · ${s.unverified} unverified · ` +
       `${s.flagOnly} flag-only · ${s.unresolved} unresolved · ${s.match} match`,

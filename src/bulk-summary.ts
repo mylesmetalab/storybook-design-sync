@@ -137,3 +137,27 @@ export function coverageLabel(summary: BulkSummary): string {
   if (summary.pending > 0) parts.push(`${summary.pending} not yet run`);
   return parts.join(" · ");
 }
+
+/**
+ * The sentence a reader needs when the run did not cover everything (#72).
+ *
+ * `coverageLabel` says how many stories were checked. It does **not** say that the
+ * drift and match totals beside it therefore exclude some stories — and that gap
+ * was a real complaint: a designer comparing against a known baseline saw 34
+ * become 32 with no visible cause, because the two missing rows belonged to a
+ * story that had timed out.
+ *
+ * Returns `undefined` when the run is complete, so a full run gains no text it
+ * does not need.
+ */
+export function exclusionNote(summary: BulkSummary): string | undefined {
+  const uncounted = summary.timedOut + summary.incomplete + summary.errored + summary.pending;
+  if (uncounted === 0) return undefined;
+  const noun = uncounted === 1 ? "story" : "stories";
+  const verb = uncounted === 1 ? "contributed" : "contributed";
+  return (
+    `The totals above cover ${summary.checked} of ${summary.stories} stories — ` +
+    `${uncounted} ${noun} ${verb} nothing to them. A lower drift count than you expected ` +
+    `is this, not a fix.`
+  );
+}

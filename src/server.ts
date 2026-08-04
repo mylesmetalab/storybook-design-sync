@@ -110,10 +110,18 @@ export async function registerServerChannel(channel: ChannelLike): Promise<Chann
       const registry = await loadRegistry(config.registryPath);
       const stories = Object.entries(registry.stories)
         .filter(([, entry]) => !isPending(entry))
-        .map(([storyId, entry]) => ({
-          storyId,
-          nodeId: entry.nodeId!,
-        }));
+        .map(([storyId, entry]) => {
+          // Well-formed declarations only: a malformed one produces no snapshot,
+          // so budgeting for it would inflate the ceiling for work never done.
+          const bindings =
+            validateChildBindings(entry.children).declarations.length +
+            validateStateBindings(entry.states).declarations.length;
+          return {
+            storyId,
+            nodeId: entry.nodeId!,
+            ...(bindings > 0 ? { bindings } : {}),
+          };
+        });
       channel.emit(EVENTS.RegisteredStories, {
         stories,
         fileKey: registry.fileKey || config.fileKey,

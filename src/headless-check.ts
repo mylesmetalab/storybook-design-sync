@@ -575,6 +575,10 @@ export async function runHeadlessCheck(opts: HeadlessRunOptions): Promise<Headle
   // The page load rendered the first story, so it is "already on screen" in
   // exactly the sense the panel's current story is — same helper, same rule. It
   // is also why this loop never hit the timeout the panel did.
+  // Declared bindings per story, so each story's budget matches its work (#72).
+  const bindingsByStory = new Map(
+    selection.selected.map((e) => [e.storyId, e.bindings ?? 0] as const),
+  );
   const plan = new Map(
     planBulkNavigation(storyIds, storyIds[0]).map((step) => [step.storyId, step.alreadyRendered]),
   );
@@ -590,7 +594,11 @@ export async function runHeadlessCheck(opts: HeadlessRunOptions): Promise<Headle
         dualMode: opts.dualMode,
         alreadyCurrent: plan.get(storyId) === true,
       }),
-    budgetMs: opts.budgetMs ?? bulkBudgetMs(opts.dualMode),
+    // Per story, sized by its declared bindings (#72). An explicit --timeout
+    // still overrides everything, because a human asking for a number means it.
+    budgetMs:
+      opts.budgetMs ??
+      ((storyId) => bulkBudgetMs(opts.dualMode, bindingsByStory.get(storyId) ?? 0)),
     onWarmed: (outcome) => {
       warm = outcome;
       opts.onWarmed?.(outcome);

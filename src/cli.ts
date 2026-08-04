@@ -32,6 +32,7 @@ import { CHECK_EXIT } from "./check-report.js";
 import { INIT_EXIT, parseInitArgs, runInit } from "./init.js";
 import { VERIFY_EXIT } from "./contract-verify.js";
 import { parseVerifyArgs, runVerify } from "./verify-command.js";
+import { applyHintPlan, planHintRegistration } from "./hint-plan.js";
 
 interface CommonOptions {
   cwd: string;
@@ -696,42 +697,48 @@ async function register(opts: RegisterOptions): Promise<number> {
   const { stories } = outcome;
   const hints = await loadHints(opts.cwd, opts.hintsPath);
 
-  let added = 0;
-  let stubbed = 0;
   const updated: Registry = {
     fileKey: registry.fileKey || config.fileKey,
     stories: { ...registry.stories },
   };
 
-  for (const s of stories) {
-    if (updated.stories[s.id]) continue;
-    const hint = hints[s.id];
-    if (typeof hint === "string" && hint.trim().length > 0) {
-      const entry: RegistryEntry = { nodeId: hint, lastSyncedHash: null };
-      updated.stories[s.id] = entry;
-      added++;
-      console.log(`+ ${s.id} → ${hint}`);
-    } else {
-      const entry: RegistryEntry = {
-        nodeId: null,
-        lastSyncedHash: null,
-        status: "pending",
-      };
-      updated.stories[s.id] = entry;
-      stubbed++;
-      console.log(`· ${s.id} → pending`);
+  const plan = planHintRegistration(stories, hints, updated.stories);
+  updated.stories = applyHintPlan(plan, updated.stories);
+
+  for (const action of plan.actions) {
+    if (action.kind === "add") console.log(`+ ${action.storyId} → ${action.nodeId}`);
+    else if (action.kind === "stub") console.log(`· ${action.storyId} → pending`);
+    else if (action.kind === "upgrade") {
+      console.log(`↑ ${action.storyId} → ${action.nodeId}  (was a pending stub)`);
     }
   }
 
+  const { add, stub, upgrade, conflict } = plan.counts;
   console.log(
-    `\n${added} registered from hints, ${stubbed} stubbed as pending` +
+    `\n${add} registered from hints, ${upgrade} pending stub(s) upgraded, ` +
+      `${stub} stubbed as pending` +
       (opts.dryRun ? " (dry-run; nothing written)" : ""),
   );
+  if (conflict > 0) {
+    // A hint the user wrote and the tool discarded must never be silent — that
+    // silence, plus exit 0, is the whole of #97.
+    console.log(
+      `\n${conflict} hint(s) NOT applied — already bound to a different node. ` +
+        `\`register\` never overwrites a real binding; edit ${config.registryPath} ` +
+        `directly if the hint is the correct one:`,
+    );
+    for (const a of plan.actions) {
+      if (a.kind === "conflict") {
+        console.log(`  - ${a.storyId}: hint says ${a.nodeId}, registry says ${a.boundTo}`);
+      }
+    }
+  }
+
   // Same report as `audit`: a file that produced no story ids means stories
   // this registry will never contain, so `register` must not finish quietly.
   reportDiscoveryProblems(outcome, outcome.globs);
 
-  if (!opts.dryRun && (added > 0 || stubbed > 0)) {
+  if (!opts.dryRun && (add > 0 || stub > 0 || upgrade > 0)) {
     await saveRegistry(config.registryPath, updated, opts.cwd);
     console.log(`Wrote ${config.registryPath}.`);
   }

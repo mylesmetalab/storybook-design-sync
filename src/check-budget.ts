@@ -77,8 +77,41 @@ export const BULK_STORY_BUDGET_MS = 8_000;
 /** Dual-mode: two snapshots and two engine passes per story, so twice the room. */
 export const BULK_STORY_BUDGET_DUAL_MS = 16_000;
 
-export function bulkBudgetMs(dualMode: boolean): number {
-  return dualMode ? BULK_STORY_BUDGET_DUAL_MS : BULK_STORY_BUDGET_MS;
+/**
+ * Extra room per declared binding — each child or state binding adds a snapshot
+ * and a Figma node to the story's work (#72).
+ *
+ * Chosen from the observed distribution, not picked: on the reference consumer the
+ * childless stories sat around 5.0s while the two with **five** child bindings
+ * each sat at 6.8–7.5s and intermittently crossed 8s (8003ms on one run). That is
+ * roughly 500ms per binding, so 600 gives headroom without being arbitrary.
+ *
+ * The flat 8s was the actual defect: it sits *inside* the observed range for
+ * bound stories, so the same command covered 17 of 18 stories on one run and 18
+ * on the next with nothing changed. Timing-dependent coverage is the worst kind —
+ * it is reported honestly, but a designer comparing against a baseline sees a
+ * lower drift total with no visible cause.
+ */
+export const BULK_BUDGET_PER_BINDING_MS = 600;
+
+/**
+ * Per-story ceiling, scaled by how much the story actually has to do.
+ *
+ * `bindings` is the number of declared child **and** state bindings: each is one
+ * more element to snapshot and one more Figma node to resolve. Absent or zero
+ * gives exactly the previous numbers, so this can only ever *raise* a budget —
+ * nothing that passed before can start timing out because of this change.
+ */
+export function bulkBudgetMs(dualMode: boolean, bindings = 0): number {
+  const base = dualMode ? BULK_STORY_BUDGET_DUAL_MS : BULK_STORY_BUDGET_MS;
+  // `bindings` arrives over the channel, so it can be anything. `Math.trunc(NaN)`
+  // is NaN and `Math.max(0, NaN)` is NaN, which would yield a NaN budget — and a
+  // NaN timeout neither fires nor holds. Coerce to 0 and fall back to the base.
+  const count = Number.isFinite(bindings) ? Math.max(0, Math.trunc(bindings)) : 0;
+  const extra = count * BULK_BUDGET_PER_BINDING_MS;
+  // Dual mode measures every binding twice, so its per-binding cost is doubled
+  // for the same reason its base is.
+  return base + (dualMode ? extra * 2 : extra);
 }
 
 /**

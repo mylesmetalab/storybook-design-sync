@@ -47,7 +47,13 @@ export interface RunBulkOptions<R> {
   /** Check one story. Rejects on failure. */
   check: (storyId: string) => Promise<R>;
   /** Per-story wall budget, covering per-story work only. */
-  budgetMs: number;
+  /**
+   * Per-story ceiling. A function is resolved per story, so a run can size each
+   * story by the work it has rather than applying one number to all of them —
+   * a flat budget sat inside the observed duration range for stories with child
+   * bindings, making coverage depend on timing (#72).
+   */
+  budgetMs: number | ((storyId: string) => number);
   /**
    * Called when a story's budget expires, so the caller can drop whatever state
    * it was holding for the in-flight check (the manager clears its pending
@@ -86,9 +92,11 @@ export async function runBulkCheck<R>(opts: RunBulkOptions<R>): Promise<Array<Bu
     const startedAt = now();
     let outcome: BulkStoryOutcome<R>;
     try {
+      const budgetMs =
+        typeof opts.budgetMs === "function" ? opts.budgetMs(storyId) : opts.budgetMs;
       const report = await withBudget(opts.check(storyId), {
-        budgetMs: opts.budgetMs,
-        message: timeoutMessage(storyId, opts.budgetMs),
+        budgetMs,
+        message: timeoutMessage(storyId, budgetMs),
         onExpired: () => opts.onBudgetExpired?.(storyId),
         setTimer,
         clearTimer,

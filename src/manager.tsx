@@ -53,7 +53,12 @@ import {
 import { driftedSiblings } from "./property-families.js";
 import { planBulkNavigation, runBulkCheck, type WarmOutcome } from "./bulk-run.js";
 import { variantScopeFor, type SiblingStoryRows } from "./variant-scope.js";
-import { coverageLabel, summarizeBulk, type BulkSummaryRow } from "./bulk-summary.js";
+import {
+  coverageLabel,
+  exclusionNote,
+  summarizeBulk,
+  type BulkSummaryRow,
+} from "./bulk-summary.js";
 import {
   bulkBudgetMs,
   panelBudgetMs,
@@ -594,7 +599,14 @@ const Panel: React.FC<{ active: boolean }> = ({ active }) => {
           alreadyRendered: plan.get(storyId) === true,
         }),
       // Dual-mode runs take ~2× as long (two snapshots + two engine passes).
-      budgetMs: bulkBudgetMs(liveCheckOptions.get().dualMode),
+      // Per story, sized by its declared bindings (#72) — a flat budget sat inside
+      // the observed duration range for bound stories, so coverage depended on
+      // timing and the same click covered 17 of 18 stories on one run, 18 on the next.
+      budgetMs: (storyId) =>
+        bulkBudgetMs(
+          liveCheckOptions.get().dualMode,
+          stories.find((s) => s.storyId === storyId)?.bindings ?? 0,
+        ),
       onBudgetExpired: () => {
         // Drop the resolver for the abandoned check so a late report can't be
         // mistaken for the next story's.
@@ -1379,6 +1391,17 @@ function renderGroups(
               <th colSpan={5} style={styles.groupHeader}>
                 {group.selector === undefined ? (
                   <>Story root</>
+                ) : group.selector.startsWith(":") ? (
+                  // A forced state is a CONDITION on the story root, not a child
+                  // element. Rendering it in the same position as
+                  // `[data-slot=title]` puts `:hover` in a list of element
+                  // selectors and invites the reader to look for a `:hover` child
+                  // that cannot exist.
+                  <>
+                    Story root · <code>{group.selector}</code> forced
+                    {group.nodeName && <span style={styles.muted}> → {group.nodeName}</span>}
+                    {group.nodeId && <span style={styles.muted}> · node {group.nodeId}</span>}
+                  </>
                 ) : (
                   <>
                     <code>{group.selector}</code>
@@ -2140,6 +2163,26 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
   onPreviewAll,
   onApplyAllForReal,
 }) => {
+  /**
+   * Which summary rows are expanded to show the run's own rows (#70).
+   *
+   * The bulk run already holds a full `DriftReport` per story — the data was
+   * never lost, only unreachable. Before this, clicking a story navigated to it
+   * and left an empty panel, so seeing four drift rows you had just been told
+   * about meant re-running a per-story check. That is not free: explicit checks
+   * deliberately refetch, so it cost a Figma round trip every time, and on a slow
+   * story could time out.
+   *
+   * A Set, not a single id, because comparing two stories was the other half of
+   * the complaint — with one-at-a-time you are back to a round trip each way.
+   */
+  const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(new Set());
+  const toggle = (storyId: string): void =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(storyId)) next.add(storyId);
+      return next;
+    });
   // One arithmetic source (`bulk-summary.ts`) for what the run covered and what it
   // found. It counts a timed-out story as timed out, not as checked — the old
   // header said `10/10 stories` over a run where one story produced no rows at
@@ -2218,6 +2261,17 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
             </>
           )}
         </span>
+        {/*
+          #72: `coverageLabel` says how many stories were checked, but not that the
+          totals beside it therefore exclude the rest. A designer comparing against
+          a baseline saw 34 become 32 with no visible cause — the two missing rows
+          belonged to a story that had timed out. Only rendered when the run is
+          actually incomplete.
+        */}
+        {(() => {
+          const note = exclusionNote(total);
+          return note ? <div style={styles.exclusionNote}>{note}</div> : null;
+        })()}
         <span style={{ marginLeft: 12, display: "inline-flex", gap: 6 }}>
           <button
             style={styles.button}
@@ -2308,9 +2362,30 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
           </tr>
         </thead>
         <tbody>
-          {bulk.rows.map((r) => (
+          {bulk.rows.flatMap((r) => [
             <tr key={r.storyId}>
               <td style={styles.td}>
+                {r.report ? (
+                  <button
+                    type="button"
+                    onClick={() => toggle(r.storyId)}
+                    aria-expanded={expanded.has(r.storyId)}
+                    title={
+                      expanded.has(r.storyId)
+                        ? "Hide this story's rows"
+                        : "Show this story's rows from this run — no re-check needed"
+                    }
+                    style={styles.disclosure}
+                  >
+                    {expanded.has(r.storyId) ? "▾" : "▸"}
+                  </button>
+                ) : (
+                  // No report: timed out, errored, or still running. A disclosure
+                  // that opens onto nothing is worse than none.
+                  <span style={styles.disclosurePlaceholder} />
+                )}
+                {/* The link still navigates — reading a report and rendering the
+                    story are different jobs, and the designer wants both. */}
                 <a
                   href="#"
                   onClick={(e) => {
@@ -2386,8 +2461,39 @@ const BulkSummary: React.FC<BulkSummaryProps> = ({
                   </span>
                 )}
               </td>
-            </tr>
-          ))}
+            </tr>,
+            ...(expanded.has(r.storyId) && r.report
+              ? [
+                  <tr key={`${r.storyId}__rows`}>
+                    <td colSpan={7} style={styles.expandedCell}>
+                      {/*
+                        Says which run these rows came from, because they are
+                        cached bulk output and not a fresh check — the same
+                        stale-report hazard that made an unstamped verdict a bug
+                        elsewhere.
+                      */}
+                      <div style={styles.expandedNote}>
+                        Rows from this <strong>Check all</strong> run, started{" "}
+                        {new Date(bulk.startedAt).toLocaleTimeString()}. Not re-fetched — press{" "}
+                        <strong>Check drift</strong> on the story for a fresh read.
+                      </div>
+                      <DiffTable
+                        report={r.report}
+                        // Deliberately false regardless of the project's setting:
+                        // these rows are a point-in-time copy, and applying against
+                        // a cached report is exactly the stale-`match` failure this
+                        // project has already paid for once.
+                        applyEnabled={false}
+                        fixContext={{ filePaths: [] }}
+                        applyResults={{}}
+                        onApply={() => {}}
+                        onUndo={() => {}}
+                      />
+                    </td>
+                  </tr>,
+                ]
+              : []),
+          ])}
         </tbody>
       </table>
     </div>
@@ -2683,6 +2789,32 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 11,
   },
   storyLink: { color: "#1f2937", textDecoration: "none" },
+  // #70: a disclosure per summary row. Deliberately quiet — the story id stays
+  // the primary target, and the triangle is an affordance beside it, not a
+  // competing control.
+  disclosure: {
+    background: "none",
+    border: "none",
+    cursor: "pointer",
+    padding: "0 6px 0 0",
+    color: "#7a7a7a",
+    fontSize: 10,
+    lineHeight: 1,
+  } as React.CSSProperties,
+  /** Keeps the story ids aligned when a row has no report to expand. */
+  disclosurePlaceholder: { display: "inline-block", width: 16 } as React.CSSProperties,
+  expandedCell: { padding: "0 8px 12px 24px", background: "#fbfbfb" } as React.CSSProperties,
+  exclusionNote: {
+    fontSize: 11,
+    fontWeight: 400,
+    color: "#92610a",
+    marginTop: 4,
+  } as React.CSSProperties,
+  expandedNote: {
+    fontSize: 11,
+    color: "#525252",
+    padding: "8px 0 6px",
+  } as React.CSSProperties,
   checkboxLabel: { display: "flex", alignItems: "center", gap: 4, color: "#525252", fontSize: 12 },
   applyButtons: { display: "flex", flexDirection: "column", gap: 4 },
   applyButtonGroup: { display: "flex", flexDirection: "column", gap: 2 },

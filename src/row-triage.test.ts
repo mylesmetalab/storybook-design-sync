@@ -1312,6 +1312,32 @@ describe("countRowStatuses — the summary counts what the table shows", () => {
     expect(countRowStatuses(rows).unverified).toBe(1);
   });
 
+  /**
+   * #108 — the `copy` placeholder heuristic is a SECOND source of
+   * `status: "advisory"`, and it carries no `nameDivergence` (that field is
+   * about token names, not copy). Before this it fell into the same
+   * "missing nameDivergence → unverified" fallback as a stale token-binding
+   * cache, and `bindingAdvisory` would even hand it the wrong "name differs"
+   * label. It must count as `advisory`, sort at rank 3 (no drift, but worth
+   * seeing), and never carry a name-divergence label.
+   */
+  it("counts a copy-placeholder advisory as advisory, not unverified, and gives it no name-divergence label", () => {
+    const row: GroupedRow = {
+      kind: "other",
+      diff: dim({
+        kind: "copy",
+        property: "text",
+        status: "advisory",
+        codeValue: "Save changes?",
+        figmaValue: "Text Heading",
+        note: "Figma's text repeats its own layer name — read as placeholder copy (heuristic, #108).",
+      }),
+    };
+    expect(countRowStatuses([row])).toEqual({ ...EMPTY_STATUS_COUNTS, advisory: 1 });
+    expect(rowRank(row)).toBe(3);
+    expect(bindingAdvisory(row)).toBeNull();
+  });
+
   it("is empty for an empty report", () => {
     expect(countRowStatuses([])).toEqual(EMPTY_STATUS_COUNTS);
   });

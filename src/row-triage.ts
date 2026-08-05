@@ -212,6 +212,12 @@ export function rowHasDrift(row: GroupedRow): boolean {
  * The panel reads it here so the row's verdict, the tallies and the table order
  * all say the same thing — the specific inconsistency issue #57 reported was a
  * row whose status said drift while its (absent) fix button said otherwise.
+ *
+ * Gated to `token-binding` specifically: `status: "advisory"` has a second
+ * source since #108 (the `copy` dimension's placeholder heuristic), and that
+ * one has no token names to report — it would otherwise get this function's
+ * "name differs" wording, which is simply false for it. `countRowStatuses`
+ * and `rowRank` read `status` directly for that case rather than through here.
  */
 export interface BindingAdvisory {
   /** `"value-matched"` — values agree, spelling differs. `"unverified"` — no value comparison. */
@@ -226,7 +232,7 @@ export interface BindingAdvisory {
 
 export function bindingAdvisory(row: GroupedRow): BindingAdvisory | null {
   const diff = row.kind === "token" ? row.binding : row.diff;
-  if (!diff || diff.status !== "advisory") return null;
+  if (!diff || diff.status !== "advisory" || diff.kind !== "token-binding") return null;
   const kind: NameDivergenceKind = diff.nameDivergence ?? "unverified";
   return {
     kind,
@@ -259,6 +265,23 @@ export const EMPTY_STATUS_COUNTS: StatusCounts = {
 };
 
 /**
+ * Which bucket an `"advisory"`-status diff falls in: real information
+ * (`"advisory"`) or an ambiguous claim with nothing behind it (`"unverified"`).
+ *
+ * `copy` is the one dimension whose advisory (#108's placeholder heuristic)
+ * carries no `nameDivergence` — it isn't a token-name question — and it is
+ * never ambiguous the way a `token-binding` row with a missing field can be
+ * (a stale cached report, or a future advisory source that hasn't said which
+ * kind it is), so it counts as `advisory` outright. Every other kind keeps the
+ * conservative fallback: missing `nameDivergence` counts as unverified, the
+ * weaker claim winning rather than the stronger one.
+ */
+function advisoryBucket(d: DimensionDiff): "advisory" | "unverified" {
+  if (d.kind === "copy") return "advisory";
+  return d.nameDivergence === "value-matched" ? "advisory" : "unverified";
+}
+
+/**
  * Tally a report's comparisons by what they actually found.
  *
  * The single source of the panel's `149 match · 89 drift · 75 flag-only` line and
@@ -278,11 +301,7 @@ export function countStatuses(diffs: readonly DimensionDiff[]): StatusCounts {
         counts.drift++;
         break;
       case "advisory":
-        // Missing `nameDivergence` counts as unverified: the weaker claim wins,
-        // never the stronger one (an older cached report, or a future advisory
-        // that hasn't said which it is, must not be tallied as "values agree").
-        if (d.nameDivergence === "value-matched") counts.advisory++;
-        else counts.unverified++;
+        counts[advisoryBucket(d)]++;
         break;
       case "flag-only":
         counts.flagOnly++;
@@ -318,20 +337,17 @@ export function countStatuses(diffs: readonly DimensionDiff[]): StatusCounts {
  */
 export function countRowStatuses(rows: readonly GroupedRow[]): StatusCounts {
   const counts: StatusCounts = { ...EMPTY_STATUS_COUNTS };
-  const countAdvisory = (kind: NameDivergenceKind | undefined): void => {
-    // Same rule as `countStatuses`: missing `nameDivergence` is unverified, so
-    // the weaker claim wins rather than the stronger one.
-    if (kind === "value-matched") counts.advisory++;
-    else counts.unverified++;
-  };
   for (const row of rows) {
     if (rowHasDrift(row)) {
       counts.drift++;
       continue;
     }
+    // `bindingAdvisory` only ever fires for `token-binding` (see its guard) —
+    // every other advisory source (e.g. `copy`'s placeholder heuristic, #108)
+    // falls through to the `primary.status` switch below, bucketed by kind.
     const nameDivergence = bindingAdvisory(row);
     if (nameDivergence) {
-      countAdvisory(nameDivergence.kind);
+      counts[nameDivergence.kind === "value-matched" ? "advisory" : "unverified"]++;
       continue;
     }
     // What the row's verdict pill reads: the value comparison, or the binding
@@ -342,7 +358,7 @@ export function countRowStatuses(rows: readonly GroupedRow[]): StatusCounts {
         counts.match++;
         break;
       case "advisory":
-        countAdvisory(primary.nameDivergence);
+        counts[advisoryBucket(primary)]++;
         break;
       case "flag-only":
         counts.flagOnly++;
@@ -725,12 +741,16 @@ export function rowRank(row: GroupedRow): number {
   if (finding === "unbound-figma-value") return 0;
   if (finding === "value-drift") return 1;
   if (finding === "judgement") return 2;
-  if (bindingAdvisory(row)) return 3;
+  // `"advisory"` covers this directly — a name-only binding divergence and the
+  // `copy` placeholder heuristic (#108) are both "no drift, but read me", and
+  // neither needs `bindingAdvisory` (token-binding only) to be counted here.
   const statuses =
     row.kind === "token"
       ? [row.value?.status, row.binding?.status]
       : [row.diff.status];
-  return statuses.some((s) => s === "flag-only" || s === "unresolved") ? 3 : 4;
+  return statuses.some((s) => s === "flag-only" || s === "unresolved" || s === "advisory")
+    ? 3
+    : 4;
 }
 
 /**

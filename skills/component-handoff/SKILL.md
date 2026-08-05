@@ -1,7 +1,7 @@
 ---
 name: component-handoff
 description: Generate a Storybook-ready coded component from a handoff-ready Figma component — code, stories, and design-sync registry entry in one pass. Use when a designer hands off a component, or when asked to "bring this Figma component into Storybook".
-revised: 2026-08-05
+revised: 2026-08-06
 ---
 
 # component-handoff
@@ -18,7 +18,42 @@ revised: 2026-08-05
 ## Pipeline
 
 1. **Read the Figma component** (variants, props, token bindings, structure, text) via the Figma MCP tools (`get_metadata`, `get_design_context`, `get_variable_defs`).
+
+   **To enumerate a component set's sibling variants, walk the file — do NOT use `/component_sets`.**
+   `GET /v1/files/<key>/component_sets` and `/components` list only what is **published as a
+   library**. On an unpublished file they return **zero entries for every component**, which
+   is not the same fact as "this component has no variants". An instance also carries no
+   `componentSetId`, so a `GET /nodes` on the instance cannot reach its siblings either.
+
+   What works, on any file you can read:
+
+   ```
+   GET /v1/files/<key>            -> walk for type === "COMPONENT_SET"
+                                  -> componentPropertyDefinitions[axis].variantOptions
+                                  -> each child COMPONENT's fills[0].boundVariables.color.id
+                                  -> resolve ids against /v1/files/<key>/variables/local
+   ```
+
+   This has now cost two separate sessions the same way. In the Dialog handoff it produced
+   `hover:bg-accent` as an admitted "best-effort guess" for Icon Button, while the design's
+   real tokens — `Background/Default/Secondary Hover` and `Background/Disabled/Default` —
+   were one file read away. **A guess in shipped code is the failure this whole skill exists
+   to prevent**, and it is not redeemed by being labelled a guess.
+
+   **A failed read does not establish an absence.** This is a sharper form of the
+   `notInFigma` rule below, and the Dialog contract broke it while appearing to comply: it
+   cited `GET /component_sets returned zero entries` as evidence that variants could not be
+   enumerated. The citation was real and the conclusion was false, which is worse than no
+   citation at all — a claim carrying a tool call reads as settled and stops the next person
+   looking. Before writing any "could not be read", ask: **would this read have found the
+   thing if it existed?** If the answer is no, it is evidence about the endpoint, not about
+   the design.
 2. **Extract the spec** — record what the component *declares*: props/variants, token per property, slots, required states. Write it as a sidecar `contracts/<component>.spec.json` (variants, tokenBindings, slots keys) next to the code. It documents what the component promised at handoff, and `component-update` diffs against it later.
+
+   **`notInFigma` — every entry cites a read that WOULD have found the thing if it existed.**
+   Not merely "a read". A read that failed for an unrelated reason — wrong endpoint,
+   unpublished library, missing scope — establishes nothing about the design, and citing it
+   dresses a gap up as a finding. See step 1.
 
    **`notInFigma` — every entry cites the read that established the absence.** This key records what the design deliberately doesn't specify, so an unchecked guess in it is worse than an omission: it forecloses the lookup that would correct it. Two such claims ("SDS defines no dark mode", "SDS has no dark brand border") were both false and licensed 24 invented values, 18 of them wrong, and they survived review *because* they read as settled findings. Write the tool call and node/collection you read — `"min-width": "not bound; get_variable_defs on 2142:11380, 2026-07-31"` — or leave the entry out. Same rule for any code comment asserting the design lacks something.
    Note the spec's `tokenBindings` also drives the fix prompt's contract read: a token bound to several slots is named in the prompt as one decision, so recording the pair here is what stops a later fix splitting it.

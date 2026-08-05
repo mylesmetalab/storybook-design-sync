@@ -268,16 +268,17 @@ export const EMPTY_STATUS_COUNTS: StatusCounts = {
  * Which bucket an `"advisory"`-status diff falls in: real information
  * (`"advisory"`) or an ambiguous claim with nothing behind it (`"unverified"`).
  *
- * `copy` is the one dimension whose advisory (#108's placeholder heuristic)
- * carries no `nameDivergence` — it isn't a token-name question — and it is
- * never ambiguous the way a `token-binding` row with a missing field can be
- * (a stale cached report, or a future advisory source that hasn't said which
- * kind it is), so it counts as `advisory` outright. Every other kind keeps the
- * conservative fallback: missing `nameDivergence` counts as unverified, the
+ * Two positive signals count as real information: a `token-binding` row whose
+ * value comparison matched (`nameDivergence: "value-matched"`), or a diff that
+ * names its own reason (`advisoryReason` — the `copy` placeholder heuristic,
+ * #108, or the `rounded-full` idiom, #107). Neither of those is ambiguous the
+ * way a row with NEITHER field is: a stale cached report from before either
+ * field existed, or a future advisory source that hasn't said which kind it
+ * is. Absence therefore stays the conservative fallback — unverified, the
  * weaker claim winning rather than the stronger one.
  */
 function advisoryBucket(d: DimensionDiff): "advisory" | "unverified" {
-  if (d.kind === "copy") return "advisory";
+  if (d.advisoryReason !== undefined) return "advisory";
   return d.nameDivergence === "value-matched" ? "advisory" : "unverified";
 }
 

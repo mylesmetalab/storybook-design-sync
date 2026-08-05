@@ -1244,12 +1244,30 @@ class FigmaRestEngine implements Engine {
       if (figmaPx === null) continue;
       const codeValue = snapshot.styles[cssProp];
       const codePx = parsePx(codeValue);
-      const status: DimensionDiff["status"] =
-        codePx !== null && Math.abs(codePx - figmaPx) < 0.5 ? "match" : "drift";
+      const codeIsFullyRounded = isFullyRoundedRadiusIdiom(codePx);
+      let status: DimensionDiff["status"];
+      let note: string | undefined;
+      if (codeIsFullyRounded && figmaPx > 0) {
+        // #107 — `rounded-full` (`calc(infinity * 1px)`) always renders as
+        // round as the element's own box allows, which is exactly what a
+        // concrete literal meant to be "fully rounded" for one instance's
+        // size also renders as. The addon cannot measure the box to CONFIRM
+        // Figma's literal is that maximal value rather than a genuinely
+        // partial corner, so this is a heuristic — advisory, not a claimed
+        // match — and the note says so.
+        status = "advisory";
+        note =
+          `Code specifies an unbounded "fully rounded" radius (\`rounded-full\` / \`calc(infinity * 1px)\`), ` +
+          `which always renders as round as the element's own size allows. Figma's ${figmaPx}px is a literal ` +
+          `for one instance's size, likely the same "fully rounded" intent via a different mechanism — not ` +
+          `verified pixel-for-pixel (heuristic, #107).`;
+      } else {
+        status = codePx !== null && Math.abs(codePx - figmaPx) < 0.5 ? "match" : "drift";
+      }
       const dim: DimensionDiff = {
         kind: "token-value",
         property: cssProp,
-        codeValue: codeValue ?? null,
+        codeValue: codeIsFullyRounded ? FULLY_ROUNDED_RADIUS_LABEL : (codeValue ?? null),
         figmaValue: tokenName ? `${figmaPx}px (token: ${tokenName})` : `${figmaPx}px`,
         status,
       };
@@ -1257,6 +1275,10 @@ class FigmaRestEngine implements Engine {
       else if (status === "drift") {
         dim.note =
           "Figma corner has no variable binding; bind it to a radius token in Figma to enable auto-apply.";
+      }
+      if (note) {
+        dim.note = note;
+        dim.advisoryReason = "radius-idiom";
       }
       out.push(dim);
     }
@@ -2091,10 +2113,13 @@ class FigmaRestEngine implements Engine {
       ];
     }
 
-    const mismatchStatus = (figmaText: string): { status: DimensionDiff["status"]; note?: string } =>
+    const mismatchStatus = (
+      figmaText: string,
+    ): { status: DimensionDiff["status"]; note?: string; advisoryReason?: "copy-placeholder" } =>
       placeholders.get(figmaText)
         ? {
             status: "advisory",
+            advisoryReason: "copy-placeholder",
             note: `Figma's text repeats its own layer name (or its instance's name) — read as placeholder copy, not a specification (heuristic, #108).`,
           }
         : { status: "drift" };
@@ -2532,9 +2557,27 @@ function pickBorderEdge(styles: Record<string, string>): "top" | "right" | "bott
 
 function parsePx(value: string | undefined): number | null {
   if (!value) return null;
-  const m = /^(-?\d+(?:\.\d+)?)\s*px$/.exec(value);
+  // The trailing `(?:e[+-]?\d+)?` is for `calc(infinity * 1px)` — Chromium's
+  // getComputedStyle resolves it to something like `3.35544e+07px`. No other
+  // px value in this codebase's comparisons is ever written in scientific
+  // notation, so widening the regex to accept it costs nothing elsewhere.
+  const m = /^(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s*px$/i.exec(value);
   return m && m[1] ? Number(m[1]) : null;
 }
+
+/**
+ * No legitimate design radius is anywhere near this large — it exists only to
+ * recognise `calc(infinity * 1px)` (~2^25px as Chromium resolves it) and
+ * Tailwind's `rounded-full`, which computes to it. See #107.
+ */
+const FULLY_ROUNDED_RADIUS_PX_THRESHOLD = 10_000;
+
+function isFullyRoundedRadiusIdiom(px: number | null): boolean {
+  return px !== null && px >= FULLY_ROUNDED_RADIUS_PX_THRESHOLD;
+}
+
+/** Display label for the `rounded-full` idiom — scientific notation tells a reader nothing (#107). */
+const FULLY_ROUNDED_RADIUS_LABEL = "fully rounded (pill)";
 
 function rgbaToCss(c: { r: number; g: number; b: number; a?: number }): string {
   const r = Math.round(c.r * 255);

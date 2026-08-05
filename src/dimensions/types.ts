@@ -91,6 +91,24 @@ export interface DimensionDiff {
    */
   nameDivergence?: NameDivergenceKind;
   /**
+   * Why this row is `advisory` for a reason OTHER than a `token-binding` name
+   * divergence — `nameDivergence` (above) is that one's own signal, and it
+   * stays the only field row-triage's counting trusts for "advisory, not
+   * unverified" on a `token-binding` row.
+   *
+   *  - `"copy-placeholder"` — the `copy` dimension's placeholder heuristic
+   *    (#108): Figma's text echoes its own layer or instance name.
+   *  - `"radius-idiom"` — the `rounded-full` / `calc(infinity * 1px)`
+   *    idiom against a finite Figma literal (#107): different mechanism,
+   *    likely the same rendered "fully rounded" intent.
+   *
+   * Absence on an `advisory`-status row is deliberately still read as
+   * unverified by `advisoryBucket` (row-triage.ts) — the same forward-compat
+   * backstop `nameDivergence` already had, now covering a report cached by an
+   * addon version that predates this field too.
+   */
+  advisoryReason?: "copy-placeholder" | "radius-idiom";
+  /**
    * On a `token-binding` row whose names **were** reconciled: which mechanism did
    * it. `"alias"` = an explicit `tokenAliases` entry (declared by the project, so
    * trustworthy); `"heuristic"` = the two spellings collapse to the same

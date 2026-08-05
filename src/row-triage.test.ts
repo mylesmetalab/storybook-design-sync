@@ -1315,11 +1315,12 @@ describe("countRowStatuses — the summary counts what the table shows", () => {
   /**
    * #108 — the `copy` placeholder heuristic is a SECOND source of
    * `status: "advisory"`, and it carries no `nameDivergence` (that field is
-   * about token names, not copy). Before this it fell into the same
-   * "missing nameDivergence → unverified" fallback as a stale token-binding
-   * cache, and `bindingAdvisory` would even hand it the wrong "name differs"
-   * label. It must count as `advisory`, sort at rank 3 (no drift, but worth
-   * seeing), and never carry a name-divergence label.
+   * about token names, not copy) — instead it names itself via
+   * `advisoryReason: "copy-placeholder"`. Before this existed, it fell into
+   * the same "missing nameDivergence → unverified" fallback as a stale
+   * token-binding cache, and `bindingAdvisory` would even hand it the wrong
+   * "name differs" label. It must count as `advisory`, sort at rank 3 (no
+   * drift, but worth seeing), and never carry a name-divergence label.
    */
   it("counts a copy-placeholder advisory as advisory, not unverified, and gives it no name-divergence label", () => {
     const row: GroupedRow = {
@@ -1328,6 +1329,7 @@ describe("countRowStatuses — the summary counts what the table shows", () => {
         kind: "copy",
         property: "text",
         status: "advisory",
+        advisoryReason: "copy-placeholder",
         codeValue: "Save changes?",
         figmaValue: "Text Heading",
         note: "Figma's text repeats its own layer name — read as placeholder copy (heuristic, #108).",
@@ -1336,6 +1338,29 @@ describe("countRowStatuses — the summary counts what the table shows", () => {
     expect(countRowStatuses([row])).toEqual({ ...EMPTY_STATUS_COUNTS, advisory: 1 });
     expect(rowRank(row)).toBe(3);
     expect(bindingAdvisory(row)).toBeNull();
+  });
+
+  /**
+   * #107 — the `rounded-full` idiom against a finite Figma literal is a
+   * THIRD source of `status: "advisory"`, this time on a `token-value` diff
+   * (grouped as a `"token"` row, not `"other"`) — the same kind a hypothetical
+   * stale-cache/future-source `advisory` row would carry (see the test above
+   * this one). Only `advisoryReason: "radius-idiom"` tells them apart; kind
+   * alone can't, which is why `advisoryBucket` keys off the field.
+   */
+  it("counts a radius-idiom advisory as advisory too, on a token-kind row", () => {
+    const rows = groupDimensions([
+      dim({
+        kind: "token-value",
+        property: "border-top-left-radius",
+        status: "advisory",
+        advisoryReason: "radius-idiom",
+        codeValue: "fully rounded (pill)",
+        figmaValue: "32px",
+      }),
+    ]);
+    expect(countRowStatuses(rows)).toEqual({ ...EMPTY_STATUS_COUNTS, advisory: 1 });
+    expect(rowRank(rows[0]!)).toBe(3);
   });
 
   it("is empty for an empty report", () => {

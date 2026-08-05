@@ -26,6 +26,7 @@ import { isTextOwnedProperty, ownsRenderedText } from "../applicability.js";
 import { PersistentCache } from "../cache.js";
 import { isTransparentColor, normalizeColor } from "./color-normalize.js";
 import {
+  dropInvisibleShadows,
   figmaEffectsToShadows,
   formatShadows,
   parseCssBoxShadow,
@@ -1429,35 +1430,46 @@ class FigmaRestEngine implements Engine {
       const code = parseCssBoxShadow(codeValue);
       // Any excluded effect shape, an unreadable Figma side, or an unparseable
       // code side means there is no faithful comparison to make — emit nothing
-      // rather than a verdict about a shadow we only partly understand. Both
-      // sides at "no shadow" carries no information either.
-      if (
-        figma !== null &&
-        figma.excluded.length === 0 &&
-        code !== null &&
-        !(figma.shadows.length === 0 && code.length === 0)
-      ) {
-        // The bound `effects` variable's name, for display only.
-        let tokenName: string | undefined;
-        const effectAlias = pickAlias(
-          node.boundVariables?.effects as FigmaVariableAlias | FigmaVariableAlias[] | undefined,
-        );
-        if (effectAlias && variables) {
-          const v = variables.meta.variables[effectAlias.id];
-          if (v) tokenName = v.name;
+      // rather than a verdict about a shadow we only partly understand.
+      if (figma !== null && figma.excluded.length === 0 && code !== null) {
+        // Drop layers that are fully transparent — they paint nothing, so
+        // comparing them is the wrong question (addon#106: Tailwind v4 fills
+        // every unused inset-ring/ring/shadow slot with `0 0 #0000` rather
+        // than omitting it, turning two real shadows into six reported ones).
+        const figmaDropped = dropInvisibleShadows(figma.shadows);
+        const codeDropped = dropInvisibleShadows(code);
+        const figmaShadows = figmaDropped.visible;
+        const codeShadows = codeDropped.visible;
+        // Both sides at "no shadow" carries no information either.
+        if (!(figmaShadows.length === 0 && codeShadows.length === 0)) {
+          // The bound `effects` variable's name, for display only.
+          let tokenName: string | undefined;
+          const effectAlias = pickAlias(
+            node.boundVariables?.effects as FigmaVariableAlias | FigmaVariableAlias[] | undefined,
+          );
+          if (effectAlias && variables) {
+            const v = variables.meta.variables[effectAlias.id];
+            if (v) tokenName = v.name;
+          }
+          const figmaShadow = formatShadows(figmaShadows);
+          const status: DimensionDiff["status"] = shadowsEqual(figmaShadows, codeShadows)
+            ? "match"
+            : "drift";
+          const totalDropped = figmaDropped.droppedCount + codeDropped.droppedCount;
+          const note =
+            totalDropped > 0
+              ? `${totalDropped} fully-transparent placeholder layer${totalDropped === 1 ? "" : "s"} dropped before comparison (renders nothing — e.g. Tailwind v4's unused inset-ring/ring/shadow slots default to \`0 0 #0000\`).`
+              : undefined;
+          out.push({
+            kind: "token-value",
+            property: "box-shadow",
+            codeValue: codeValue ?? null,
+            figmaValue: tokenName ? `${figmaShadow} (token: ${tokenName})` : figmaShadow,
+            status,
+            ...(tokenName ? { tokenName } : {}),
+            ...(note ? { note } : {}),
+          });
         }
-        const figmaShadow = formatShadows(figma.shadows);
-        const status: DimensionDiff["status"] = shadowsEqual(figma.shadows, code)
-          ? "match"
-          : "drift";
-        out.push({
-          kind: "token-value",
-          property: "box-shadow",
-          codeValue: codeValue ?? null,
-          figmaValue: tokenName ? `${figmaShadow} (token: ${tokenName})` : figmaShadow,
-          status,
-          ...(tokenName ? { tokenName } : {}),
-        });
       }
     }
 

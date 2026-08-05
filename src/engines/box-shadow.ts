@@ -256,6 +256,33 @@ export function shadowsEqual(
   });
 }
 
+export interface DropInvisibleResult {
+  /** Layers with a real (non-transparent) colour, in their original order. */
+  visible: ParsedShadow[];
+  /** How many layers were dropped for painting nothing. */
+  droppedCount: number;
+}
+
+/**
+ * Drop shadow layers whose colour is fully transparent — they paint nothing,
+ * regardless of offset/blur/spread, so comparing them is the wrong question.
+ *
+ * This exists for Tailwind v4: `box-shadow` is composed from independent
+ * inset-ring/ring-offset/ring/shadow slots, and an unused slot is filled with
+ * `0 0 #0000` rather than omitted. A component with two real shadow layers
+ * therefore reports six through `getComputedStyle`, four of them a fixed
+ * placeholder — drift on every shadowed Tailwind v4 component, forever,
+ * because Figma only ever lists the two that render.
+ *
+ * Applied to both sides for symmetry (a transparent Figma effect is equally
+ * invisible), though the addon has only observed the code side producing
+ * these placeholders.
+ */
+export function dropInvisibleShadows(shadows: ParsedShadow[]): DropInvisibleResult {
+  const visible = shadows.filter((s) => s.color !== "transparent");
+  return { visible, droppedCount: shadows.length - visible.length };
+}
+
 function num(n: number): string {
   return `${Number(n.toFixed(3))}px`;
 }

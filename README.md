@@ -1116,7 +1116,11 @@ false promise.
 radii · all four border widths and colours · `gap` · text colour · font-size ·
 font-weight · font-family · line-height · letter-spacing · text-align ·
 text-transform · text-decoration · font-style · box-shadow (including
-`INNER_SHADOW` → `inset`) · `opacity` · **layout: `flex-direction`,
+`INNER_SHADOW` → `inset`; fully-transparent layers — e.g. Tailwind v4's unused
+inset-ring/ring/shadow slots, which default to `0 0 #0000` rather than being
+omitted — are dropped from both sides before comparison, since they render
+nothing; the row's note says how many were dropped, addon#106) · `opacity` ·
+**layout: `flex-direction`,
 `justify-content`, `align-items`, `flex-wrap`** · copy (text content) · Figma
 variant axes · Figma component properties (BOOLEAN, TEXT) · **every one of those
 again in a forced `:hover` / `:active` / `:focus` state, where the story declares

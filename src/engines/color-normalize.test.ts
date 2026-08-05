@@ -51,6 +51,24 @@ describe("normalizeColor — existing behaviour (regression)", () => {
     expect(normalizeColor("rgba(9, 8, 7, 0.5)")).toBe("rgba(9,8,7,0.5)");
   });
 
+  /**
+   * Figma's REST API hands back effect/paint alpha as a 32-bit float
+   * (`a: 0.05000000074505806` for an authored 5%), and `rgbaToCss` renders it
+   * verbatim. `toCanonical` already rounds alpha to 3 decimals for hex and
+   * oklch/oklab conversions — real box-shadow tokens (e.g. SDS's "Black/100"
+   * at 5%/10%) never took that path because they arrive as plain `rgba()`
+   * strings on BOTH sides, so this noise split an identical colour into two
+   * different ones and reported drift on a shadow that matched exactly.
+   */
+  it("rounds float noise on an already-legacy rgba() alpha, the same as hex/oklch get", () => {
+    expect(normalizeColor("rgba(12, 12, 13, 0.05000000074505806)")).toBe(
+      normalizeColor("rgba(12, 12, 13, 0.05)"),
+    );
+    expect(normalizeColor("rgba(12, 12, 13, 0.10000000149011612)")).toBe(
+      normalizeColor("rgba(12, 12, 13, 0.1)"),
+    );
+  });
+
   it("folds every fully-transparent spelling onto one sentinel", () => {
     expect(normalizeColor("rgba(0, 0, 0, 0)")).toBe("transparent");
     expect(normalizeColor("transparent")).toBe("transparent");

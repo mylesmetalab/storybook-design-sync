@@ -173,8 +173,9 @@ function printHelp(): void {
       "                                          beyond their root element. Repeatable; merges into any existing map.",
       "  design-sync register --story <id> --state \"<pseudo-state>=<nodeId>\" [--state …]",
       "                                          Declare which Figma node holds a pseudo-state's design.",
-      "                                          Repeatable; merges. NOT YET COMPARED — declaring is",
-      "                                          validated and safe, but no drift check reads these yet.",
+      "                                          Repeatable; merges. Compared as of v0.0.52, including",
+      "                                          per-mode under --both-modes; a state that cannot be forced",
+      "                                          is reported as not compared, never as a pass.",
       "                                          States: " + FORCEABLE_STATES.join(", "),
       "                                          A design's Error/Open/Checked state is a prop, not a pseudo-state —",
       "                                          bind it as its own story instead.",
@@ -647,8 +648,9 @@ async function registerStates(opts: RegisterOptions, storyId: string): Promise<n
       (opts.dryRun ? " (dry-run; nothing written)" : ""),
   );
   console.log(
-    `NOT YET COMPARED: no drift check reads "states" yet, so this declaration is inert for now. ` +
-      `It is validated and safe to commit — the comparison is being built against it.`,
+    `These are compared as of v0.0.52, in each mode when "Both modes" is on. A state the addon ` +
+      `cannot force — one styled through a component library's own \`data-*\` attribute — is ` +
+      `reported as not compared, with the reason, and never as a pass.`,
   );
   if (!opts.dryRun) {
     await saveRegistry(config.registryPath, updated, opts.cwd);

@@ -1346,11 +1346,22 @@ is undeterminable and nothing is said.
   TEXT node no background paint, so `background-color` is not compared against
   one — the code side reads transparent on any text element and the row could
   only ever be drift. The `color` comparison is where that fill belongs.
-- **Portalled components need an explicit target.** Radix and Base UI render
-  Dialog, Popover, Tooltip, Select and Dropdown outside `#storybook-root`. The
-  addon finds portalled content, but when both a trigger and a popup are
-  plausible it reports the ambiguity rather than guessing. Set
-  `parameters.designSync.target`.
+- **Portalled components usually need no configuration at all** (v0.0.62).
+  Radix and Base UI render Dialog, Popover, Tooltip, Select and Dropdown
+  outside `#storybook-root`. When exactly one candidate is plausible the
+  addon resolves it without help — including the common Base UI/Radix shape
+  where a backdrop and a popup are rendered as portalled siblings and both
+  carry an open-state signal: only the popup has element descendants of its
+  own (a title, a body, actions), which is a real, checkable difference, not
+  a guess. Ambiguity is still refused rather than guessed whenever it's
+  genuine — a plausible trigger in the root alongside the popup, or two open
+  overlays that both have their own content. Set
+  `parameters.designSync.target` for those cases. One coverage limit that
+  comes with this: a resolved root binds to exactly one Figma node, so a
+  backdrop's own Figma properties (background, blur) aren't covered by the
+  root comparison — bind it as a declared **child** instead (the registry's
+  `children` map), the same mechanism a Dialog's title/description/actions
+  already use.
 
 **Not detected at all.**
 

@@ -248,6 +248,73 @@ describe("resolveStoryRoot — ambiguity is reported, not guessed", () => {
     expect(r.candidates).toEqual(["div.a", "div.b"]);
   });
 
+  /**
+   * addon#106... no, #109's sibling — 2.1 in NEXT-WORK.md. Base UI's Dialog
+   * portal renders a backdrop and a popup as siblings, and BOTH carry
+   * `data-open` — the real shape that made the Dialog walkthrough refuse with
+   * a message naming two candidates a designer couldn't act on. The backdrop
+   * is decorative (no element children of its own); the popup is where the
+   * title, body and actions actually live. That is a real, checkable
+   * difference, not a guess, so exactly one candidate having descendants
+   * resolves it without `parameters.designSync.target`.
+   */
+  it("auto-resolves two portals when only one has any element descendants (backdrop + popup)", () => {
+    const doc = domOf(`
+      <div id="storybook-root"><button>Open</button></div>
+      <div role="presentation" data-open class="backdrop"></div>
+      <div role="dialog" data-open class="popup">
+        <h2 class="title">Save changes?</h2>
+        <p class="body">You have unsaved changes.</p>
+      </div>
+    `);
+    const r = resolveStoryRoot({ doc, storyId: "ui-dialog--open" });
+    expect(r.kind).toBe("found");
+    if (r.kind !== "found") return;
+    expect(r.via).toBe("portal");
+    expect(r.element.className).toBe("popup");
+  });
+
+  it("still refuses two portals that BOTH have descendants — genuine ambiguity", () => {
+    const doc = domOf(`
+      <div id="storybook-root"><button>Open</button></div>
+      <div role="dialog" data-open class="dialog"><h2>Title A</h2></div>
+      <div role="tooltip" data-open class="tooltip"><span>Tip B</span></div>
+    `);
+    const r = resolveStoryRoot({ doc, storyId: "ui-dialog--open" });
+    expect(r.kind).toBe("ambiguous");
+    if (r.kind !== "ambiguous") return;
+    expect(r.candidates).toHaveLength(2);
+  });
+
+  it("still refuses two portals that BOTH lack descendants — no way to prefer one", () => {
+    const doc = domOf(`
+      <div id="storybook-root"><button>Open</button></div>
+      <div role="presentation" data-open class="backdrop"></div>
+      <div role="tooltip" data-open class="empty-tooltip"></div>
+    `);
+    const r = resolveStoryRoot({ doc, storyId: "ui-dialog--open" });
+    expect(r.kind).toBe("ambiguous");
+    if (r.kind !== "ambiguous") return;
+    expect(r.candidates).toHaveLength(2);
+  });
+
+  it("the descendant-count tiebreak still yields to an in-root component match — stays ambiguous", () => {
+    const doc = domOf(`
+      <div id="storybook-root"><button class="dialog-trigger">Open</button></div>
+      <div role="presentation" data-open class="backdrop"></div>
+      <div role="dialog" data-open class="dialog-content"><h2>Title</h2></div>
+    `);
+    const r = resolveStoryRoot({ doc, storyId: "ui-dialog--open" });
+    expect(r.kind).toBe("ambiguous");
+    if (r.kind !== "ambiguous") return;
+    // Only the two PLAUSIBLE candidates (trigger + popup) are named — the
+    // backdrop was never in contention, so naming it would mislead.
+    expect(r.candidates).toEqual([
+      'button.dialog-trigger',
+      'div.dialog-content[role="dialog"][data-open]',
+    ]);
+  });
+
   it("a single portal with no in-root component match is NOT ambiguous", () => {
     // Nothing in the root answers to the story name, so the portal is the only
     // plausible target — resolve it rather than erroring.

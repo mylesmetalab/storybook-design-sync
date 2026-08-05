@@ -24,6 +24,18 @@
  *
  * Extracted from `preview.ts` so it can be unit-tested against a DOM without
  * importing Storybook's preview API (which opens a channel at module load).
+ *
+ * **A resolved root binds to exactly one Figma node — a coverage decision,
+ * not a limitation to lift** (2.1, NEXT-WORK.md). Resolving a Dialog to its
+ * popup (rather than the outer scrim/backdrop) means the backdrop's OWN Figma
+ * properties — its background, its blur — cannot be compared against this
+ * root. That gap is real, but the fix is the feature that already exists for
+ * it: a declared **child binding** (the registry's `children` map) pointed at
+ * the backdrop's own Figma node and a `[data-slot=backdrop]`-style selector,
+ * exactly like Dialog's title/description/actions are bound today. Letting
+ * the root itself bind two Figma nodes would mean two different elements
+ * answering to "the story," which is the ambiguity this file exists to
+ * refuse — so that was rejected, not left unconsidered.
  */
 
 /** Roots Storybook itself owns; portal candidates must live outside these. */
@@ -116,6 +128,17 @@ export function describeElement(el: Element): string {
     (role ? `[role="${role}"]` : "") +
     (el.hasAttribute("data-open") ? "[data-open]" : "")
   );
+}
+
+/**
+ * Whether an element renders anything of its own beyond itself — the real,
+ * checkable difference between a Dialog's popup (title, body, actions as DOM
+ * descendants) and its backdrop (a decorative paint layer with none). Used to
+ * break a multi-portal tie without guessing: a candidate with no element
+ * descendants at all cannot be "the component," only dressing around it.
+ */
+function hasElementDescendants(el: Element): boolean {
+  return el.querySelector("*") !== null;
 }
 
 function isInsideStorybookRoot(doc: Document, el: Element): boolean {
@@ -236,12 +259,19 @@ const DISAMBIGUATE =
  *   1. explicit `target` selector — whole document, first match wins;
  *   2. `[data-design-sync-target]` — whole document; more than one is ambiguous;
  *   3. portalled overlay content, when present:
- *      - exactly one portal and no component-segment match in the story root →
- *        the portal (this is the Dialog/Popover case: the root holds only the
- *        trigger);
+ *      - more than one portal, but exactly one has element descendants of its
+ *        own (2.1: Base UI/Radix render a backdrop and a popup as siblings,
+ *        both matching an overlay signature, but only the popup contains a
+ *        title/body/actions) → that one, narrowed as if it were the only
+ *        candidate — **not** ambiguous, this is a real, checkable difference;
+ *      - exactly one portal (after that narrowing) and no component-segment
+ *        match in the story root → the portal (the Dialog/Popover case: the
+ *        root holds only the trigger);
  *      - exactly one portal AND a component-segment match in the root → both are
- *        plausible, so **ambiguous**;
- *      - more than one portal → **ambiguous**;
+ *        plausible, so **ambiguous** (candidates are the trigger and the portal
+ *        only — a backdrop narrowed away above was never in contention, so
+ *        naming it would mislead);
+ *      - zero or more than one portal clearing the descendants bar → **ambiguous**;
  *   4. component-segment match inside the story root;
  *   5. deepest single-child walk from the story root.
  */
@@ -276,7 +306,16 @@ export function resolveStoryRoot(options: ResolveStoryRootOptions): StoryRootRes
   }
 
   const root = doc.getElementById("storybook-root");
-  const portals = findPortalledContent(doc);
+  const allPortals = findPortalledContent(doc);
+  // More than one portal used to refuse outright — the genuinely common shape
+  // (Base UI/Radix render a backdrop and a popup as siblings, both carrying
+  // `data-open`) named two candidates a designer could see but not act on.
+  // Exactly one of them having element descendants of its own (title, body,
+  // actions vs. a bare decorative div) is a real, checkable difference, not a
+  // guess — narrow to that one. Still refuse when zero or more than one
+  // candidate clears that bar; nothing here is inferred without evidence.
+  const withContent = allPortals.length > 1 ? allPortals.filter(hasElementDescendants) : allPortals;
+  const portals = withContent.length === 1 ? withContent : allPortals;
   const inRoot = root && storyId ? findByComponentSegment(root, storyId) : null;
 
   if (portals.length > 1) {

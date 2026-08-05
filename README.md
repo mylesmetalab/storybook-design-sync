@@ -1334,6 +1334,14 @@ is undeterminable and nothing is said.
   literal is genuinely the maximal value for that box rather than a smaller,
   deliberate corner) and the note says so; a Figma corner of exactly `0`
   against an unbounded code radius is a real disagreement and still drifts.
+- **A colour's alpha is rounded to 3 decimals even when it arrives as a plain
+  `rgb()`/`rgba()` string** (v0.0.61). Figma's REST API hands back paint/effect
+  alpha as a 32-bit float (`0.05000000074505806` for an authored 5%), and that
+  noise used to survive into the comparison verbatim whenever BOTH sides were
+  already legacy `rgba()` strings — the one shape that skipped the rounding hex
+  and oklch/oklab conversions already got. Found re-verifying the box-shadow
+  fix above against a real two-layer shadow token (SDS's "Black/100" at
+  5%/10%): the layers matched exactly and the row still reported drift.
 - **A TEXT node's fill is its text colour, never a background.** Figma gives a
   TEXT node no background paint, so `background-color` is not compared against
   one — the code side reads transparent on any text element and the row could

@@ -47,6 +47,27 @@ function toCanonical(c: Rgba): string {
   return `rgba(${c.r},${c.g},${c.b},${Number(c.a.toFixed(3))})`;
 }
 
+/**
+ * Figma's REST API hands back paint/effect alpha as a 32-bit float
+ * (`0.05000000074505806` for an authored 5%), and `rgbaToCss` renders it
+ * verbatim into an already-legacy `rgba()` string — the one shape `toCanonical`
+ * never got to round, because it only ran for hex/oklch/oklab conversions.
+ * Parsing a plain `rgb()`/`rgba()` string here and re-rendering it through the
+ * same `toCanonical` gives it the same 3-decimal alpha rounding those get.
+ */
+const LEGACY_RGBA_RE = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/;
+
+function parseLegacyRgba(value: string): Rgba | null {
+  const m = LEGACY_RGBA_RE.exec(value);
+  if (!m || !m[1] || !m[2] || !m[3]) return null;
+  return {
+    r: Number(m[1]),
+    g: Number(m[2]),
+    b: Number(m[3]),
+    a: m[4] !== undefined ? Number(m[4]) : 1,
+  };
+}
+
 /** Treat browser's "no opinion" color sentinels as equivalent. */
 export function isTransparentColor(value: string | undefined): boolean {
   if (!value) return true;
@@ -68,8 +89,9 @@ export function normalizeColor(value: string): string {
   const trimmed = value.trim().toLowerCase();
 
   // Convert before stripping whitespace — spaces are significant inside
-  // oklch()/oklab()/color().
-  const converted = parseHex(trimmed) ?? parseModernColor(trimmed);
+  // oklch()/oklab()/color(). `parseLegacyRgba` is whitespace-tolerant on its
+  // own, so it can run after the others without needing that ordering.
+  const converted = parseHex(trimmed) ?? parseModernColor(trimmed) ?? parseLegacyRgba(trimmed);
   const stripped = converted ? toCanonical(converted) : trimmed.replace(/\s+/g, "");
 
   // A conversion can land on a fully-transparent color too.

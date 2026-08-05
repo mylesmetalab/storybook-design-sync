@@ -860,12 +860,20 @@ read per contract plus a JSON compare. So unlike `check` it needs no
     Figma fact ("Figma carries no heading semantics"). Re-running changes nothing,
     so it does **not** block — but it is counted, printed, and the summary never
     calls such a run fully verified. Re-word the entry if you want it gated.
+  - **…unless nothing was verified at all.** If a contract's verified count is
+    **zero**, the run gated nothing and exits `2` regardless. Not blocking is right
+    for a *mix* — Button verifies 19 claims and cannot express 2, and failing that
+    would push a team to switch `verify` off — but a pass on a contract where no
+    claim could be checked is not a narrower gate, it is no gate. Found by the first
+    contract this happened to: 0 verified, 23 inexpressible, exit 0, under a summary
+    reading *"every claim this tool can re-read still holds"* — vacuously true,
+    because there were none.
 
 | Code | Meaning |
 |---|---|
 | `0` | every claim that could be re-read still holds |
 | `1` | at least one claim is **falsified** |
-| `2` | at least one claim **could not be re-read**. Outranks `1` |
+| `2` | at least one claim **could not be re-read**, or **nothing was verified**. Outranks `1` |
 | `3` | could not run at all — no contracts matched, or no `FIGMA_PAT` |
 
 **What is checkable today.** The claims that get real verdicts are the ones naming

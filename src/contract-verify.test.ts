@@ -6,6 +6,7 @@ import {
   parseAbsenceAssertion,
   verifyClaims,
   verifyExitCode,
+  type VerifyOutcome,
   verifySummary,
   type DesignSourceSnapshot,
 } from "./contract-verify.js";
@@ -212,18 +213,33 @@ describe("exit codes", () => {
    * `verify` could never pass on either contract that exists, so it would be
    * switched off — worse than a narrower honest gate.
    */
-  it("does NOT block on prose that cannot be expressed checkably", () => {
+  /**
+   * CHANGED 2026-08-06, deliberately. This pair used to assert exit 0 for a contract
+   * whose ONLY claim was inexpressible prose. The rule "not-expressible must not
+   * block" is right for a MIX — Button verifies 19 and cannot express 2, and failing
+   * that would push a team to switch `verify` off — but it conflated that with the
+   * case where NOTHING was verified. The Dialog contract exposed it: 0 verified, 23
+   * not expressible, exit 0, under a summary reading "every claim this tool can
+   * re-read still holds". Vacuously true, because there were none.
+   *
+   * A single inexpressible claim is the same shape: the run gated nothing, so it is
+   * incomplete coverage, not a pass. See the `zero verified` block below for the
+   * mix case, which still exits 0.
+   */
+  it("blocks when the ONLY claim is prose that cannot be expressed checkably", () => {
     const outcome = verifyClaims([absence("Figma carries no heading semantics.")], snap());
     expect(outcome.unverifiable["not-expressible"]).toBe(1);
-    expect(verifyExitCode(outcome)).toBe(VERIFY_EXIT.Verified);
+    expect(outcome.counts.verified).toBe(0);
+    expect(verifyExitCode(outcome)).toBe(VERIFY_EXIT.Unverifiable);
   });
 
-  it("but never describes such a run as fully verified", () => {
+  it("and says nothing was verified, rather than that everything holds", () => {
     const outcome = verifyClaims([absence("Figma carries no heading semantics.")], snap());
     const summary = verifySummary(outcome);
     expect(summary).toMatch(/not stated checkably/);
-    expect(summary).toMatch(/were NOT verified/);
+    expect(summary).toMatch(/NOTHING in this contract was verified/);
     expect(summary).not.toMatch(/every claim re-read and still true/);
+    expect(summary).not.toMatch(/every claim this tool can re-read still holds/);
   });
 
   it("says plainly when a read failed", () => {
@@ -279,5 +295,100 @@ describe("against the contracts that actually exist", () => {
   it("carries the contract's gaps through to the outcome", () => {
     const claims = extractClaims("contracts/button.spec.json", BUTTON_SPEC);
     expect(verifyClaims(claims.claims, snap(), claims.gaps).gaps.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Zero verified is not a pass (found by the Dialog contract, 2026-08-06).
+ *
+ * `not-expressible` exiting 0 is deliberate and right for a MIX: Button verifies 19
+ * claims and cannot express 2, and failing that would push a team to switch `verify`
+ * off — a narrower honest gate beats no gate.
+ *
+ * It is wrong when the verified count is **zero**. The Dialog contract produced
+ * 0 verified · 23 not-expressible · exit 0, under a summary reading "every claim this
+ * tool can re-read still holds" — vacuously true, because there were none. A gate
+ * that passes when nothing was gated is not a gate.
+ */
+describe("zero verified claims is incomplete coverage, not a pass", () => {
+  const outcome = (over: Partial<VerifyOutcome> = {}): VerifyOutcome =>
+    ({
+      counts: { verified: 0, falsified: 0, unverifiable: 0 },
+      unverifiable: { "read-failed": 0, "not-expressible": 0 },
+      results: [],
+      gaps: [],
+      ...over,
+    }) as VerifyOutcome;
+
+  it("exits Unverifiable when every claim was inexpressible", () => {
+    const o = outcome({
+      counts: { verified: 0, falsified: 0, unverifiable: 0 },
+      unverifiable: { "read-failed": 0, "not-expressible": 23 },
+    });
+    expect(verifyExitCode(o)).toBe(VERIFY_EXIT.Unverifiable);
+  });
+
+  it("says NOTHING was verified rather than that everything holds", () => {
+    const o = outcome({
+      counts: { verified: 0, falsified: 0, unverifiable: 0 },
+      unverifiable: { "read-failed": 0, "not-expressible": 23 },
+    });
+    const summary = verifySummary(o);
+    expect(summary).toMatch(/NOTHING in this contract was verified/);
+    expect(summary).toMatch(/gated nothing at all/);
+    // The vacuous reassurance must be gone.
+    expect(summary).not.toMatch(/every claim this tool can re-read still holds/);
+  });
+
+  it("still exits Verified for a MIX — one verified claim is a real gate", () => {
+    const o = outcome({
+      counts: { verified: 1, falsified: 0, unverifiable: 23 },
+      unverifiable: { "read-failed": 0, "not-expressible": 23 },
+    });
+    expect(verifyExitCode(o)).toBe(VERIFY_EXIT.Verified);
+    expect(verifySummary(o)).toMatch(/every claim this tool can re-read still holds/);
+  });
+
+  /**
+   * A contract with no claims at all is a different thing from one whose claims
+   * could not be checked, and must not be dragged into exit 2 — there is nothing
+   * incomplete about asserting nothing.
+   */
+  it("exits Verified for a contract that makes no claims at all", () => {
+    expect(verifyExitCode(outcome())).toBe(VERIFY_EXIT.Verified);
+  });
+
+  it("read-failed still outranks, whatever the verified count", () => {
+    expect(
+      verifyExitCode(
+        outcome({
+          counts: { verified: 5, falsified: 2, unverifiable: 1 },
+          unverifiable: { "read-failed": 1, "not-expressible": 0 },
+        }),
+      ),
+    ).toBe(VERIFY_EXIT.Unverifiable);
+  });
+});
+
+describe("the not-implemented evidence does not claim designSource is absent", () => {
+  /**
+   * The old wording said "No contract in this project carries a `designSource` block
+   * yet, so there has been no real input to build it against". True when written;
+   * false the moment one did. The Dialog contract printed it 14 times while the block
+   * it denied was being read. A stale excuse that contradicts its own input tells the
+   * reader not to expect a check, on grounds they can see are wrong.
+   */
+  it("states only that the checker is unbuilt", () => {
+    const extracted = extractClaims("contracts/x.spec.json", {
+      designSource: {
+        readAt: "2026-08-06",
+        collections: [{ name: "Color", modes: [{ id: "1", name: "SDS Light" }] }],
+      },
+    });
+    const out = verifyClaims(extracted.claims, snap());
+    const ev = out.results.map((r) => r.evidence).join("\n");
+    expect(ev).toMatch(/not implemented/);
+    expect(ev).not.toMatch(/no real input/);
+    expect(ev).not.toMatch(/carries a `designSource` block yet/);
   });
 });

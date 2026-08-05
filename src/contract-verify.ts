@@ -270,9 +270,18 @@ function verifyNode(claim: ContractClaim, snap: DesignSourceSnapshot): ClaimResu
  * Claims whose re-check is not built yet.
  *
  * Reported `unverifiable` **with the reason**, not silently dropped and not
- * quietly passed. `designSource` does not exist on either real contract, so these
- * kinds have no data in practice — building a checker for them before any contract
- * carries the block would be writing against an imagined input.
+ * quietly passed.
+ *
+ * The wording used to say "no contract in this project carries a `designSource`
+ * block yet, so there has been no real input to build it against" — true when
+ * written, and **false from the moment a contract carried one**. The Dialog
+ * contract (2026-08-06) printed that sentence 14 times while the block it claimed
+ * did not exist was being read two lines above. A stale excuse that contradicts its
+ * own input is worse than no explanation: it tells the reader not to expect the
+ * check, on grounds they can see are wrong.
+ *
+ * So the message now states only what is true — the checker is unbuilt — and does
+ * not editorialise about why.
  */
 function verifyNotImplemented(claim: ContractClaim): ClaimResult {
   return {
@@ -280,8 +289,8 @@ function verifyNotImplemented(claim: ContractClaim): ClaimResult {
     verdict: "unverifiable",
     reason: "not-expressible",
     evidence:
-      `re-checking \`${claim.kind}\` claims is not implemented. No contract in this project ` +
-      `carries a \`designSource\` block yet, so there has been no real input to build it against.`,
+      `re-checking \`${claim.kind}\` claims is not implemented, so this claim was NOT ` +
+      `verified — it is reported here only as something the contract asserts.`,
   };
 }
 
@@ -340,7 +349,29 @@ export const VERIFY_EXIT = {
 export function verifyExitCode(outcome: VerifyOutcome): number {
   if (outcome.unverifiable["read-failed"] > 0) return VERIFY_EXIT.Unverifiable;
   if (outcome.counts.falsified > 0) return VERIFY_EXIT.Falsified;
+  // Nothing verified, yet claims were made: the contract was not gated at all, and
+  // a gate that passes when nothing was gated is not a gate.
+  //
+  // `not-expressible` exiting 0 is right for a MIX — Button verifies 19 and cannot
+  // express 2, and failing that would push people to switch `verify` off. It is
+  // wrong when the verified count is zero, which is what the Dialog contract
+  // exposed: 0 verified, 23 not expressible, exit 0, and a summary reading "every
+  // claim this tool can re-read still holds" — vacuously true, because there were
+  // none. Incomplete coverage outranks a clean result, the same rule `check` uses.
+  if (outcome.counts.verified === 0 && totalClaims(outcome) > 0) {
+    return VERIFY_EXIT.Unverifiable;
+  }
   return VERIFY_EXIT.Verified;
+}
+
+/** Every claim the run considered, whatever the verdict. */
+function totalClaims(outcome: VerifyOutcome): number {
+  return (
+    outcome.counts.verified +
+    outcome.counts.falsified +
+    outcome.unverifiable["read-failed"] +
+    outcome.unverifiable["not-expressible"]
+  );
 }
 
 /** One line stating what the run established — never "clean" when something was not checked. */
@@ -360,6 +391,16 @@ export function verifySummary(outcome: VerifyOutcome): string {
     return `${head} — the design has moved away from what this contract records. (exit ${VERIFY_EXIT.Falsified})`;
   }
   if (notExpressible > 0) {
+    // Zero verified is not a pass, and must not be described as one. "Every claim
+    // this tool can re-read still holds" is vacuously true when there are none,
+    // which is the most misleading thing this command could say.
+    if (verified === 0) {
+      return (
+        `${head} — NOTHING in this contract was verified. Every claim is worded in prose that ` +
+        `names no Figma fact this tool can re-read, so this run gated nothing at all. Re-word ` +
+        `them to name the axis, node or variable they rest on. (exit ${VERIFY_EXIT.Unverifiable})`
+      );
+    }
     return (
       `${head} — every claim this tool can re-read still holds. The rest are worded in prose ` +
       `that names no Figma fact, so they were NOT verified; re-word them in the contract if you ` +

@@ -14,7 +14,12 @@ import type {
   NameDivergenceKind,
 } from "../dimensions/types.js";
 import { formatChildProblem } from "../child-bindings.js";
-import { matchTokenNames, aliasSignature, type TokenAliasMap } from "../token-aliases.js";
+import {
+  matchTokenNames,
+  aliasSignature,
+  type NameMatchVia,
+  type TokenAliasMap,
+} from "../token-aliases.js";
 import { divergenceNote, nameDivergenceStatus } from "../binding-divergence.js";
 import { variantSetRowApplicable } from "../row-triage.js";
 import { isTextOwnedProperty, ownsRenderedText } from "../applicability.js";
@@ -1741,7 +1746,7 @@ class FigmaRestEngine implements Engine {
       let status: DimensionDiff["status"];
       let note: string | undefined;
       let nameDivergence: NameDivergenceKind | undefined;
-      let nameResolvedBy: "alias" | "heuristic" | undefined;
+      let nameResolvedBy: NameMatchVia | undefined;
       if (!codeValue && !figma) continue;
       if (!codeValue) {
         status = "flag-only";
@@ -1754,15 +1759,23 @@ class FigmaRestEngine implements Engine {
         // two names are one decision; the heuristic collapses spellings
         // (`radius/xl` ≡ `radius-xl` ≡ `--radius-xl`) and can do no more than
         // that. Which one answered is recorded on the row.
-        const match = matchTokenNames(codeValue, figma.tokenName, opts.aliases);
+        const match = matchTokenNames(
+          codeValue,
+          figma.tokenName,
+          opts.aliases,
+          figma.codeSyntax,
+        );
         if (match.same) {
           status = "match";
           nameResolvedBy = match.via;
           if (codeValue !== figma.tokenName) {
             note =
-              match.via === "alias"
-                ? `Same token by \`tokenAliases\` (${codeValue} ⇄ ${figma.tokenName}).`
-                : `Same token, different naming convention (${codeValue} vs ${figma.tokenName}).`;
+              match.via === "code-syntax"
+                ? `Same token, stated by Figma: its \`codeSyntax\` names \`${figma.codeSyntax}\`, ` +
+                  `which is what the code binds. Nothing inferred, and no \`tokenAliases\` entry needed.`
+                : match.via === "alias"
+                  ? `Same token by \`tokenAliases\` (${codeValue} ⇄ ${figma.tokenName}).`
+                  : `Same token, different naming convention (${codeValue} vs ${figma.tokenName}).`;
           }
         } else {
           // The names diverge. Whether that is a DEFECT depends entirely on the

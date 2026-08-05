@@ -401,7 +401,7 @@ Since v0.0.50 the addon also reads each variable's **`codeSyntax.WEB`** in Figma
 
 | | how the name was decided | trusted? |
 |---|---|---|
-| 1 | Figma's `codeSyntax` names a custom property **your CSS declares** | authoritative |
+| 1 | Figma's `codeSyntax` names a custom property **your CSS declares** | authoritative — and it also **suppresses the name-divergence advisory**, because both sides have named the same property and no `tokenAliases` entry is needed |
 | 2 | your `tokenAliases` entry | authoritative |
 | 3 | Figma's `codeSyntax` names a property you **don't** declare | inferred, but Figma's own name is quoted |
 | 4 | no `codeSyntax` at all → `normalizeTokenName` | inferred |

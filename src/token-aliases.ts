@@ -1,5 +1,7 @@
 import { normalizeTokenName } from "@metalab/design-sync-core";
 
+import { customPropertyFromCodeSyntax } from "./code-syntax.js";
+
 /**
  * Reconciling two token-naming schemes.
  *
@@ -17,6 +19,10 @@ import { normalizeTokenName } from "@metalab/design-sync-core";
  *
  * Two things fix it, and this module is the first:
  *
+ *  0. **Figma's `codeSyntax.WEB`** naming the exact custom property the code
+ *     binds. Added in v0.0.53; outranks everything below, because it is both
+ *     sides asserting the same name rather than anyone reconciling them. A row
+ *     resolved this way needs no `tokenAliases` entry and must not be offered one.
  *  1. **`tokenAliases`** in `design-sync.config.json` — an explicit, project-
  *     authored map from the Figma variable name to the project's token name.
  *     Consulted BEFORE the heuristic, because it is evidence and the heuristic
@@ -31,7 +37,15 @@ import { normalizeTokenName } from "@metalab/design-sync-core";
 /** Figma variable name → the project's token name. Validated in `config.ts`. */
 export type TokenAliasMap = Record<string, string>;
 
-export type NameMatchVia = "alias" | "heuristic";
+export type NameMatchVia =
+  /**
+   * Figma's own `codeSyntax.WEB` names the very custom property the code binds.
+   * The strongest evidence there is — both sides asserted it — so it outranks an
+   * alias, and a row resolved this way needs no `tokenAliases` entry.
+   */
+  | "code-syntax"
+  | "alias"
+  | "heuristic";
 
 export type TokenNameMatch =
   | {
@@ -60,8 +74,8 @@ export type TokenNameMatch =
  * Whether a code-side binding and a Figma variable name the same design
  * decision.
  *
- * Alias first: an explicit mapping is the project telling us the answer, so it
- * wins over — and can contradict — the heuristic. Alias keys and values are
+ * `codeSyntax` first, then alias: an explicit mapping is the project telling us
+ * the answer, so it wins over — and can contradict — the heuristic. Alias keys and values are
  * compared through `normalizeTokenName` as well, so a consumer doesn't have to
  * guess whether to write `color/background/brand/default` or
  * `--color-background-brand-default` on either side of the map.
@@ -70,9 +84,31 @@ export function matchTokenNames(
   codeName: string | null | undefined,
   figmaName: string | null | undefined,
   aliases: TokenAliasMap = {},
+  /**
+   * The Figma variable's `codeSyntax.WEB`, when it declared one (#93). Optional
+   * so every existing caller keeps its behaviour; absent means "no such
+   * assertion", never "it disagreed".
+   */
+  figmaCodeSyntax?: string | undefined,
 ): TokenNameMatch {
   const code = normalizeTokenName(codeName);
   const figma = normalizeTokenName(figmaName);
+
+  // `codeSyntax` first. Figma naming the exact property the code binds is not an
+  // inference to be reconciled — it is both sides saying the same thing, so it
+  // outranks even an explicit alias and must not produce an alias suggestion.
+  //
+  // Found by making it reachable: until the reference file had one variable
+  // pointing at a property the consumer declares, this branch could not run, and
+  // the tool reported `border-brand` vs `Border/Brand/Default` as a name
+  // divergence — advising a `tokenAliases` entry that Figma had already made
+  // unnecessary. #93 wired `codeSyntax` into token *presence* and not into this
+  // comparison.
+  const declaredProperty = customPropertyFromCodeSyntax(figmaCodeSyntax);
+  if (declaredProperty !== undefined && code !== "" && normalizeTokenName(declaredProperty) === code) {
+    return { same: true, via: "code-syntax" };
+  }
+
   const aliased = lookupAlias(figmaName, aliases);
   if (aliased !== null) {
     if (normalizeTokenName(aliased) === code) return { same: true, via: "alias" };

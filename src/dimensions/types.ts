@@ -97,7 +97,7 @@ export interface DimensionDiff {
    * canonical form via `normalizeTokenName` (a guess, and a good one, but still a
    * guess). Surfaced in the panel so a reader knows which they are looking at.
    */
-  nameResolvedBy?: "alias" | "heuristic";
+  nameResolvedBy?: "code-syntax" | "alias" | "heuristic";
   /**
    * The utility class the code-side binding came from (`"bg-primary"`), when
    * the scanner derived this property from Tailwind rather than from a

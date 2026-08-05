@@ -894,6 +894,76 @@ describe("token-value: box-shadow", () => {
 });
 
 /* -------------------------------------------------------------------------- *
+ * border-radius: the `rounded-full` idiom (#107)
+ * -------------------------------------------------------------------------- */
+
+describe("token-value: border-radius and the rounded-full idiom", () => {
+  // Tailwind v4's `rounded-full` computes to `calc(infinity * 1px)`, which
+  // Chromium's getComputedStyle resolves to ~2^25px in scientific notation.
+  const FULLY_ROUNDED_COMPUTED = "3.35544e+07px";
+
+  it("prints a legible label instead of scientific notation", async () => {
+    const dimensions = await check({
+      styles: { "border-top-left-radius": FULLY_ROUNDED_COMPUTED },
+      node: nodeResponse({ topLeftRadius: 32 }),
+    });
+    const radius = row(dimensions, "border-top-left-radius");
+    expect(radius.codeValue).toBe("fully rounded (pill)");
+    expect(String(radius.codeValue)).not.toMatch(/e[+-]/i);
+  });
+
+  it("treats an unbounded radius against Figma's finite literal as advisory, not drift", async () => {
+    const dimensions = await check({
+      styles: { "border-top-left-radius": FULLY_ROUNDED_COMPUTED },
+      node: nodeResponse({ topLeftRadius: 32 }),
+    });
+    const radius = row(dimensions, "border-top-left-radius");
+    expect(radius.status).toBe("advisory");
+    expect(radius.note).toMatch(/heuristic/i);
+  });
+
+  it("treats an unbounded radius against a Figma variable-bound finite radius as advisory too", async () => {
+    const dimensions = await check({
+      styles: { "border-top-left-radius": FULLY_ROUNDED_COMPUTED },
+      node: nodeResponse({
+        boundVariables: {
+          paddingTop: { type: "VARIABLE_ALIAS", id: SPACE_300 },
+          rectangleCornerRadii: {
+            RECTANGLE_TOP_LEFT_CORNER_RADIUS: { type: "VARIABLE_ALIAS", id: SPACE_300 },
+          },
+        },
+      }),
+    });
+    const radius = row(dimensions, "border-top-left-radius");
+    expect(radius.status).toBe("advisory");
+  });
+
+  it("still reports drift when Figma genuinely specifies square corners", async () => {
+    const dimensions = await check({
+      styles: { "border-top-left-radius": FULLY_ROUNDED_COMPUTED },
+      node: nodeResponse({ topLeftRadius: 0 }),
+    });
+    expect(row(dimensions, "border-top-left-radius").status).toBe("drift");
+  });
+
+  it("still reports drift on an ordinary numeric mismatch, unaffected by the idiom handling", async () => {
+    const dimensions = await check({
+      styles: { "border-top-left-radius": "4px" },
+      node: nodeResponse({ topLeftRadius: 8 }),
+    });
+    expect(row(dimensions, "border-top-left-radius").status).toBe("drift");
+  });
+
+  it("still reports match on an ordinary numeric agreement", async () => {
+    const dimensions = await check({
+      styles: { "border-top-left-radius": "8px" },
+      node: nodeResponse({ topLeftRadius: 8 }),
+    });
+    expect(row(dimensions, "border-top-left-radius").status).toBe("match");
+  });
+});
+
+/* -------------------------------------------------------------------------- *
  * Component properties (props dimension), end to end
  * -------------------------------------------------------------------------- */
 

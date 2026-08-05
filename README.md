@@ -1320,6 +1320,20 @@ is undeterminable and nothing is said.
   and its note says why it's advisory rather than disappearing. A Figma text
   that is NOT a name-echo is a genuine specification and still drifts against
   disagreeing code, exactly as before.
+- **`rounded-full` (`calc(infinity * 1px)`) is recognised and printed legibly**
+  ([#107], v0.0.60). Tailwind v4's unbounded radius computes to roughly
+  `3.35544e+7px`, which used to print in the Figma-vs-code row verbatim — the
+  first time this was seen the scientific notation read as a tool bug, not a
+  finding. Any computed radius at or above 10,000px (no legitimate design
+  radius comes close) now displays as `fully rounded (pill)`. Comparability is
+  handled the same way: an unbounded radius always renders as round as the
+  element's own box allows, which is what a concrete Figma literal meant to
+  represent "fully rounded" for one instance's size *also* renders as — so the
+  row is `advisory`, not `drift`, whenever Figma's corner is any positive
+  finite value. This is a heuristic (the addon has no way to confirm Figma's
+  literal is genuinely the maximal value for that box rather than a smaller,
+  deliberate corner) and the note says so; a Figma corner of exactly `0`
+  against an unbounded code radius is a real disagreement and still drifts.
 - **A TEXT node's fill is its text colour, never a background.** Figma gives a
   TEXT node no background paint, so `background-color` is not compared against
   one — the code side reads transparent on any text element and the row could
@@ -1582,6 +1596,7 @@ consumers, it never compares them.
 [#78]: https://github.com/mylesmetalab/storybook-design-sync/issues/78
 [#80]: https://github.com/mylesmetalab/storybook-design-sync/issues/80
 [#85]: https://github.com/mylesmetalab/storybook-design-sync/issues/85
+[#107]: https://github.com/mylesmetalab/storybook-design-sync/issues/107
 [#108]: https://github.com/mylesmetalab/storybook-design-sync/issues/108
 
 ## What this addon is NOT

@@ -106,6 +106,17 @@ export interface DesignSyncConfig {
    * `--stories` flag still overrides this when set.
    */
   storyGlobs: string[];
+  /**
+   * The Storybook `check` talks to, when `--url` isn't passed (2.2,
+   * NEXT-WORK.md / addon#109). `undefined` when not configured — `check`
+   * falls through to its own conventional-dev-server default in that case,
+   * exactly as before this field existed. Set this in any project where the
+   * dev server doesn't run on `localhost:6006` (a fixed port elsewhere, a
+   * container, a shared machine with other Storybooks): a run that silently
+   * lands on a DIFFERENT Storybook reports the requested stories missing,
+   * indistinguishable from a real finding.
+   */
+  storybookUrl?: string;
 }
 
 const DEFAULTS = {
@@ -128,6 +139,18 @@ const DEFAULTS = {
 // it was a lie. If typed config is ever wanted, it needs a real loader.
 const CONFIG_NAME = "design-sync.config.json";
 
+/**
+ * Thrown specifically when `design-sync.config.json` does not exist —
+ * distinct from a config that exists but fails to parse or validate.
+ * `check` (2.2, NEXT-WORK.md) needs the distinction: it has never required a
+ * config file to run, so a MISSING one is silent (it just uses its own
+ * default); a config file that exists but is broken is not — the user
+ * clearly tried to configure something, so that should be reported instead
+ * of quietly falling back and leaving them to wonder why it didn't take
+ * effect.
+ */
+export class ConfigNotFoundError extends Error {}
+
 export async function loadConfig(cwd: string = process.cwd()): Promise<DesignSyncConfig> {
   const full = resolve(cwd, CONFIG_NAME);
   let raw: string;
@@ -135,7 +158,7 @@ export async function loadConfig(cwd: string = process.cwd()): Promise<DesignSyn
     raw = await readFile(full, "utf8");
   } catch (err: unknown) {
     if (isNotFound(err)) {
-      throw new Error(
+      throw new ConfigNotFoundError(
         `[design-sync] No config found. Add ${CONFIG_NAME} at ${cwd}.`,
       );
     }
@@ -294,6 +317,11 @@ function normalize(raw: unknown): DesignSyncConfig {
         `\`parameters.designSync.compareCopy: false\`.`,
     );
   }
+  if (r.storybookUrl !== undefined && typeof r.storybookUrl !== "string") {
+    throw new Error(
+      `[design-sync] Config: \`storybookUrl\` must be a string (got ${JSON.stringify(r.storybookUrl)}).`,
+    );
+  }
   const codeTargets = normalizeCodeTargets(r.codeTargets);
   return {
     engine: r.engine ?? DEFAULTS.engine,
@@ -307,6 +335,7 @@ function normalize(raw: unknown): DesignSyncConfig {
     cssEntries: r.cssEntries ?? [...DEFAULTS.cssEntries],
     tsxEntries: r.tsxEntries ?? [...DEFAULTS.tsxEntries],
     storyGlobs: r.storyGlobs ?? [...DEFAULTS.storyGlobs],
+    ...(r.storybookUrl !== undefined ? { storybookUrl: r.storybookUrl } : {}),
   };
 }
 

@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isGlobPath, loadConfig, normalizeCodeTargets, normalizeTokenAliases } from "./config.js";
+import {
+  ConfigNotFoundError,
+  isGlobPath,
+  loadConfig,
+  normalizeCodeTargets,
+  normalizeTokenAliases,
+} from "./config.js";
 import { matchTokenNames } from "./token-aliases.js";
 import { buildFixPrompt } from "./fix-prompt.js";
 
@@ -233,5 +239,46 @@ describe("copy — the applicability switch the design source cannot express", (
     // says why.
     await expect(loadConfig(dir)).rejects.toThrow(/`copy` must be "on" or "off"/);
     await expect(loadConfig(dir)).rejects.toThrow(/compareCopy/);
+  });
+});
+
+/**
+ * 2.2 (NEXT-WORK.md, addon#109) — `check` hardcoded `http://localhost:6006`
+ * with no config key. If another Storybook happens to be on that port, a run
+ * without `--url` silently connects to IT and reports the requested stories
+ * missing — indistinguishable from a real finding. `storybookUrl` is the
+ * config-layer half of flag → config → default; `check-command.test.ts`
+ * covers the flag taking precedence over it.
+ */
+describe("storybookUrl — the config layer of check's flag → config → default", () => {
+  it("is undefined when not configured, so the default is untouched", async () => {
+    const dir = await writeConfig({ fileKey: "abc" });
+    expect((await loadConfig(dir)).storybookUrl).toBeUndefined();
+  });
+
+  it("is read back exactly as configured", async () => {
+    const dir = await writeConfig({ fileKey: "abc", storybookUrl: "http://localhost:6007" });
+    expect((await loadConfig(dir)).storybookUrl).toBe("http://localhost:6007");
+  });
+
+  it("refuses a non-string value loudly rather than silently ignoring it", async () => {
+    const dir = await writeConfig({ fileKey: "abc", storybookUrl: 6006 });
+    await expect(loadConfig(dir)).rejects.toThrow(/`storybookUrl` must be a string/);
+  });
+});
+
+describe("loadConfig — distinguishing a missing config from a broken one", () => {
+  it("throws ConfigNotFoundError specifically when the file is absent", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "design-sync-config-"));
+    dirs.push(dir);
+    await expect(loadConfig(dir)).rejects.toBeInstanceOf(ConfigNotFoundError);
+  });
+
+  it("throws a plain Error, not ConfigNotFoundError, for a file that exists but fails to parse", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "design-sync-config-"));
+    dirs.push(dir);
+    await writeFile(join(dir, "design-sync.config.json"), "{ not json", "utf8");
+    await expect(loadConfig(dir)).rejects.not.toBeInstanceOf(ConfigNotFoundError);
+    await expect(loadConfig(dir)).rejects.toThrow(/failed to parse/);
   });
 });

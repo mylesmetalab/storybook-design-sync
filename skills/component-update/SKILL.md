@@ -1,7 +1,7 @@
 ---
 name: component-update
 description: Update an existing coded component after its Figma design changed — a restyle, a new style guide, added or removed variants, or a token whose value moved. Usually reached via the fix-drift skill's triage rather than invoked directly; invoke directly when you already know the design has moved on beyond a single property, e.g. "apply the new style guide" or "resync this component with Figma".
-revised: 2026-07-31
+revised: 2026-08-06
 ---
 
 # component-update
@@ -34,6 +34,22 @@ If you were reached from a **Copy fix prompt**, the prompt has already done work
 - **Provenance** — the ISO time of the Figma read, the file version and node id. Re-verify against Figma before committing and **stop** on a mismatch (see step 5).
 
 ## Step 2 — Enumerate the delta
+
+**First, is the change you are chasing actually published?** The tool reads the file's
+*current* state, so it sees a designer's unpublished edits and reports them as drift a
+consumer cannot yet get. Cheap check, and it decides whether this update is even due:
+
+```
+GET /v1/files/:key/component_sets   → published as a library
+GET /v1/files/:key                  → what the file contains now
+```
+
+Zero published against a file full of component sets means the library has never been
+published (true of the reference file: 78 sets, 0 published, read 2026-08-05). Report it
+and **ask the designer to confirm** rather than proceeding as if the design had settled.
+*Published but stale* is **not** reliably detectable — per-node modified times are not
+exposed and `lastModified` moves on any edit — so ask; never assert it. Updating code to
+match an unpublished experiment is how a component ends up ahead of its own design system.
 
 For each component in scope, compare the current Figma component against **its spec sidecar** (`contracts/<component>.spec.json`, written at handoff — it records what the component promised) and against the current code. The Figma-vs-spec diff is the cleanest statement of what design changed since handoff. Produce an explicit change list before editing:
 

@@ -1,7 +1,7 @@
 ---
 name: handoff-ready-component
 description: Lint a Figma component before handoff to code — library tokens only, variant naming conventions, no detached values — and establish the facts about the design file the code side will depend on (modes, literals, text styles, shared values, what can't be compared later). Use before running component-handoff, or when asked "is this component ready to hand off?"
-revised: 2026-07-31
+revised: 2026-08-06
 ---
 
 # handoff-ready-component
@@ -51,6 +51,37 @@ From F2's walk. An uncompared property reads as a pass, so name these up front, 
 1. **Every color, spacing, radius, and typography value is bound to a library variable.** Raw hex/px values fail, with the node and property named. **F2 is the read** — it is exhaustive and authoritative; `get_variable_defs` alone shows what *is* bound, never what isn't.
 2. **No detached instances** anywhere in the component tree. Method: metadata + variable defs canNOT detect detachment — inspect the component's node tree via the Figma REST API (`GET /v1/files/:key/nodes?ids=<setId>` and look for frames that visually duplicate library components without an INSTANCE type) or `get_design_context`. If neither is available, report NOT VERIFIED — never pass this silently.
 3. **It is a component or component set** — not a frame that looks like one.
+3a. **Is the library published, and does it include THIS component?** Designers forget
+   to publish, and an unpublished change is one nobody else can consume — a handoff
+   built from it bakes in a decision that was never released.
+
+   ```
+   GET /v1/files/:key/component_sets   → what is published as a library
+   GET /v1/files/:key                  → what the file actually contains
+   ```
+
+   Zero published entries against a file that plainly holds component sets means the
+   library has **never been published**. On the reference file, read 2026-08-05:
+   **78 component sets and 2,076 components in the file, 0 published. Styles too: 0.**
+
+   State it as a finding with both numbers, and **ask the designer to confirm they have
+   published** before handoff. It is not a blocker on its own — the tool reads the file's
+   current state, so a comparison still works — but it changes what the handoff *means*.
+
+   **Three things this can and cannot tell you. Do not blur them:**
+   - *Never published* — **reliably detectable.** Published count 0, file count > 0.
+   - *This component not among the published ones* — **reliably detectable.**
+   - *Published, but the publish is older than the designer's latest edits* — **NOT
+     reliably detectable.** Per-node modified times are not exposed, and the file's
+     `lastModified` moves on any edit anywhere, so inferring a stale publish from it
+     would be a guess. **Ask.** Never report a stale publish as established.
+
+   **What this does NOT fix, so nobody mistakes it for a safety net:** publish state has
+   no bearing on whether you can *read* a component's variants. `/component_sets` returning
+   zero is a fact about publishing, not about readability — walking `GET /v1/files/:key`
+   reaches every variant either way. The Dialog handoff conflated those and shipped a
+   guessed hover style; publishing the library would have hidden that error rather than
+   preventing it.
 4. **Variant properties have explicit, complete values** — every variant axis has a value on every variant; no reliance on "default" ambiguity.
 5. **Text layers use text styles / typography variables**, not per-layer overrides.
 

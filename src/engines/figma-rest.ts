@@ -2055,10 +2055,22 @@ class FigmaRestEngine implements Engine {
    * child bindings, and are where a fix would be made — so a row here restates
    * their verdict against an element that renders none of it. On the live Card
    * this was two of the four rows on each of three layout divs.
+   *
+   * A Figma text that DISAGREES with code is not automatically a defect (#108):
+   * `component-handoff` mandates real story content while the design still
+   * carries its own placeholder — "Text Heading" on a layer named `Text
+   * Heading`, "Button" as an unconfigured Button instance's label. Figma has no
+   * field marking a string as placeholder, so `figmaPlaceholderText` applies a
+   * heuristic — the text echoes its own layer name or its instance's name — and
+   * a match downgrades the row to `advisory` rather than `drift`. Real
+   * information (the design still hasn't specified this copy), not an
+   * accusation, and never suppressed outright: an advisory heuristic that
+   * misfires is far less costly than a dropped row.
    */
   private diffCopy(node: FigmaNode, snapshot: CodeSnapshot | undefined): DimensionDiff[] {
     if (!ownsRenderedText(snapshot)) return [];
-    const figmaStrings = collectFigmaText(node);
+    const placeholders = figmaPlaceholderText(node);
+    const figmaStrings = [...placeholders.keys()];
     const codeStringsRaw = snapshot?.texts ?? [];
     const codeTexts = codeStringsRaw.map((s) => s.toLowerCase());
     if (figmaStrings.length === 0 && codeTexts.length === 0) return [];
@@ -2078,6 +2090,14 @@ class FigmaRestEngine implements Engine {
         },
       ];
     }
+
+    const mismatchStatus = (figmaText: string): { status: DimensionDiff["status"]; note?: string } =>
+      placeholders.get(figmaText)
+        ? {
+            status: "advisory",
+            note: `Figma's text repeats its own layer name (or its instance's name) — read as placeholder copy, not a specification (heuristic, #108).`,
+          }
+        : { status: "drift" };
 
     // 1:1 pairing — when the component has exactly one visible text on
     // each side, we know which Figma node pairs with which code string
@@ -2099,7 +2119,7 @@ class FigmaRestEngine implements Engine {
           property: "text",
           codeValue: codeText,
           figmaValue: figmaText,
-          status: match ? "match" : "drift",
+          ...(match ? { status: "match" } : mismatchStatus(figmaText)),
         },
       ];
     }
@@ -2112,7 +2132,7 @@ class FigmaRestEngine implements Engine {
         property: "text",
         codeValue: present ? figmaText : null,
         figmaValue: figmaText,
-        status: present ? "match" : "drift",
+        ...(present ? { status: "match" } : mismatchStatus(figmaText)),
       };
     });
   }
@@ -2255,17 +2275,34 @@ function findMatchingArg(
  */
 const COPY_SCAN_MAX_DEPTH = 8;
 
-function collectFigmaText(node: FigmaNode): string[] {
-  const out = new Set<string>();
-  function walk(n: FigmaNode, depth: number): void {
+interface FigmaTextEntry {
+  text: string;
+  /** See {@link figmaPlaceholderText} — heuristic, never certain. */
+  isPlaceholder: boolean;
+}
+
+function normForPlaceholderMatch(s: string): string {
+  return s.trim().toLowerCase();
+}
+
+function collectFigmaTextEntries(node: FigmaNode): FigmaTextEntry[] {
+  const out: FigmaTextEntry[] = [];
+  function walk(n: FigmaNode, depth: number, instanceName: string | undefined): void {
     if (n.type === "TEXT") {
       const chars = (n as unknown as { characters?: string }).characters;
       if (typeof chars === "string") {
         const trimmed = chars.trim();
-        if (trimmed) out.add(trimmed);
+        if (trimmed) {
+          const normText = normForPlaceholderMatch(trimmed);
+          const isPlaceholder =
+            normForPlaceholderMatch(n.name) === normText ||
+            (instanceName !== undefined && normForPlaceholderMatch(instanceName) === normText);
+          out.push({ text: trimmed, isPlaceholder });
+        }
       }
     }
     if (depth >= COPY_SCAN_MAX_DEPTH) return;
+    const nextInstanceName = n.type === "INSTANCE" ? n.name : instanceName;
     for (const child of n.children ?? []) {
       // Stop at nested instances — their text belongs to another story.
       // The root node itself can be an INSTANCE; only skip *descendant*
@@ -2275,11 +2312,48 @@ function collectFigmaText(node: FigmaNode): string[] {
       // Comparing a switched-off placeholder's `characters` against the story's
       // rendered copy is the copy dimension's version of reading `fills[0]` blind.
       if (isHiddenNode(child)) continue;
-      walk(child, depth + 1);
+      walk(child, depth + 1, nextInstanceName);
     }
   }
-  walk(node, 0);
+  walk(node, 0, node.type === "INSTANCE" ? node.name : undefined);
+  return out;
+}
+
+/**
+ * Walk the Figma node tree and collect all TEXT-node `characters` values,
+ * deduplicated, in first-seen order.
+ */
+function collectFigmaText(node: FigmaNode): string[] {
+  const out = new Set<string>();
+  for (const entry of collectFigmaTextEntries(node)) out.add(entry.text);
   return [...out];
+}
+
+/**
+ * Which of a Figma node's texts read as placeholder copy rather than a
+ * specification (#108) — mapped `text -> isPlaceholder`, deduplicated the same
+ * way `collectFigmaText` is.
+ *
+ * The heuristic: Figma has no field marking a string as placeholder, but its
+ * placeholders are consistently name-echoes — "Text Heading" typed into a
+ * layer literally named `Text Heading`, "Button" left as an unconfigured
+ * Button instance's label. A text that equals its own TEXT layer's name, or
+ * the name of the nearest INSTANCE it renders inside (including the node
+ * itself, when the node passed in IS the instance), is called a placeholder.
+ * A text seen at more than one place in the tree is only called a placeholder
+ * when EVERY occurrence reads that way — one genuine occurrence means the
+ * design does specify this string somewhere, and the heuristic should not
+ * hide that.
+ *
+ * This is a heuristic, not a read: label it as one wherever it's shown, and
+ * never let it suppress a row outright (see `diffCopy`).
+ */
+function figmaPlaceholderText(node: FigmaNode): Map<string, boolean> {
+  const map = new Map<string, boolean>();
+  for (const entry of collectFigmaTextEntries(node)) {
+    map.set(entry.text, (map.get(entry.text) ?? true) && entry.isPlaceholder);
+  }
+  return map;
 }
 
 /**

@@ -1306,8 +1306,20 @@ is undeterminable and nothing is said.
   `parameters.designSync.compareCopy: false` (one story, for the common case where
   a component's structural text is placeholder but its labels are not). Off means
   **no rows**, not rows with the verdict withheld. Placeholder-ness is never
-  *inferred* from the string: lorem detection is a heuristic that misfires on real
+  *inferred from the string*: lorem detection is a heuristic that misfires on real
   copy, and a button Figma labels `Save` genuinely should say Save.
+- **A Figma text that echoes its own layer or instance name is read as a
+  placeholder** ([#108], v0.0.60) and downgraded to `advisory` rather than
+  `drift` — real information, not an accusation. `component-handoff` mandates
+  real story copy while Figma still carries "Text Heading" typed into a layer
+  named `Text Heading`, or "Button" left as an unconfigured Button instance's
+  label; comparing those against real content drifted on every story that
+  followed the project's own rule. This is a heuristic on the Figma side, not
+  the code side (contrast the lorem-detection note above): a design could
+  coincidentally name a layer after its real content, so the row still shows
+  and its note says why it's advisory rather than disappearing. A Figma text
+  that is NOT a name-echo is a genuine specification and still drifts against
+  disagreeing code, exactly as before.
 - **A TEXT node's fill is its text colour, never a background.** Figma gives a
   TEXT node no background paint, so `background-color` is not compared against
   one — the code side reads transparent on any text element and the row could
@@ -1570,6 +1582,7 @@ consumers, it never compares them.
 [#78]: https://github.com/mylesmetalab/storybook-design-sync/issues/78
 [#80]: https://github.com/mylesmetalab/storybook-design-sync/issues/80
 [#85]: https://github.com/mylesmetalab/storybook-design-sync/issues/85
+[#108]: https://github.com/mylesmetalab/storybook-design-sync/issues/108
 
 ## What this addon is NOT
 

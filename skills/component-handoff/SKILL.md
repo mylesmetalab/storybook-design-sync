@@ -64,13 +64,21 @@ revised: 2026-08-06
    "designSource": {
      "readAt": "2026-07-31",
      "reads": ["GET /v1/files/<key>/variables/local, 2026-07-31", "get_variable_defs 280:11380, 2026-07-31"],
-     "collections": [{ "name": "Color", "modes": [{"id":"3919:21","name":"SDS Light","default":true},{"id":"3919:22","name":"SDS Dark"}], "variables": 137, "modeVarying": 118 }],
+     "collections": [{ "id": "VariableCollectionId:3919:36422", "name": "Color", "modes": [{"id":"3919:21","name":"SDS Light","default":true},{"id":"3919:22","name":"SDS Dark"}], "variables": 137, "modeVarying": 118 }],
      "literals": [{ "nodeId": "…", "node": "Info", "property": "fills[0].color", "value": "#ffffff", "owner": "design" }],
      "textStyles": { "title": { "style": "Heading", "sizeToken": "typography/heading/size/base", "weight": 600, "lineHeight": "1.2", "letterSpacing": "-2", "tokensAdded": ["--leading-heading", "--tracking-heading"] } },
      "sharedValues": [{ "value": "#2c2c2c", "mode": "SDS Light", "variables": ["Background/Brand/Default", "Border/Brand/Default"], "themeTokens": ["--primary", "--primary-border"] }],
      "uncheckable": [{ "nodeId": "…", "variant": "Asset Type=Image", "property": "background-color", "reason": "fills[0] is IMAGE; the fill dimension resolves SOLID only" }]
    }
    ```
+
+   **Record each collection's `id`.** `verify` gates collection claims by re-reading
+   modes (v0.0.59) — this is the check that catches the `"SDS defines no dark mode"`
+   class of fabrication — but **collection name is not unique.** The reference file has
+   two named `Typography` and two named `Size`: one local, one imported from another
+   library file (composite `<libKey>/<id>` ids). Without the id, `verify` refuses those
+   claims rather than guessing which collection is meant, so 4 of 9 go unchecked. The
+   id is in the same `/variables/local` response you already read.
 
    `uncheckable` and `notInFigma` are different claims and must not be merged: `notInFigma` = *the design doesn't specify it*; `uncheckable` = *the design specifies it and the tool can't read it*. Both cite their read.
 3. **Account for the facts in the build — now, not as later drift.**

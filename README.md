@@ -876,6 +876,25 @@ read per contract plus a JSON compare. So unlike `check` it needs no
 | `2` | at least one claim **could not be re-read**, or **nothing was verified**. Outranks `1` |
 | `3` | could not run at all — no contracts matched, or no `FIGMA_PAT` |
 
+**`designSource.collections` is gated as of v0.0.59** — the claim the block was added
+for, since *"SDS defines no dark mode"* (false, and worth 24 invented theme values of
+which 18 were wrong) is exactly a mode claim. It re-reads `/variables/local` and
+compares mode names as a set: a mode added or removed is **falsified**, with both
+lists printed.
+
+Matched by **collection id** when the contract records one, by name only when the
+name is unambiguous, and **refused otherwise** — collection name is not unique. The
+reference file has two collections named `Typography` and two named `Size`: one local,
+one imported from another library file (composite `<libKey>/<id>` ids). Guessing
+between them would produce a confident verdict about the wrong collection, so the
+refusal names both candidates and asks for the id. `component-handoff` records ids
+from v0.0.59 on; contracts written before that get 4 of 9 refused.
+
+Only **modes** are gated. Variable counts move whenever a designer adds a variable —
+ordinary work, not a broken claim — so they are reported as context, never as a verdict.
+
+`literals`, `sharedValues` and `uncheckable` are still parsed and reported unimplemented.
+
 **What is checkable today.** The claims that get real verdicts are the ones naming
 a Figma fact: `variantNodeIds` / `childNodeIds` (does the node still resolve?), and
 `notInFigma` / `notSpecifiedByFigma` entries whose reason asserts something about

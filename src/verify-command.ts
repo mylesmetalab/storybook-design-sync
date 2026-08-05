@@ -113,6 +113,43 @@ async function readComponentSet(
 }
 
 /** Batch-resolve node existence. Missing ids come back in `missing`, never as an error. */
+/**
+ * Every variable collection in the file, with its id and mode names.
+ *
+ * Returns `null` on any read failure rather than an empty list — an empty list
+ * would read as "the file has no collections", which would falsify every claim.
+ * `null` makes them `read-failed`, which is the honest verdict.
+ *
+ * `id` is carried because collection **name is not unique**: the reference file has
+ * two named `Typography` and two named `Size`, one local and one imported from
+ * another library (composite `<libKey>/<id>` form).
+ */
+async function readCollections(
+  fileKey: string,
+  pat: string,
+): Promise<Array<{ id: string; name: string; modes: string[] }> | null> {
+  const url = `https://api.figma.com/v1/files/${fileKey}/variables/local`;
+  const res = await fetch(url, { headers: { "X-Figma-Token": pat } });
+  if (!res.ok) return null;
+  const body = (await res.json()) as {
+    meta?: { variableCollections?: Record<string, unknown> };
+  };
+  const raw = body.meta?.variableCollections;
+  if (!raw) return null;
+  const out: Array<{ id: string; name: string; modes: string[] }> = [];
+  for (const entry of Object.values(raw)) {
+    const c = entry as { id?: unknown; name?: unknown; modes?: unknown };
+    if (typeof c.id !== "string" || typeof c.name !== "string") continue;
+    const modes = Array.isArray(c.modes)
+      ? c.modes
+          .map((m) => (m as { name?: unknown }).name)
+          .filter((n): n is string => typeof n === "string")
+      : [];
+    out.push({ id: c.id, name: c.name, modes });
+  }
+  return out;
+}
+
 async function readNodes(
   fileKey: string,
   ids: readonly string[],
@@ -221,6 +258,12 @@ export async function runVerify(opts: VerifyOptions): Promise<number> {
       const { present, missing } = await readNodes(fileKey, nodeIds, pat);
       snapshot.nodesPresent = present;
       snapshot.nodesMissing = missing;
+      // Only fetched when a collection claim exists — one extra request, and only
+      // for contracts that carry a `designSource` block.
+      if (claims.claims.some((c) => c.kind === "collection")) {
+        const collections = await readCollections(fileKey, pat);
+        if (collections) snapshot.collections = collections;
+      }
     } else {
       claims.gaps.push(
         "no Figma file key in the contract or in design-sync.config.json, so nothing could be re-read.",

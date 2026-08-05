@@ -55,6 +55,17 @@ export interface DesignSourceSnapshot {
   nodesPresent?: Set<string>;
   /** Node ids that were requested and did not resolve. */
   nodesMissing?: Set<string>;
+  /**
+   * Every variable collection in the file, as read this time. Absent when
+   * `/variables/local` could not be read — which makes collection claims
+   * `read-failed`, never verified.
+   *
+   * `id` is carried because **collection NAME IS NOT UNIQUE.** The reference file
+   * has two named `Typography` and two named `Size`: a local one and a second
+   * imported from another library file (composite ids, `<libKey>/<id>`). A checker
+   * keyed on name alone would silently compare the wrong collection.
+   */
+  collections?: ReadonlyArray<{ id: string; name: string; modes: readonly string[] }>;
 }
 
 export type Verdict = "verified" | "falsified" | "unverifiable";
@@ -283,6 +294,98 @@ function verifyNode(claim: ContractClaim, snap: DesignSourceSnapshot): ClaimResu
  * So the message now states only what is true — the checker is unbuilt — and does
  * not editorialise about why.
  */
+/**
+ * `designSource.collections` — "this collection has these modes".
+ *
+ * The claim `verify` was built for. The fabrication that motivated the whole
+ * `designSource` block was *"SDS defines no dark mode"*, written as settled fact,
+ * false, and worth 24 invented theme values of which 18 were wrong. This is the
+ * check that catches it.
+ *
+ * **Matched by id when the contract has one, by name only when the name is
+ * unambiguous, and refused otherwise.** The reference file has two collections
+ * named `Typography` and two named `Size` — one local, one imported from another
+ * library — so guessing between them would produce a confident verdict about the
+ * wrong collection. Refusing names both candidates instead.
+ *
+ * Only the **modes** are gated. Variable counts move whenever a designer adds a
+ * variable, which is ordinary work rather than a broken claim, so they are reported
+ * as context and never as a verdict.
+ */
+function verifyCollection(claim: ContractClaim, snap: DesignSourceSnapshot): ClaimResult {
+  if (!snap.collections) {
+    return {
+      claim,
+      verdict: "unverifiable",
+      reason: "read-failed",
+      evidence:
+        "the file's variable collections could not be read this time, so this claim was not " +
+        "re-checked. A failed read is not evidence that the claim still holds.",
+    };
+  }
+
+  const expected = claim.expectedModes;
+  if (!expected || expected.length === 0) {
+    return {
+      claim,
+      verdict: "unverifiable",
+      reason: "not-expressible",
+      evidence:
+        "the contract records this collection with no modes, so there is nothing to compare. " +
+        "Re-run `handoff-ready-component` to record them.",
+    };
+  }
+
+  const name = claim.token;
+  const byName = snap.collections.filter((c) => c.name === name);
+
+  if (byName.length === 0) {
+    return {
+      claim,
+      verdict: "falsified",
+      evidence:
+        `no collection named "${name}" exists in the file now. Present: ` +
+        `${snap.collections.map((c) => `"${c.name}"`).join(", ")}.`,
+    };
+  }
+
+  if (byName.length > 1) {
+    return {
+      claim,
+      verdict: "unverifiable",
+      reason: "not-expressible",
+      evidence:
+        `"${name}" is ambiguous — ${byName.length} collections share that name, so this claim ` +
+        `cannot be matched to one without an id. Candidates: ` +
+        `${byName.map((c) => `${c.id} (modes ${c.modes.join("|")})`).join(" · ")}. ` +
+        `Record the collection's id in the contract to make this checkable. ` +
+        `A composite id containing "/" is a collection imported from another library file.`,
+    };
+  }
+
+  const actual = byName[0]!;
+  const want = [...expected].sort();
+  const got = [...actual.modes].sort();
+  const same = want.length === got.length && want.every((m, i) => m === got[i]);
+
+  if (!same) {
+    return {
+      claim,
+      verdict: "falsified",
+      evidence:
+        `collection "${name}" (${actual.id}) now has modes ${got.map((m) => `"${m}"`).join(", ")}; ` +
+        `the contract recorded ${want.map((m) => `"${m}"`).join(", ")}. A mode added or removed ` +
+        `since handoff changes what the theme must define.`,
+    };
+  }
+
+  return {
+    claim,
+    verdict: "verified",
+    evidence: `collection "${name}" (${actual.id}) still has exactly modes ${got.map((m) => `"${m}"`).join(", ")}.`,
+  };
+}
+
 function verifyNotImplemented(claim: ContractClaim): ClaimResult {
   return {
     claim,
@@ -301,6 +404,8 @@ export function verifyClaims(
 ): VerifyOutcome {
   const results = claims.map((claim): ClaimResult => {
     switch (claim.kind) {
+      case "collection":
+        return verifyCollection(claim, snap);
       case "absence":
         return verifyAbsence(claim, snap);
       case "node":

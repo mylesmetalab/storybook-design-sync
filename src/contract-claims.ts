@@ -58,6 +58,13 @@ export type ClaimKind =
   | "uncheckable";
 
 export interface ContractClaim {
+  /**
+   * For a `collection` claim: the mode names the contract recorded, as data rather
+   * than only inside `statement`. Without this the checker would have to parse its
+   * own prose back out, which is the trap `notInFigma` is already stuck in.
+   */
+  expectedModes?: readonly string[];
+
   kind: ClaimKind;
   /** Dotted path in the contract, so a report can cite exactly what it read. */
   path: string;
@@ -210,6 +217,7 @@ function designSourceClaims(raw: unknown, out: ContractClaim[], gaps: string[]):
             ? `collection "${name}" has modes ${modes.map((m) => `"${m}"`).join(", ")}`
             : `collection "${name}" exists`,
         token: name,
+        ...(modes.length > 0 ? { expectedModes: modes } : {}),
       }),
     );
   }

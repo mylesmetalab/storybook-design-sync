@@ -379,10 +379,13 @@ describe("the not-implemented evidence does not claim designSource is absent", (
    * reader not to expect a check, on grounds they can see are wrong.
    */
   it("states only that the checker is unbuilt", () => {
+    // Uses `literals`, not `collections`: collection claims became implemented in
+    // v0.0.59, so pointing this at them would test the new checker instead of the
+    // not-implemented wording it exists to pin.
     const extracted = extractClaims("contracts/x.spec.json", {
       designSource: {
         readAt: "2026-08-06",
-        collections: [{ name: "Color", modes: [{ id: "1", name: "SDS Light" }] }],
+        literals: [{ nodeId: "1:2", node: "Slot", property: "itemSpacing", value: "24" }],
       },
     });
     const out = verifyClaims(extracted.claims, snap());
@@ -390,5 +393,113 @@ describe("the not-implemented evidence does not claim designSource is absent", (
     expect(ev).toMatch(/not implemented/);
     expect(ev).not.toMatch(/no real input/);
     expect(ev).not.toMatch(/carries a `designSource` block yet/);
+  });
+});
+
+/**
+ * `designSource.collections` re-checking (v0.0.59).
+ *
+ * This is the claim the whole `designSource` block was added for. The fabrication
+ * that motivated it — *"SDS defines no dark mode"*, written as settled fact, false,
+ * and worth 24 invented theme values of which 18 were wrong — is exactly a mode
+ * claim. Until now it was parsed and reported unimplemented.
+ */
+describe("collection claims", () => {
+  const claim = (name: string, modes: string[]): ContractClaim => ({
+    kind: "collection",
+    path: `designSource.collections.${name}`,
+    statement: `collection "${name}" has modes ${modes.join(", ")}`,
+    token: name,
+    expectedModes: modes,
+  });
+  const withCollections = (
+    collections: Array<{ id: string; name: string; modes: string[] }>,
+  ): DesignSourceSnapshot => ({ readAt: "2026-08-06", collections }) as DesignSourceSnapshot;
+
+  it("verifies when the modes still match, order-insensitively", () => {
+    const out = verifyClaims(
+      [claim("Color", ["SDS Dark", "SDS Light"])],
+      withCollections([{ id: "c1", name: "Color", modes: ["SDS Light", "SDS Dark"] }]),
+    );
+    expect(out.counts.verified).toBe(1);
+    expect(out.results[0]!.evidence).toMatch(/still has exactly modes/);
+  });
+
+  /** The .dark case: a mode the contract recorded is gone. */
+  it("falsifies when a mode disappears, naming both lists", () => {
+    const out = verifyClaims(
+      [claim("Color", ["SDS Light", "SDS Dark"])],
+      withCollections([{ id: "c1", name: "Color", modes: ["SDS Light"] }]),
+    );
+    expect(out.counts.falsified).toBe(1);
+    const ev = out.results[0]!.evidence;
+    expect(ev).toMatch(/now has modes "SDS Light"/);
+    expect(ev).toMatch(/contract recorded "SDS Dark", "SDS Light"/);
+  });
+
+  it("falsifies when a mode is ADDED — a new mode is theme work nobody did", () => {
+    const out = verifyClaims(
+      [claim("Color", ["SDS Light"])],
+      withCollections([{ id: "c1", name: "Color", modes: ["SDS Light", "SDS HC"] }]),
+    );
+    expect(out.counts.falsified).toBe(1);
+  });
+
+  it("falsifies when the collection is gone entirely, listing what is present", () => {
+    const out = verifyClaims(
+      [claim("Color", ["SDS Light"])],
+      withCollections([{ id: "c1", name: "Size", modes: ["Default"] }]),
+    );
+    expect(out.counts.falsified).toBe(1);
+    expect(out.results[0]!.evidence).toMatch(/no collection named "Color" exists/);
+  });
+
+  /**
+   * Collection name is NOT unique — the reference file has two `Typography` and two
+   * `Size`, one local and one imported from another library. Guessing would produce
+   * a confident verdict about the wrong collection.
+   */
+  it("refuses an ambiguous name rather than guessing, naming both candidates", () => {
+    const out = verifyClaims(
+      [claim("Size", ["Default"])],
+      withCollections([
+        { id: "VariableCollectionId:9:11257", name: "Size", modes: ["Default"] },
+        { id: "VariableCollectionId:abc/348:243", name: "Size", modes: ["Default"] },
+      ]),
+    );
+    expect(out.counts.verified).toBe(0);
+    expect(out.counts.falsified).toBe(0);
+    const ev = out.results[0]!.evidence;
+    expect(ev).toMatch(/ambiguous/);
+    expect(ev).toMatch(/9:11257/);
+    expect(ev).toMatch(/abc\/348:243/);
+    expect(ev).toMatch(/imported from another library/);
+  });
+
+  /**
+   * A failed read must never verify and never falsify. `read-failed` blocks, which
+   * is the point: not knowing is worse than knowing something is wrong.
+   */
+  it("is read-failed when collections could not be read at all", () => {
+    const out = verifyClaims([claim("Color", ["SDS Light"])], {
+      readAt: "2026-08-06",
+    } as DesignSourceSnapshot);
+    expect(out.unverifiable["read-failed"]).toBe(1);
+    expect(verifyExitCode(out)).toBe(VERIFY_EXIT.Unverifiable);
+  });
+
+  it("does not verify a collection the contract recorded with no modes", () => {
+    const bare: ContractClaim = {
+      kind: "collection",
+      path: "designSource.collections.Color",
+      statement: 'collection "Color" exists',
+      token: "Color",
+    };
+    const out = verifyClaims(
+      [bare],
+      withCollections([{ id: "c1", name: "Color", modes: ["SDS Light"] }]),
+    );
+    expect(out.counts.verified).toBe(0);
+    expect(out.unverifiable["not-expressible"]).toBe(1);
   });
 });

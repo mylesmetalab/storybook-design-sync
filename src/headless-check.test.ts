@@ -566,6 +566,29 @@ describe("runHeadlessCheck", () => {
     ).rejects.toBeInstanceOf(HeadlessSetupError);
   });
 
+  /**
+   * 2.2 (NEXT-WORK.md) — `check` cannot tell "nothing registered yet" from
+   * "connected to someone else's Storybook, which happens to have nothing
+   * registered either". Both produce an empty registry listing over a
+   * perfectly healthy channel, so the message must name both rather than
+   * pointing only at `design-sync audit`, which would be the wrong next step
+   * for the second case.
+   */
+  it("names both explanations for an empty registry — fresh project or wrong port", async () => {
+    const driver = new FakePreview({ registry: [] });
+    await expect(
+      runHeadlessCheck({
+        driver,
+        baseUrl: "http://localhost:6006",
+        selection: { stories: [], components: [] },
+        dualMode: false,
+        channel: testChannel(driver),
+      }),
+    ).rejects.toThrow(
+      /http:\/\/localhost:6006.*design-sync audit.*different Storybook|different Storybook.*design-sync audit/s,
+    );
+  });
+
   it("refuses a filter that matches nothing", async () => {
     const driver = new FakePreview({ registry });
     await expect(

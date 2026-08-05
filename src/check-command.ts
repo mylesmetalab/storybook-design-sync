@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { loadedVersion } from "./addon-version.js";
+import { ConfigNotFoundError, loadConfig } from "./config.js";
 import {
   HeadlessSetupError,
   runHeadlessCheck,
@@ -55,6 +56,17 @@ export interface CheckOptions {
   quiet: boolean;
   budgetMs?: number;
 }
+
+/**
+ * What `parseCheckArgs` alone can know: everything `CheckOptions` has, except
+ * `url`, which is deliberately unresolved here (2.2, NEXT-WORK.md /
+ * addon#109). Precedence is flag → `storybookUrl` in
+ * design-sync.config.json → the conventional dev default, and parsing has no
+ * access to the config file — only `resolveStorybookUrl` does. If parsing
+ * filled in the default itself (as it used to), the flag-vs-not-passed
+ * distinction the config layer needs would already be gone.
+ */
+export type CheckArgs = Omit<CheckOptions, "url"> & { url?: string };
 
 /** Injectable so the command is testable without a browser or a filesystem. */
 export interface CheckDeps {
@@ -120,9 +132,8 @@ export const defaultCheckDeps: CheckDeps = {
  * list comes from the same reader the panel uses. Accepting a flag that could not
  * affect the outcome would be worse than not having it.
  */
-export function parseCheckArgs(rest: string[]): CheckOptions {
-  const options: CheckOptions = {
-    url: "http://localhost:6006",
+export function parseCheckArgs(rest: string[]): CheckArgs {
+  const options: CheckArgs = {
     stories: [],
     components: [],
     dualMode: false,
@@ -180,6 +191,42 @@ export function parseCheckArgs(rest: string[]): CheckOptions {
     }
   }
   return options;
+}
+
+/** `check`'s own fallback when neither `--url` nor config names a Storybook. */
+export const DEFAULT_STORYBOOK_URL = "http://localhost:6006";
+
+/**
+ * Resolve the Storybook `check` talks to (2.2, NEXT-WORK.md / addon#109):
+ * an explicit `--url` wins outright; otherwise `storybookUrl` in
+ * design-sync.config.json; otherwise the conventional dev default.
+ *
+ * `check` has never required a config file to exist, so a MISSING one stays
+ * silent — this is purely additive. A config file that exists but fails to
+ * parse or validate is different: the user clearly tried to configure
+ * something, so `warn` fires (non-fatal — the run still proceeds against the
+ * default) rather than the misconfiguration disappearing into "why is this
+ * hitting the wrong port".
+ */
+export async function resolveStorybookUrl(
+  explicit: string | undefined,
+  opts: { cwd?: string; warn?: (message: string) => void } = {},
+): Promise<string> {
+  if (explicit) return explicit;
+  const warn = opts.warn ?? (() => {});
+  try {
+    const config = await loadConfig(opts.cwd);
+    if (config.storybookUrl) return config.storybookUrl;
+  } catch (err: unknown) {
+    if (!(err instanceof ConfigNotFoundError)) {
+      warn(
+        `[design-sync] Could not read \`storybookUrl\` from design-sync.config.json (${
+          err instanceof Error ? err.message : String(err)
+        }); using ${DEFAULT_STORYBOOK_URL}.\n`,
+      );
+    }
+  }
+  return DEFAULT_STORYBOOK_URL;
 }
 
 export async function runCheck(

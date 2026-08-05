@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { DriftReport } from "./dimensions/types.js";
 import type { BulkStoryOutcome } from "./bulk-run.js";
 import {
+  DEFAULT_STORYBOOK_URL,
   parseCheckArgs,
+  resolveStorybookUrl,
   runCheck,
   versionNotice,
   type CheckDeps,
@@ -208,9 +213,12 @@ describe("runCheck — output", () => {
 });
 
 describe("parseCheckArgs", () => {
-  it("defaults to the conventional Storybook dev URL and a single-mode run", () => {
+  it("leaves url unset when --url isn't passed, and defaults everything else to a single-mode run", () => {
+    // `url` is resolved separately, by `resolveStorybookUrl` — flag → config →
+    // default (2.2, NEXT-WORK.md / addon#109) — so parsing alone must not
+    // decide it. If it did, the config layer could never see "the flag wasn't
+    // passed" versus "the flag was passed as the default's own value".
     expect(parseCheckArgs([])).toEqual({
-      url: "http://localhost:6006",
       stories: [],
       components: [],
       dualMode: false,
@@ -219,6 +227,10 @@ describe("parseCheckArgs", () => {
       headed: false,
       quiet: false,
     });
+  });
+
+  it("still captures an explicit --url", () => {
+    expect(parseCheckArgs(["--url", "http://localhost:6007"]).url).toBe("http://localhost:6007");
   });
 
   it("accumulates repeatable filters", () => {
@@ -250,6 +262,65 @@ describe("parseCheckArgs", () => {
     expect(() => parseCheckArgs(["--stories", "src/**"])).toThrow(/Unknown argument: --stories/);
     expect(() => parseCheckArgs(["--url"])).toThrow(/--url requires a value/);
     expect(() => parseCheckArgs(["--timeout", "nope"])).toThrow(/positive number/);
+  });
+});
+
+/**
+ * 2.2 (NEXT-WORK.md, addon#109) — `--url` → `storybookUrl` in
+ * design-sync.config.json → the conventional dev default, in that order.
+ * `check` has never required a config file, so a missing one must stay
+ * silent; a config file that exists but fails to parse is different — the
+ * user tried to configure something, so `warn` fires (non-fatal: the run
+ * still proceeds against the default).
+ */
+describe("resolveStorybookUrl — flag → config → default", () => {
+  const dirs: string[] = [];
+  afterEach(async () => {
+    await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  });
+  async function configDir(config: unknown): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "design-sync-check-url-"));
+    dirs.push(dir);
+    if (config !== undefined) {
+      await writeFile(join(dir, "design-sync.config.json"), JSON.stringify(config), "utf8");
+    }
+    return dir;
+  }
+
+  it("an explicit --url wins outright, without even reading the config", async () => {
+    const dir = await configDir({ fileKey: "abc", storybookUrl: "http://localhost:9999" });
+    expect(await resolveStorybookUrl("http://localhost:7000", { cwd: dir })).toBe(
+      "http://localhost:7000",
+    );
+  });
+
+  it("falls back to storybookUrl in config when no flag was passed", async () => {
+    const dir = await configDir({ fileKey: "abc", storybookUrl: "http://localhost:7000" });
+    expect(await resolveStorybookUrl(undefined, { cwd: dir })).toBe("http://localhost:7000");
+  });
+
+  it("falls back to the conventional default when config has no storybookUrl", async () => {
+    const dir = await configDir({ fileKey: "abc" });
+    expect(await resolveStorybookUrl(undefined, { cwd: dir })).toBe(DEFAULT_STORYBOOK_URL);
+  });
+
+  it("falls back to the default silently when there is no config file at all", async () => {
+    const dir = await configDir(undefined);
+    const warnings: string[] = [];
+    expect(await resolveStorybookUrl(undefined, { cwd: dir, warn: (m) => warnings.push(m) })).toBe(
+      DEFAULT_STORYBOOK_URL,
+    );
+    expect(warnings).toEqual([]);
+  });
+
+  it("warns (but still falls back) when a config file exists but fails to parse", async () => {
+    const dir = await configDir(undefined);
+    await writeFile(join(dir, "design-sync.config.json"), "{ not json", "utf8");
+    const warnings: string[] = [];
+    expect(await resolveStorybookUrl(undefined, { cwd: dir, warn: (m) => warnings.push(m) })).toBe(
+      DEFAULT_STORYBOOK_URL,
+    );
+    expect(warnings.join("")).toContain("storybookUrl");
   });
 });
 

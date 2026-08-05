@@ -542,9 +542,17 @@ export async function runHeadlessCheck(opts: HeadlessRunOptions): Promise<Headle
 
   const listing = await listRegisteredStories(channel);
   if (listing.stories.length === 0) {
+    // A healthy channel with an empty registry has two equally-plausible causes
+    // that want different next steps — a fresh project, or `--url` (default
+    // localhost:6006, #109) landing on someone else's Storybook that happens
+    // to have nothing registered either. Naming only the first, as before,
+    // sent a "run design-sync audit" reader on a fresh project down the wrong
+    // path when the real fix was `--url`.
     throw new HeadlessSetupError(
-      "No stories are registered with a Figma node — every registry entry is a pending stub or the " +
-        "registry is empty. Run `design-sync audit` to see what is bound.",
+      `Connected to ${opts.baseUrl}, but its registry has no design-sync entries at all. Either ` +
+        "this is a fresh project and nothing has been registered yet (run `design-sync audit` to " +
+        "see what's bound), or this port is serving a different Storybook entirely — check `--url` " +
+        "or `storybookUrl` in design-sync.config.json.",
     );
   }
   const selection = selectStories(listing.stories, opts.selection);

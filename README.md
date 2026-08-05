@@ -284,6 +284,7 @@ All fields except `fileKey` are optional:
 | `cssEntries` | `["src/**/*.css"]` | Globs (relative to the Storybook host's cwd) for the CSS files the startup scanner **reads** to derive `selector → token` bindings. |
 | `tsxEntries` | `["src/**/*.tsx"]` | Globs for `.tsx` files the scanner reads to extract inline-style token bindings (`style={{ paddingTop: "var(--space-4)" }}`). Set explicitly when components live in a sibling package. |
 | `storyGlobs` | `src/**/*.stories.*`, `stories/**/*.stories.*` | Where the CLI looks for stories (see [CLI](#cli)). |
+| `storybookUrl` | *(unset)* | The Storybook dev-server URL `design-sync check` talks to when `--url` isn't passed (v0.0.62, [#109]). Unset falls through to `http://localhost:6006`. Set this when the dev server doesn't run on that port — a run that silently connects to a DIFFERENT Storybook reports the requested stories missing, indistinguishable from a real finding. |
 
 `.design-sync/registry.json` maps story IDs to Figma node IDs:
 
@@ -767,7 +768,7 @@ CLI     check      — 10/10 stories checked · 138 match · 13 drift · 85 name
 
 | Flag | Meaning |
 |---|---|
-| `--url <url>` | Storybook's dev-server URL. Default `http://localhost:6006`. |
+| `--url <url>` | Storybook's dev-server URL. Precedence: this flag → `storybookUrl` in `design-sync.config.json` → `http://localhost:6006` (v0.0.62, [#109]). Set `storybookUrl` in any project where the dev server doesn't run on the default port — a run that silently lands on a DIFFERENT Storybook reports the requested stories missing, indistinguishable from a real finding. |
 | `--story <id>` | Check only this story. Repeatable. An id the registry does not bind is an error, never a silent skip. |
 | `--component <name>` | Check every registered story of this component (matched against the story id's component segment). Repeatable. |
 | `--both-modes` | The **Both modes** checkbox. Snapshots each story in both themes and merges, and says so when the theme switch could not be verified. |
@@ -1617,6 +1618,7 @@ consumers, it never compares them.
 [#85]: https://github.com/mylesmetalab/storybook-design-sync/issues/85
 [#107]: https://github.com/mylesmetalab/storybook-design-sync/issues/107
 [#108]: https://github.com/mylesmetalab/storybook-design-sync/issues/108
+[#109]: https://github.com/mylesmetalab/storybook-design-sync/issues/109
 
 ## What this addon is NOT
 

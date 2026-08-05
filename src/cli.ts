@@ -27,7 +27,7 @@ import {
   type DiscoveredStory,
   type DiscoveryOutcome,
 } from "./story-discovery.js";
-import { parseCheckArgs, runCheck } from "./check-command.js";
+import { parseCheckArgs, resolveStorybookUrl, runCheck } from "./check-command.js";
 import { CHECK_EXIT } from "./check-report.js";
 import { INIT_EXIT, parseInitArgs, runInit } from "./init.js";
 import { VERIFY_EXIT } from "./contract-verify.js";
@@ -97,7 +97,11 @@ async function main(argv: string[]): Promise<number> {
       // exits 2 — the code that means "I ran and the coverage has gaps". A wrong
       // flag must never be reported as an incomplete drift check.
       try {
-        return await runCheck(parseCheckArgs(rest));
+        const args = parseCheckArgs(rest);
+        const url = await resolveStorybookUrl(args.url, {
+          warn: (message) => process.stderr.write(message),
+        });
+        return await runCheck({ ...args, url });
       } catch (err: unknown) {
         console.error(err instanceof Error ? err.message : String(err));
         return CHECK_EXIT.CouldNotRun;

@@ -831,6 +831,66 @@ describe("token-value: box-shadow", () => {
     expect(shadow.figmaValue).toContain("(token: Border/Neutral/Secondary)");
     expect(shadow.status).toBe("match");
   });
+
+  /**
+   * addon#106 — Tailwind v4 composes `box-shadow` from independent
+   * inset-ring/ring-offset/ring/shadow slots and fills every UNUSED slot with
+   * `0 0 #0000` rather than omitting it, so `getComputedStyle` hands back six
+   * layers for a component with two real shadows. Figma has no opinion about
+   * the four placeholder slots — they paint nothing — so comparing them was
+   * the wrong question, and reported drift on every shadowed Tailwind v4
+   * component forever.
+   */
+  describe("Tailwind v4's transparent placeholder shadow layers", () => {
+    const TAILWIND_V4_SHADOW =
+      "0px 0px #0000, 0px 0px #0000, 0px 0px #0000, 0px 0px #0000, " +
+      "0px 2px 4px 0px rgba(0, 0, 0, 0.25)";
+
+    it("matches when the real layers agree, ignoring the four transparent placeholders", async () => {
+      const dimensions = await textCheck({
+        style: { fontSize: 14 },
+        styles: { "box-shadow": TAILWIND_V4_SHADOW },
+        effects: [FIGMA_DROP_SHADOW],
+      });
+      const shadow = row(dimensions, "box-shadow");
+      expect(shadow.status).toBe("match");
+    });
+
+    it("says how many placeholder layers were dropped and why", async () => {
+      const dimensions = await textCheck({
+        style: { fontSize: 14 },
+        styles: { "box-shadow": TAILWIND_V4_SHADOW },
+        effects: [FIGMA_DROP_SHADOW],
+      });
+      const shadow = row(dimensions, "box-shadow");
+      expect(shadow.note).toMatch(/4.*transparent/i);
+    });
+
+    it("still reports drift when a real layer genuinely differs", async () => {
+      const dimensions = await textCheck({
+        style: { fontSize: 14 },
+        // Real layer's blur (8px) doesn't match Figma's (4px).
+        styles: {
+          "box-shadow":
+            "0px 0px #0000, 0px 0px #0000, 0px 0px #0000, 0px 0px #0000, " +
+            "0px 2px 8px 0px rgba(0, 0, 0, 0.25)",
+        },
+        effects: [FIGMA_DROP_SHADOW],
+      });
+      expect(row(dimensions, "box-shadow").status).toBe("drift");
+    });
+
+    it("emits no row when every code-side layer is a transparent placeholder and Figma has no shadow", async () => {
+      const dimensions = await textCheck({
+        style: { fontSize: 14 },
+        styles: {
+          "box-shadow": "0px 0px #0000, 0px 0px #0000, 0px 0px #0000, 0px 0px #0000",
+        },
+        effects: [],
+      });
+      expect(maybeRow(dimensions, "box-shadow")).toBeUndefined();
+    });
+  });
 });
 
 /* -------------------------------------------------------------------------- *

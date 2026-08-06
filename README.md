@@ -697,12 +697,14 @@ before.
 
 ## CLI
 
-The package ships a `design-sync` binary with six subcommands:
+The package ships a `design-sync` binary with these subcommands:
 
 ```
 design-sync init                        Set up the suite in this project (see `design-sync init`)
 design-sync check [--url http://localhost:6006]
                                         Run the drift check headlessly against a RUNNING Storybook
+design-sync verify                      Re-read contracts/*.spec.json's claims against Figma — no browser needed
+design-sync scan --out <file>           Write the startup token scan to a file — no browser, no Storybook needed
 design-sync audit                       Diff stories on disk against the registry
 design-sync register [--hints <path>]   Bulk-register from hints; stub the rest
 design-sync ls                          Print title → node binding tree
@@ -911,6 +913,25 @@ properties) are **parsed but not yet re-checked**: no contract in this project
 carries that block — it was added on 2026-07-31, after both existing contracts were
 written — so there has been no real input to build the checker against. A contract
 without it is reported as a gap, never as a passing contract.
+
+### `scan` — the startup token scan, without a live Storybook
+
+```sh
+npx design-sync scan --out tokens.json
+```
+
+The same CSS/TSX → token scan the Storybook preset runs once at startup
+(`preset.ts`), as a standalone command. No browser, no running Storybook — just
+the filesystem, so it runs in CI right alongside `verify`. `--code-ref <sha>`
+stamps a specific commit instead of reading the current git HEAD (CI already
+knows its own checked-out SHA precisely).
+
+Exists for one reason: everywhere else, the scan only ever lives as a module
+singleton inside a running dev server — nothing outside that process can see
+it. This is what lets it travel as a file instead: the artifact a hosted check
+(see "Hosted-check envelope" under Coverage and limits — nothing runs on this
+yet) will need to compare against a deployed, static Storybook build, where
+there is no live process to ask.
 
 ### `audit` — surface drift, fail CI
 
@@ -1636,6 +1657,14 @@ This is the first piece of the hosted-check plan (the parent `design-sync`
 repo's `HOSTED-CHECK-SPEC.md` / `HOSTED-CHECK-TASKS.md`) — the type and its one
 construction site (`buildHostedEnvelope`) exist; nothing yet produces or reads
 one at runtime, and `check` and the panel are unaffected until later phases land.
+
+The second piece, `design-sync scan --out <file>` (see the CLI section), does
+exist and run today — it lets the startup scan (`AutoScan`) travel as a file
+instead of only ever living inside a running dev server. It is still only a
+building block: nothing yet reads a scan artifact to answer a check against a
+deployed Storybook (that is the "second engine host" phase — see
+`HOSTED-CHECK-SPEC.md`'s "core idea" section for why that phase is the
+majority of the remaining work, not a formality).
 
 ## What this addon is NOT
 

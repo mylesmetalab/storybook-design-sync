@@ -54,7 +54,7 @@ interface ChannelLike {
  */
 let engineMemo: { key: string; engine: Engine } | null = null;
 
-function getEngine(name: string, fileKey: string, ctx: EngineContext): Engine {
+export function getEngine(name: string, fileKey: string, ctx: EngineContext): Engine {
   const key = [name, fileKey, ctx.cachePath ?? "", ctx.figmaPat ?? ""].join("\0");
   if (engineMemo && engineMemo.key === key) return engineMemo.engine;
   const engine = resolveEngine(name, ctx);
@@ -962,7 +962,7 @@ interface AutoBindingOutcome {
   advisory?: string;
 }
 
-function mergeAutoBindings(
+export function mergeAutoBindings(
   storyId: string,
   target: string | undefined,
   snapshot: import("./engines/types.js").CodeSnapshot | undefined,
@@ -1050,7 +1050,7 @@ function cloneIndex(index: CustomPropertyIndex): Record<string, string[]> {
  * without one it falls back to the "converted by convention, unconfirmed" caveat,
  * which is what every consumer whose CSS the scanner cannot reach still gets.
  */
-function annotateTokenPresence(report: DriftReport): void {
+export function annotateTokenPresence(report: DriftReport): void {
   const index = getAutoScan().customProperties;
   if (Object.keys(index).length === 0) return;
   for (const dim of report.dimensions) {
@@ -1075,7 +1075,7 @@ function annotateTokenPresence(report: DriftReport): void {
  * Read on every check rather than cached: a spec edited between checks must take
  * effect on the next one, and the file is small.
  */
-async function annotateContract(
+export async function annotateContract(
   report: DriftReport,
   storyId: string,
   rootSelector: string | undefined,
@@ -1110,7 +1110,7 @@ async function annotateContract(
  * "background-color drifted". Purely additive annotation — no diff's status,
  * values, or partitioning depend on it.
  */
-function annotateClassHints(
+export function annotateClassHints(
   report: DriftReport,
   classes: Record<string, string>,
 ): void {
@@ -1142,7 +1142,7 @@ function annotateClassHints(
  * engine reads `snapshot.bindings` to decide the code side's token, and a state's
  * answer is genuinely different from the resting one.
  */
-function mergeStateAutoBindings(
+export function mergeStateAutoBindings(
   storyId: string,
   target: string | undefined,
   stateSnapshots: StateSnapshotEntry[] | undefined,
@@ -1182,7 +1182,7 @@ export function annotateStateClassHints(
   }
 }
 
-function mergeChildAutoBindings(childSnapshots: ChildSnapshotEntry[] | undefined): void {
+export function mergeChildAutoBindings(childSnapshots: ChildSnapshotEntry[] | undefined): void {
   if (!childSnapshots) return;
   for (const child of childSnapshots) {
     if (child.kind !== "found" || !child.snapshot) continue;

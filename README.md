@@ -1681,10 +1681,40 @@ with the local check's own driver except which bridge gets installed.
 dev server), driven by a real headless Chromium — a real `CodeSnapshotPayload`
 came back with real computed styles.
 
-It is still only a building block: nothing yet calls the engine against what
-this returns (that is the rest of the "second engine host" phase — see
-`HOSTED-CHECK-SPEC.md`'s "core idea" section for why that phase is the
-majority of the remaining work, not a formality).
+The fourth and last piece, `src/hosted-engine.ts`'s `runHostedCodeSnapshot`,
+also exists and runs today: it turns a `CodeSnapshotPayload` into a real
+`DriftReport` by calling `engine.checkDrift`, reusing `server.ts`'s actual
+merge/build/annotate steps (`mergeAutoBindings`, `buildChildTargets`,
+`chooseStateTargets`, `runModePasses`, `annotateClassHints`,
+`annotateTokenPresence`, `annotateContract`, and their siblings — now
+exported, not duplicated) rather than reimplementing any comparison logic.
+One thing is deliberately **not** shared, named rather than hidden: the live
+channel handler's own *call sequence* has no dedicated test file of its own
+(only its already-exported pieces do), so this mirrors that sequence instead
+of refactoring the live handler to share it — a real, residual gap between
+the two orchestration bodies if they're ever changed one at a time. Every
+individual comparison/merge step is still the exact same function on both
+paths; only their composition exists twice.
+
+**Verified as a full pipeline, not just piece by piece**: a real scan of a
+real consumer project, loaded back and set as the process's `AutoScan`,
+feeding a real headless-browser-driven snapshot against a real deployed
+static build, wired through to a stand-in engine (no real Figma credentials
+in this pass) — which correctly resolved the real registry entry, ran the
+real merge/annotation pipeline, and produced a real `DriftReport` row
+correctly attributing `codeClassName: "bg-secondary"` from the loaded scan
+artifact alone, with no live dev-server process involved anywhere.
+
+This closes the second engine host's core loop — scan → load → drive → wire
+to engine — for a single story, single mode, no children/states declared.
+Not yet built: looping this over an entire registry (the "sweep" a nightly
+or on-merge trigger needs), dual-mode support in the hosted path specifically
+(the machinery is reused unchanged and should carry through, but is
+unverified end-to-end here), and everything outside `storybook-sync-addon`
+itself — the actual Cloud Run service, Secret Manager-provisioned
+`FIGMA_PAT`, and the report envelope construction tying a run's outcome to
+`HostedCheckEnvelope` (Phase 1) remain Phase 2's and later phases' work,
+per `HOSTED-CHECK-TASKS.md`.
 
 ## What this addon is NOT
 

@@ -2,7 +2,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { parseScanArgs, resolveCodeRef, runScan, type ScanDeps } from "./scan-command.js";
+import {
+  loadScanArtifact,
+  parseScanArgs,
+  resolveCodeRef,
+  runScan,
+  toAutoScan,
+  type ScanArtifact,
+  type ScanDeps,
+} from "./scan-command.js";
 
 /**
  * Phase 3 of the hosted-check plan (HOSTED-CHECK-TASKS.md T6/T7): the
@@ -132,5 +140,68 @@ describe("runScan", () => {
     await expect(runScan({ cwd: dir, out: "tokens.json" }, testDeps())).rejects.toThrow(
       /No config found/,
     );
+  });
+});
+
+/**
+ * Phase 4, sub-PR 1 of 3 (HOSTED-CHECK-TASKS.md T8: load-artifact / drive-snapshot
+ * / wire-to-engine): the read-side counterpart to `runScan`'s write. This is what
+ * lets a hosted runner load what `scan --out` produced instead of reading the
+ * live `getAutoScan()` module singleton `preset.ts` populates — the first piece
+ * of the second engine host, deliberately built as its own reviewable slice.
+ */
+describe("loadScanArtifact", () => {
+  it("round-trips exactly what runScan wrote", async () => {
+    const dir = await fixture({
+      "design-sync.config.json": JSON.stringify({ fileKey: "TEST_KEY" }),
+      "src/button.css": ".button { background-color: var(--color-brand); }",
+    });
+    const outPath = join(dir, "tokens.json");
+    // The default testDeps().write is a no-op stub — this round-trip needs a
+    // real write to disk, since loadScanArtifact reads the actual file.
+    const written = await runScan(
+      { cwd: dir, out: outPath },
+      testDeps({ write: (path, contents) => writeFile(path, contents, "utf8") }),
+    );
+
+    const loaded = await loadScanArtifact(outPath);
+    expect(loaded).toEqual(written);
+  });
+
+  it("refuses a file with no codeRef rather than treating it as an empty, unstamped scan", async () => {
+    const dir = await fixture({ "bad.json": JSON.stringify({ map: {} }) });
+    await expect(loadScanArtifact(join(dir, "bad.json"))).rejects.toThrow(/codeRef/);
+  });
+
+  it("refuses a file with no map rather than silently defaulting to empty", async () => {
+    const dir = await fixture({ "bad.json": JSON.stringify({ codeRef: "abc123" }) });
+    await expect(loadScanArtifact(join(dir, "bad.json"))).rejects.toThrow(/"map"/);
+  });
+
+  it("refuses invalid JSON with a message naming the file", async () => {
+    const dir = await fixture({ "bad.json": "{ not json" });
+    await expect(loadScanArtifact(join(dir, "bad.json"))).rejects.toThrow(/bad\.json/);
+  });
+});
+
+describe("toAutoScan", () => {
+  it("projects a ScanArtifact down to the plain AutoScan shape setAutoScan expects", () => {
+    const artifact: ScanArtifact = {
+      map: { ".button": { "background-color": "color-brand" } },
+      themeVars: { "color-brand": "#000" },
+      components: [],
+      classHints: {},
+      customProperties: {},
+      codeRef: "abc123",
+      scannedAt: "2026-08-07T00:00:00.000Z",
+      addonVersion: "0.0.62",
+    };
+    expect(toAutoScan(artifact)).toEqual({
+      map: artifact.map,
+      themeVars: artifact.themeVars,
+      components: artifact.components,
+      classHints: artifact.classHints,
+      customProperties: artifact.customProperties,
+    });
   });
 });

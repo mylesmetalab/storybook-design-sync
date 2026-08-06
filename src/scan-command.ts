@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { loadConfig } from "./config.js";
@@ -138,4 +138,71 @@ export async function runScan(opts: ScanOptions, deps: ScanDeps = defaultScanDep
       `${tsxResult.components.length} tailwind-cva component(s), codeRef ${codeRef}.\n`,
   );
   return artifact;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Loading a scan artifact back — sub-PR 1 of 3 for the hosted-check plan's
+ * second engine host (HOSTED-CHECK-TASKS.md T8: load-artifact / drive-snapshot
+ * / wire-to-engine). Everywhere else, `AutoScan` only ever exists as a module
+ * singleton (`auto-tokens.ts`'s `setAutoScan`/`getAutoScan`) populated by a
+ * running Storybook process. This is the read side that lets a runner with no
+ * such process load exactly what `runScan` wrote instead.
+ * ------------------------------------------------------------------------- */
+
+/** Injectable so a malformed-file test needs no real filesystem. */
+export interface LoadScanArtifactDeps {
+  read: (path: string) => Promise<string>;
+}
+
+const defaultLoadScanArtifactDeps: LoadScanArtifactDeps = {
+  read: (path) => readFile(path, "utf8"),
+};
+
+/**
+ * Validates only enough to fail loudly on a truncated or wrong-shaped file.
+ * A malformed artifact silently treated as an empty scan would be
+ * indistinguishable from "this codebase declares nothing" to whatever reads
+ * it later — the same failure mode `runScan` itself refuses to produce on a
+ * config or scan error, one layer downstream.
+ */
+export async function loadScanArtifact(
+  path: string,
+  deps: LoadScanArtifactDeps = defaultLoadScanArtifactDeps,
+): Promise<ScanArtifact> {
+  const raw = await deps.read(path);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: unknown) {
+    const m = err instanceof Error ? err.message : String(err);
+    throw new Error(`Scan artifact at ${path} is not valid JSON: ${m}`);
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error(`Scan artifact at ${path} is not a JSON object.`);
+  }
+  const candidate = parsed as Partial<ScanArtifact>;
+  if (typeof candidate.codeRef !== "string" || !candidate.codeRef) {
+    throw new Error(
+      `Scan artifact at ${path} is missing "codeRef" — refusing to use an unstamped artifact.`,
+    );
+  }
+  if (typeof candidate.map !== "object" || candidate.map === null) {
+    throw new Error(`Scan artifact at ${path} is missing "map" — this is not a scan artifact.`);
+  }
+  return {
+    map: candidate.map,
+    themeVars: candidate.themeVars ?? {},
+    components: candidate.components ?? [],
+    classHints: candidate.classHints ?? {},
+    customProperties: candidate.customProperties ?? {},
+    codeRef: candidate.codeRef,
+    scannedAt: candidate.scannedAt ?? "",
+    ...(candidate.addonVersion !== undefined ? { addonVersion: candidate.addonVersion } : {}),
+  };
+}
+
+/** Drops a `ScanArtifact`'s provenance fields down to the plain `AutoScan` shape `setAutoScan` takes. */
+export function toAutoScan(artifact: ScanArtifact): AutoScan {
+  const { map, themeVars, components, classHints, customProperties } = artifact;
+  return { map, themeVars, components, classHints, customProperties };
 }

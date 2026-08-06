@@ -1660,11 +1660,15 @@ one at runtime, and `check` and the panel are unaffected until later phases land
 
 The second piece, `design-sync scan --out <file>` (see the CLI section), does
 exist and run today — it lets the startup scan (`AutoScan`) travel as a file
-instead of only ever living inside a running dev server. It is still only a
-building block: nothing yet reads a scan artifact to answer a check against a
-deployed Storybook (that is the "second engine host" phase — see
-`HOSTED-CHECK-SPEC.md`'s "core idea" section for why that phase is the
-majority of the remaining work, not a formality).
+instead of only ever living inside a running dev server. `src/scan-command.ts`
+also exports `loadScanArtifact` (reads one back, refusing a file missing
+`codeRef` or `map` rather than silently treating it as an empty scan) and
+`toAutoScan` (projects a loaded artifact down to the plain shape
+`setAutoScan` takes) — the first slice of the second engine host's plumbing.
+It is still only a building block: nothing yet *drives* a headless render or
+calls the engine against a deployed Storybook (that is the rest of the
+"second engine host" phase — see `HOSTED-CHECK-SPEC.md`'s "core idea" section
+for why that phase is the majority of the remaining work, not a formality).
 
 ## What this addon is NOT
 

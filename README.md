@@ -1620,6 +1620,23 @@ consumers, it never compares them.
 [#108]: https://github.com/mylesmetalab/storybook-design-sync/issues/108
 [#109]: https://github.com/mylesmetalab/storybook-design-sync/issues/109
 
+### Hosted-check envelope (in progress — nothing runs on this yet)
+
+`HostedCheckEnvelope` (`src/hosted-envelope.ts`) is `CheckJsonDocument` plus five
+fields a check only needs once it can run unattended, on infrastructure separate
+from what it measures: `computedAt` (when this specific check ran, derived from
+the run's own `finishedAt` rather than a second clock read), `trigger`
+(`on-demand` | `on-merge` | `nightly` | `figma-webhook`), `codeRef` (the exact
+commit the deployed build came from), and `measuringVersion` / `engineVersion`
+kept as two separate fields — in hosted mode the deployed build and the checking
+service are independently deployed and can genuinely be on different releases at
+once, and recording only one would hide that divergence instead of stating it.
+
+This is the first piece of the hosted-check plan (the parent `design-sync`
+repo's `HOSTED-CHECK-SPEC.md` / `HOSTED-CHECK-TASKS.md`) — the type and its one
+construction site (`buildHostedEnvelope`) exist; nothing yet produces or reads
+one at runtime, and `check` and the panel are unaffected until later phases land.
+
 ## What this addon is NOT
 
 - Not *only* a CLI. The panel is the surface a designer works in; the CLI

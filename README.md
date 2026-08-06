@@ -1665,10 +1665,26 @@ also exports `loadScanArtifact` (reads one back, refusing a file missing
 `codeRef` or `map` rather than silently treating it as an empty scan) and
 `toAutoScan` (projects a loaded artifact down to the plain shape
 `setAutoScan` takes) — the first slice of the second engine host's plumbing.
-It is still only a building block: nothing yet *drives* a headless render or
-calls the engine against a deployed Storybook (that is the rest of the
-"second engine host" phase — see `HOSTED-CHECK-SPEC.md`'s "core idea" section
-for why that phase is the majority of the remaining work, not a formality).
+The third piece, `src/hosted-driver.ts`'s `driveStorySnapshot`, also exists and
+runs today: it drives a real `EVENTS.CheckDriftRequest` → `EVENTS.CodeSnapshot`
+round trip against an arbitrary deployed URL, reusing the exact same
+`requestStoryCheck` construction site and channel machinery `check` already
+uses against a dev server. Nothing about `preview.ts` changes or gets
+reimplemented — a static `storybook build` already bundles it (Storybook
+bundles every registered addon's preview entry regardless of dev vs. static),
+so the only new piece is capturing its reply instead of letting a live
+`server.ts` consume it first. `launchHostedPlaywrightDriver`
+(`headless-driver.ts`) launches the browser for it, sharing every mechanic
+with the local check's own driver except which bridge gets installed.
+**Verified against a real deployed build**, not just a fake driver: a real
+`storybook build` of `design-sync-starter`, served as plain static files (no
+dev server), driven by a real headless Chromium — a real `CodeSnapshotPayload`
+came back with real computed styles.
+
+It is still only a building block: nothing yet calls the engine against what
+this returns (that is the rest of the "second engine host" phase — see
+`HOSTED-CHECK-SPEC.md`'s "core idea" section for why that phase is the
+majority of the remaining work, not a formality).
 
 ## What this addon is NOT
 

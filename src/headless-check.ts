@@ -93,6 +93,33 @@ export function bridgeInstallSource(): string {
   return bridgeSource({ events: BRIDGE_EVENTS, storyPreparedEvent: STORY_PREPARED });
 }
 
+/**
+ * The hosted runner's own bridge event list — everything `BRIDGE_EVENTS` watches
+ * *except* `DriftReport`/`DriftError`/`RegisteredStories`/`WarmCacheDone`/
+ * `ConfigInfo`, plus `CodeSnapshot`.
+ *
+ * Those five are server replies, and a deployed static build has no live
+ * `server.ts` to send them — the hosted runner reads the registry and the
+ * scan artifact from files instead of asking over the channel (see
+ * `hosted-driver.ts`). `CodeSnapshot` is watched instead, because that is
+ * `preview.ts`'s real, unmodified reply to a `CheckDriftRequest` — the same
+ * event `server.ts` would consume in a live process, captured here because
+ * there is no live process to consume it first.
+ */
+export const HOSTED_BRIDGE_EVENTS: string[] = [
+  STORY_RENDERED,
+  STORY_PREPARED,
+  STORY_MISSING,
+  STORY_ERRORED,
+  STORY_THREW_EXCEPTION,
+  CONFIG_ERROR,
+  EVENTS.CodeSnapshot,
+];
+
+export function hostedBridgeInstallSource(): string {
+  return bridgeSource({ events: HOSTED_BRIDGE_EVENTS, storyPreparedEvent: STORY_PREPARED });
+}
+
 export function bridgeAttachedSource(): string {
   return ATTACHED_SOURCE;
 }
@@ -398,7 +425,7 @@ export async function checkStoryHeadless(opts: {
   return payload.report;
 }
 
-function preparedId(event: BridgeEvent): string | undefined {
+export function preparedId(event: BridgeEvent): string | undefined {
   const payload = event.args[0] as { id?: string } | undefined;
   return payload?.id;
 }

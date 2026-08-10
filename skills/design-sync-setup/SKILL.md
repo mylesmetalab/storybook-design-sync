@@ -19,14 +19,14 @@ When run on a project that already has `.claude/skills/`, compare each local ski
 1. Node ≥ 20.6 (`node --version`)
 2. Storybook **10** in the host project (`npm ls storybook`). SB 8/9: stop and tell the user the suite requires Storybook 10.
 3. Ask the user for their **Figma file key** (from the file URL: `figma.com/design/<FILE_KEY>/…`) and confirm the file uses Figma **variables** for its tokens. If tokens are raw hex values in Figma, warn: drift comparison needs variables; the inspector still works.
-4. `FIGMA_PAT` present in the environment, or tell the user how to create one (Figma → Settings → Security → Personal access tokens; scopes: file content read, variables read).
+4. `FIGMA_PAT` present in the environment, or tell the user how to create their own — never share a token between people, since a Figma PAT authenticates as the full underlying account, not a scoped project credential (Figma → account menu → Settings → Security → Personal access tokens → Generate new token; select **File content: Read-only** and **Variables: Read-only** — the latter is Enterprise-plan only, so its absence from the picker means the account's seat doesn't carry that entitlement, not a mistake in the steps).
 
 ## Steps
 
 ### 1. Run `design-sync init`
 
 ```bash
-npm install --save-dev "github:mylesmetalab/storybook-design-sync#v0.0.64" "github:mylesmetalab/storybook-design-inspector#v0.2.7"
+npm install --save-dev "github:mylesmetalab/storybook-design-sync#v0.0.65" "github:mylesmetalab/storybook-design-inspector#v0.2.7"
 npx design-sync init --file-key <your Figma file key>
 ```
 

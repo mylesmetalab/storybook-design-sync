@@ -1,4 +1,9 @@
-import { bridgeAttachedSource, bridgeInstallSource, type HeadlessDriver } from "./headless-check.js";
+import {
+  bridgeAttachedSource,
+  bridgeInstallSource,
+  hostedBridgeInstallSource,
+  type HeadlessDriver,
+} from "./headless-check.js";
 
 /**
  * The only file in this package that knows a browser exists.
@@ -85,6 +90,52 @@ function isPlaywright(mod: unknown): mod is PlaywrightLike {
   return typeof chromium?.launch === "function";
 }
 
+/**
+ * Which file a package's own conditional `exports` names for the **ESM**
+ * consumer of its root `"."` entry — falling back to `module`/`main` only when
+ * there is no `import` condition to read at all.
+ *
+ * Exists because `require.resolve(specifier)` (what the fallback below used to
+ * call directly) walks the `require`/`main` condition, and for a package that
+ * genuinely ships different content per condition — Playwright does — that
+ * resolves to a different module than `import(specifier)` would give you.
+ * Playwright's own `package.json`: `exports["."].require` is `./index.js`
+ * (internal — `clientEventEmitter`, `oop`, `server`, no `chromium` at the top
+ * level at all) while `exports["."].import` is `./index.mjs` (the public API,
+ * `chromium`/`firefox`/`webkit`). Resolving via `require` silently hands back
+ * the wrong module — not an error, just the wrong shape, which is what made
+ * this pass a bare truthy check and fail deep inside `isPlaywright` instead.
+ */
+export function esmEntryFor(pkg: {
+  exports?: unknown;
+  main?: string;
+  module?: string;
+}): string | undefined {
+  const root = rootExportCondition(pkg.exports);
+  if (typeof root === "string") return root;
+  if (root && typeof root === "object") {
+    const importCond = (root as Record<string, unknown>)["import"];
+    if (typeof importCond === "string") return importCond;
+    // Nested conditions, e.g. `{ import: { default: "./index.mjs" } }`.
+    if (importCond && typeof importCond === "object") {
+      const nested = (importCond as Record<string, unknown>)["default"];
+      if (typeof nested === "string") return nested;
+    }
+  }
+  if (typeof pkg.module === "string") return pkg.module;
+  return typeof pkg.main === "string" ? pkg.main : undefined;
+}
+
+function rootExportCondition(exportsField: unknown): unknown {
+  // `exports: "./index.mjs"` — a bare string IS the root condition itself.
+  if (typeof exportsField === "string") return exportsField;
+  if (!exportsField || typeof exportsField !== "object") return undefined;
+  const obj = exportsField as Record<string, unknown>;
+  // `exports: { ".": { ... } }` — map keyed by subpath. `"."` present is the
+  // unambiguous signal for this shape, as opposed to a flat condition map.
+  return "." in obj ? obj["."] : exportsField;
+}
+
 async function loadPlaywright(): Promise<PlaywrightLike> {
   const specifier = ["play", "wright"].join("");
   const attempts: string[] = [];
@@ -98,12 +149,28 @@ async function loadPlaywright(): Promise<PlaywrightLike> {
   try {
     const { createRequire } = await import("node:module");
     const { pathToFileURL } = await import("node:url");
-    const { join } = await import("node:path");
+    const { dirname, join } = await import("node:path");
+    const { readFile } = await import("node:fs/promises");
     const requireFromCwd = createRequire(pathToFileURL(join(process.cwd(), "package.json")));
-    const resolved = requireFromCwd.resolve(specifier);
-    const mod = (await import(pathToFileURL(resolved).href)) as unknown;
-    if (isPlaywright(mod)) return mod;
-    attempts.push(`resolved from ${process.cwd()} but exposes no \`chromium.launch\``);
+    // Resolving the package's OWN package.json is unambiguous — every package's
+    // `exports` map (or the absence of one) still resolves `"./package.json"`
+    // to itself — unlike resolving the bare specifier, which is exactly the
+    // condition (`require` vs `import`) this function needs to read past.
+    const pkgJsonPath = requireFromCwd.resolve(`${specifier}/package.json`);
+    const pkg = JSON.parse(await readFile(pkgJsonPath, "utf8")) as {
+      exports?: unknown;
+      main?: string;
+      module?: string;
+    };
+    const entry = esmEntryFor(pkg);
+    if (!entry) {
+      attempts.push(`resolved from ${process.cwd()} but its package.json names no ESM entry`);
+    } else {
+      const resolved = join(dirname(pkgJsonPath), entry);
+      const mod = (await import(pathToFileURL(resolved).href)) as unknown;
+      if (isPlaywright(mod)) return mod;
+      attempts.push(`resolved from ${process.cwd()} (${entry}) but exposes no \`chromium.launch\``);
+    }
   } catch (err: unknown) {
     attempts.push(`from ${process.cwd()}: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -118,21 +185,36 @@ export interface PlaywrightDriverHandle extends HeadlessDriver {
   pageErrors(): string[];
 }
 
-/**
- * Launch a headless Chromium with the bridge installed as an init script.
- *
- * `addInitScript` — not a post-load `evaluate` — is load-bearing: the bridge
- * traps `globalThis.__STORYBOOK_ADDONS_CHANNEL__` on assignment, and the first
- * story's `storyPrepared` fires while the preview boots. Installing after load
- * would miss it and every story would then need a redundant re-render to produce
- * one.
- */
-export async function launchPlaywrightDriver(opts: {
-  /** Visible browser, for debugging a check that behaves differently headless. */
+interface DriverOptions {
   headed?: boolean;
   viewport?: { width: number; height: number };
   navigationTimeoutMs?: number;
-} = {}): Promise<PlaywrightDriverHandle> {
+}
+
+/**
+ * Shared Playwright mechanics behind both `launchPlaywrightDriver` (a running
+ * `storybook dev`) and `launchHostedPlaywrightDriver` (an arbitrary deployed
+ * URL). The two differ only in which bridge gets installed as the init script
+ * and what a load/attach failure should tell the reader — everything about
+ * launching Chromium, wiring console/pageerror capture, and driving the page
+ * is identical, and duplicating it would be the exact class of divergence
+ * this project exists to catch elsewhere.
+ *
+ * `addInitScript` — not a post-load `evaluate` — is load-bearing regardless of
+ * which bridge is installed: the bridge traps
+ * `globalThis.__STORYBOOK_ADDONS_CHANNEL__` on assignment, and the first
+ * story's `storyPrepared` fires while the preview boots. Installing after load
+ * would miss it and every story would then need a redundant re-render to
+ * produce one.
+ */
+async function createDriverHandle(
+  bridgeInstall: string,
+  opts: DriverOptions,
+  messages: {
+    notLoaded: (url: string, err: unknown) => string;
+    notAttached: (url: string, pageErrors: string[]) => string;
+  },
+): Promise<PlaywrightDriverHandle> {
   const playwright = await loadPlaywright();
   const browser = await playwright.chromium.launch({
     headless: opts.headed !== true,
@@ -162,8 +244,7 @@ export async function launchPlaywrightDriver(opts: {
     errors.push(err?.message ?? String(args[0]));
   });
 
-  const install = bridgeInstallSource();
-  await page.addInitScript({ content: install });
+  await page.addInitScript({ content: bridgeInstall });
 
   const navigationTimeoutMs = opts.navigationTimeoutMs ?? 60_000;
 
@@ -172,13 +253,7 @@ export async function launchPlaywrightDriver(opts: {
       try {
         await page.goto(url, { waitUntil: "domcontentloaded", timeout: navigationTimeoutMs });
       } catch (err: unknown) {
-        throw new BrowserUnavailableError(
-          `Could not load ${url} — is Storybook running there? ` +
-            `Start it with \`storybook dev\` (a static \`storybook build\` has no addon server, ` +
-            `so it cannot answer a drift check). Underlying error: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-        );
+        throw new BrowserUnavailableError(messages.notLoaded(url, err));
       }
       // The bridge object exists from the init script; `attached` becomes true
       // when Storybook installs its channel. Waiting on `attached` rather than on
@@ -188,11 +263,7 @@ export async function launchPlaywrightDriver(opts: {
           timeout: navigationTimeoutMs,
         });
       } catch {
-        throw new BrowserUnavailableError(
-          `${url} loaded but never installed a Storybook channel. ` +
-            `Either it is not a Storybook preview, or the preview failed to boot.` +
-            (errors.length > 0 ? `\nPage errors:\n  ${errors.slice(0, 5).join("\n  ")}` : ""),
-        );
+        throw new BrowserUnavailableError(messages.notAttached(url, errors));
       }
     },
     evaluate<T>(expression: string): Promise<T> {
@@ -209,4 +280,48 @@ export async function launchPlaywrightDriver(opts: {
       }
     },
   };
+}
+
+function notAttachedMessage(url: string, pageErrors: string[]): string {
+  return (
+    `${url} loaded but never installed a Storybook channel. ` +
+    `Either it is not a Storybook preview, or the preview failed to boot.` +
+    (pageErrors.length > 0 ? `\nPage errors:\n  ${pageErrors.slice(0, 5).join("\n  ")}` : "")
+  );
+}
+
+/**
+ * Launch a headless Chromium against a running `storybook dev`, with the
+ * local-check bridge installed as an init script.
+ */
+export async function launchPlaywrightDriver(
+  opts: DriverOptions = {},
+): Promise<PlaywrightDriverHandle> {
+  return createDriverHandle(bridgeInstallSource(), opts, {
+    notLoaded: (url, err) =>
+      `Could not load ${url} — is Storybook running there? ` +
+      `Start it with \`storybook dev\` (a static \`storybook build\` has no addon server, ` +
+      `so it cannot answer a drift check). Underlying error: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    notAttached: notAttachedMessage,
+  });
+}
+
+/**
+ * Launch a headless Chromium against an arbitrary deployed URL — a static
+ * `storybook build`'s output, not a dev server — with the hosted bridge
+ * installed (see `hostedBridgeInstallSource`, which watches `CodeSnapshot`
+ * instead of `DriftReport`/`DriftError`, since there is no live `server.ts`
+ * in this process to turn one into the other).
+ */
+export async function launchHostedPlaywrightDriver(
+  opts: DriverOptions = {},
+): Promise<PlaywrightDriverHandle> {
+  return createDriverHandle(hostedBridgeInstallSource(), opts, {
+    notLoaded: (url, err) =>
+      `Could not load ${url} — is the deployed Storybook reachable there? ` +
+      `Underlying error: ${err instanceof Error ? err.message : String(err)}`,
+    notAttached: notAttachedMessage,
+  });
 }

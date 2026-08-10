@@ -33,6 +33,7 @@ import { INIT_EXIT, parseInitArgs, runInit } from "./init.js";
 import { VERIFY_EXIT } from "./contract-verify.js";
 import { parseVerifyArgs, runVerify } from "./verify-command.js";
 import { applyHintPlan, planHintRegistration } from "./hint-plan.js";
+import { parseScanArgs, runScan } from "./scan-command.js";
 
 interface CommonOptions {
   cwd: string;
@@ -90,6 +91,17 @@ async function main(argv: string[]): Promise<number> {
       } catch (err: unknown) {
         console.error(err instanceof Error ? err.message : String(err));
         return VERIFY_EXIT.CouldNotRun;
+      }
+    case "scan":
+      // Same shape as `verify`: needs no browser and no running Storybook, just
+      // a filesystem scan, so a usage or config error maps to a plain refusal
+      // rather than a stack trace.
+      try {
+        await runScan(parseScanArgs(rest));
+        return 0;
+      } catch (err: unknown) {
+        console.error(err instanceof Error ? err.message : String(err));
+        return 1;
       }
     case "check":
       // Argument parsing happens INSIDE the try so a usage error maps to
@@ -167,6 +179,11 @@ function printHelp(): void {
       "                                          anywhere `audit` runs. Needs FIGMA_PAT.",
       "                                          --full (show verified claims too), --json, --contracts <glob>",
       "                                          Exit: 0 verified · 1 falsified · 2 could not be re-read · 3 could not run",
+      "  design-sync scan --out <file>           Write the CSS/TSX selector -> token scan (the same one the Storybook",
+      "                                          preset runs at startup) to a file, so it can travel without a live",
+      "                                          process behind it. No browser, no Storybook. --code-ref <sha> to",
+      "                                          stamp a specific commit instead of reading the current git HEAD.",
+      "                                          Exit: 0 written · 1 could not run",
       "  design-sync audit                       Diff stories on disk against the registry (exits non-zero on drift)",
       "                                          Also validates the SHAPE of declared child and state bindings (not that they resolve)",
       "                                          Exits non-zero on any story file it could not read — a file that yields no",

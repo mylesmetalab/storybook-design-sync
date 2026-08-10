@@ -697,12 +697,14 @@ before.
 
 ## CLI
 
-The package ships a `design-sync` binary with six subcommands:
+The package ships a `design-sync` binary with these subcommands:
 
 ```
 design-sync init                        Set up the suite in this project (see `design-sync init`)
 design-sync check [--url http://localhost:6006]
                                         Run the drift check headlessly against a RUNNING Storybook
+design-sync verify                      Re-read contracts/*.spec.json's claims against Figma — no browser needed
+design-sync scan --out <file>           Write the startup token scan to a file — no browser, no Storybook needed
 design-sync audit                       Diff stories on disk against the registry
 design-sync register [--hints <path>]   Bulk-register from hints; stub the rest
 design-sync ls                          Print title → node binding tree
@@ -911,6 +913,25 @@ properties) are **parsed but not yet re-checked**: no contract in this project
 carries that block — it was added on 2026-07-31, after both existing contracts were
 written — so there has been no real input to build the checker against. A contract
 without it is reported as a gap, never as a passing contract.
+
+### `scan` — the startup token scan, without a live Storybook
+
+```sh
+npx design-sync scan --out tokens.json
+```
+
+The same CSS/TSX → token scan the Storybook preset runs once at startup
+(`preset.ts`), as a standalone command. No browser, no running Storybook — just
+the filesystem, so it runs in CI right alongside `verify`. `--code-ref <sha>`
+stamps a specific commit instead of reading the current git HEAD (CI already
+knows its own checked-out SHA precisely).
+
+Exists for one reason: everywhere else, the scan only ever lives as a module
+singleton inside a running dev server — nothing outside that process can see
+it. This is what lets it travel as a file instead: the artifact a hosted check
+(see "Hosted-check envelope" under Coverage and limits — nothing runs on this
+yet) will need to compare against a deployed, static Storybook build, where
+there is no live process to ask.
 
 ### `audit` — surface drift, fail CI
 
@@ -1619,6 +1640,81 @@ consumers, it never compares them.
 [#107]: https://github.com/mylesmetalab/storybook-design-sync/issues/107
 [#108]: https://github.com/mylesmetalab/storybook-design-sync/issues/108
 [#109]: https://github.com/mylesmetalab/storybook-design-sync/issues/109
+
+### Hosted-check envelope (in progress — nothing runs on this yet)
+
+`HostedCheckEnvelope` (`src/hosted-envelope.ts`) is `CheckJsonDocument` plus five
+fields a check only needs once it can run unattended, on infrastructure separate
+from what it measures: `computedAt` (when this specific check ran, derived from
+the run's own `finishedAt` rather than a second clock read), `trigger`
+(`on-demand` | `on-merge` | `nightly` | `figma-webhook`), `codeRef` (the exact
+commit the deployed build came from), and `measuringVersion` / `engineVersion`
+kept as two separate fields — in hosted mode the deployed build and the checking
+service are independently deployed and can genuinely be on different releases at
+once, and recording only one would hide that divergence instead of stating it.
+
+This is the first piece of the hosted-check plan (the parent `design-sync`
+repo's `HOSTED-CHECK-SPEC.md` / `HOSTED-CHECK-TASKS.md`) — the type and its one
+construction site (`buildHostedEnvelope`) exist; nothing yet produces or reads
+one at runtime, and `check` and the panel are unaffected until later phases land.
+
+The second piece, `design-sync scan --out <file>` (see the CLI section), does
+exist and run today — it lets the startup scan (`AutoScan`) travel as a file
+instead of only ever living inside a running dev server. `src/scan-command.ts`
+also exports `loadScanArtifact` (reads one back, refusing a file missing
+`codeRef` or `map` rather than silently treating it as an empty scan) and
+`toAutoScan` (projects a loaded artifact down to the plain shape
+`setAutoScan` takes) — the first slice of the second engine host's plumbing.
+The third piece, `src/hosted-driver.ts`'s `driveStorySnapshot`, also exists and
+runs today: it drives a real `EVENTS.CheckDriftRequest` → `EVENTS.CodeSnapshot`
+round trip against an arbitrary deployed URL, reusing the exact same
+`requestStoryCheck` construction site and channel machinery `check` already
+uses against a dev server. Nothing about `preview.ts` changes or gets
+reimplemented — a static `storybook build` already bundles it (Storybook
+bundles every registered addon's preview entry regardless of dev vs. static),
+so the only new piece is capturing its reply instead of letting a live
+`server.ts` consume it first. `launchHostedPlaywrightDriver`
+(`headless-driver.ts`) launches the browser for it, sharing every mechanic
+with the local check's own driver except which bridge gets installed.
+**Verified against a real deployed build**, not just a fake driver: a real
+`storybook build` of `design-sync-starter`, served as plain static files (no
+dev server), driven by a real headless Chromium — a real `CodeSnapshotPayload`
+came back with real computed styles.
+
+The fourth and last piece, `src/hosted-engine.ts`'s `runHostedCodeSnapshot`,
+also exists and runs today: it turns a `CodeSnapshotPayload` into a real
+`DriftReport` by calling `engine.checkDrift`, reusing `server.ts`'s actual
+merge/build/annotate steps (`mergeAutoBindings`, `buildChildTargets`,
+`chooseStateTargets`, `runModePasses`, `annotateClassHints`,
+`annotateTokenPresence`, `annotateContract`, and their siblings — now
+exported, not duplicated) rather than reimplementing any comparison logic.
+One thing is deliberately **not** shared, named rather than hidden: the live
+channel handler's own *call sequence* has no dedicated test file of its own
+(only its already-exported pieces do), so this mirrors that sequence instead
+of refactoring the live handler to share it — a real, residual gap between
+the two orchestration bodies if they're ever changed one at a time. Every
+individual comparison/merge step is still the exact same function on both
+paths; only their composition exists twice.
+
+**Verified as a full pipeline, not just piece by piece**: a real scan of a
+real consumer project, loaded back and set as the process's `AutoScan`,
+feeding a real headless-browser-driven snapshot against a real deployed
+static build, wired through to a stand-in engine (no real Figma credentials
+in this pass) — which correctly resolved the real registry entry, ran the
+real merge/annotation pipeline, and produced a real `DriftReport` row
+correctly attributing `codeClassName: "bg-secondary"` from the loaded scan
+artifact alone, with no live dev-server process involved anywhere.
+
+This closes the second engine host's core loop — scan → load → drive → wire
+to engine — for a single story, single mode, no children/states declared.
+Not yet built: looping this over an entire registry (the "sweep" a nightly
+or on-merge trigger needs), dual-mode support in the hosted path specifically
+(the machinery is reused unchanged and should carry through, but is
+unverified end-to-end here), and everything outside `storybook-sync-addon`
+itself — the actual Cloud Run service, Secret Manager-provisioned
+`FIGMA_PAT`, and the report envelope construction tying a run's outcome to
+`HostedCheckEnvelope` (Phase 1) remain Phase 2's and later phases' work,
+per `HOSTED-CHECK-TASKS.md`.
 
 ## What this addon is NOT
 

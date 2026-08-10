@@ -32,7 +32,7 @@ let scanPromise: Promise<void> | null = null;
  * tend to be the explicit binding when both exist. v0: simple last-wins
  * merge; collision logging can come later if it matters.
  */
-function mergeMaps(a: AutoTokenMap, b: AutoTokenMap): AutoTokenMap {
+export function mergeMaps(a: AutoTokenMap, b: AutoTokenMap): AutoTokenMap {
   const out: AutoTokenMap = { ...a };
   for (const [sel, props] of Object.entries(b)) {
     out[sel] = { ...(out[sel] ?? {}), ...props };

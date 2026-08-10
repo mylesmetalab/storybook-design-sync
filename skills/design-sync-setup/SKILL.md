@@ -26,11 +26,11 @@ When run on a project that already has `.claude/skills/`, compare each local ski
 ### 1. Run `design-sync init`
 
 ```bash
-npm install --save-dev "github:mylesmetalab/storybook-design-sync#v0.0.63" "github:mylesmetalab/storybook-design-inspector#v0.2.7"
+npm install --save-dev "github:mylesmetalab/storybook-design-sync#v0.0.64" "github:mylesmetalab/storybook-design-inspector#v0.2.7"
 npx design-sync init --file-key <your Figma file key>
 ```
 
-Since addon v0.0.46 `init` does every mechanical step: it registers both addons by merging into `main.*` (preserving quote style and indentation), writes `design-sync.config.json` with `apply: "off"`, derives `cssEntries`/`tsxEntries`/`storyGlobs` from the project's real layout — including **which CSS file holds `@theme`**, which is the difference between a working binding dimension and an empty one — gitignores `.design-sync/cache.json`, and copies these six skills into `.claude/skills/` where they are absent.
+Since addon v0.0.46 `init` does every mechanical step: it registers both addons by merging into `main.*` (preserving quote style and indentation), writes `design-sync.config.json` with `apply: "off"`, derives `cssEntries`/`tsxEntries`/`storyGlobs` from the project's real layout — including **which CSS file holds `@theme`**, which is the difference between a working binding dimension and an empty one — gitignores `.design-sync/cache.json`, and copies these nine skills into `.claude/skills/` where they are absent.
 
 **Read its output rather than assuming success.** It is built to refuse rather than guess, and what it refuses is what you still have to do:
 

@@ -1,6 +1,6 @@
 # Vendored workflow skills
 
-These six skills are **copies**. The master set lives in the Design Sync Suite's
+These nine skills are **copies**. The master set lives in the Design Sync Suite's
 `handover/skills/` (the parent folder of this repo), which is where they are
 edited. They are vendored here for one reason: `design-sync init` offers to copy
 them into a consumer's `.claude/skills/`, and a consumer who installs this package

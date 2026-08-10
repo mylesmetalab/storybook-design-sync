@@ -14,6 +14,8 @@ Because every designer's worktrees live on their own machine, nothing here needs
 
 ## Starting a new piece of work
 
+**If it's been a while since anyone checked, consider running `design-sync-update` first.** A component built or a drift check run against a stale addon can report false drift that a newer version already fixed, or miss a real check a newer version added — not a hard gate before every task, but worth a habit at the start of a stretch of new work.
+
 1. **Ask what they're doing**, if it isn't already clear: building a component that doesn't exist in code yet (→ hand off to `component-handoff`, after confirming `handoff-ready-component` passes), or something that already exists needs to change (→ hand off to `fix-drift`, which triages further). Don't guess; the wrong skill produces confidently wrong output.
 
 2. **Create the worktree.** Naming: `claude/<short-descriptive-slug>-<random-6-char-suffix>` for both the branch and the worktree directory, e.g. `claude/dialog-component-handoff-6a3572` — matching this project's own existing convention exactly, not inventing a new one. The random suffix is what makes two designers naming their work similarly never collide.

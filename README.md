@@ -239,9 +239,10 @@ project it changes nothing and reports twelve things as already done.
 
 ### The workflow skills
 
-The package ships the six suite skills (`design-sync-setup`,
-`handoff-ready-component`, `component-handoff`, `component-update`, `fix-drift`,
-`vqa-review`) under `skills/`, and `init` copies them into `.claude/skills/`.
+The package ships the nine suite skills (`design-sync-setup`, `designer-setup`,
+`design-sync-session`, `handoff-ready-component`, `component-handoff`,
+`component-update`, `fix-drift`, `vqa-review`, `design-sync-update`) under
+`skills/`, and `init` copies them into `.claude/skills/`.
 
 They are **created only when absent, and never overwritten** — not even with
 `--force`. A project's copy is *meant* to diverge: a client's codegen standards

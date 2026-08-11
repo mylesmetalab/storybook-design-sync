@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { extractClaims, type ContractClaim } from "./contract-claims.js";
 import {
   VERIFY_EXIT,
+  isCleanNodeId,
   parseAbsenceAssertion,
   verifyClaims,
   verifyExitCode,
@@ -379,16 +380,17 @@ describe("the not-implemented evidence does not claim designSource is absent", (
    * reader not to expect a check, on grounds they can see are wrong.
    */
   it("states only that the checker is unbuilt", () => {
-    // Uses `literals`, not `collections`: collection claims became implemented in
-    // v0.0.59, so pointing this at them would test the new checker instead of the
-    // not-implemented wording it exists to pin.
-    const extracted = extractClaims("contracts/x.spec.json", {
-      designSource: {
-        readAt: "2026-08-06",
-        literals: [{ nodeId: "1:2", node: "Slot", property: "itemSpacing", value: "24" }],
-      },
-    });
-    const out = verifyClaims(extracted.claims, snap());
+    // Every claim kind extraction can produce is now implemented (shared-value,
+    // literal and uncheckable landed in v0.0.66), so the default branch is only
+    // reachable through a kind added in the future — which is exactly what this
+    // pins: a new kind must degrade to an honest "not implemented", never to a
+    // silent pass.
+    const future = {
+      kind: "text-style",
+      path: "designSource.textStyles.title",
+      statement: "the title uses text style Heading",
+    } as unknown as ContractClaim;
+    const out = verifyClaims([future], snap());
     const ev = out.results.map((r) => r.evidence).join("\n");
     expect(ev).toMatch(/not implemented/);
     expect(ev).not.toMatch(/no real input/);
@@ -502,4 +504,328 @@ describe("collection claims", () => {
     expect(out.counts.verified).toBe(0);
     expect(out.unverifiable["not-expressible"]).toBe(1);
   });
+});
+
+/**
+ * `designSource` extraction — structured fields (v0.0.66).
+ *
+ * The collection checker already learned this lesson once: a claim whose facts
+ * live only inside its prose `statement` forces the checker to parse its own
+ * output back, so `expectedModes` was added as data. `shared-value` and `literal`
+ * claims had the same gap — variables, property and recorded value existed only
+ * as prose — and these tests pin the structured fields the new checkers read.
+ * Shapes mirror contracts/dialog.spec.json, the first real designSource block.
+ */
+describe("designSource extraction carries structured fields", () => {
+  it("shared-value claims carry the variable names as data", () => {
+    const { claims } = extractClaims("contracts/x.spec.json", {
+      designSource: {
+        readAt: "2026-08-05",
+        sharedValues: [
+          {
+            value: "#2c2c2c SDS Light / #f5f5f5 SDS Dark",
+            variables: ["Background/Brand/Default", "Border/Brand/Default"],
+          },
+        ],
+      },
+    });
+    const sv = claims.find((c) => c.kind === "shared-value")!;
+    expect(sv.variables).toEqual(["Background/Brand/Default", "Border/Brand/Default"]);
+    expect(sv.recordedValue).toBe("#2c2c2c SDS Light / #f5f5f5 SDS Dark");
+  });
+
+  it("literal claims carry the property, and a NUMERIC recorded value survives", () => {
+    // The Dialog's real literal records `"value": 24` — a number. The old
+    // extraction read values through a string-only helper, so the one real
+    // literal in existence lost its recorded value silently.
+    const { claims } = extractClaims("contracts/x.spec.json", {
+      designSource: {
+        readAt: "2026-08-05",
+        literals: [{ nodeId: "6031:9153", property: "itemSpacing", value: 24 }],
+      },
+    });
+    const lit = claims.find((c) => c.kind === "literal")!;
+    expect(lit.property).toBe("itemSpacing");
+    expect(lit.nodeId).toBe("6031:9153");
+    expect(lit.recordedValue).toBe("24");
+  });
+
+  it("uncheckable claims carry the property as data", () => {
+    const { claims } = extractClaims("contracts/x.spec.json", {
+      designSource: {
+        readAt: "2026-08-05",
+        uncheckable: [{ nodeId: "68:16009", property: "fills[0]", reason: "invisible placeholder" }],
+      },
+    });
+    const un = claims.find((c) => c.kind === "uncheckable")!;
+    expect(un.property).toBe("fills[0]");
+  });
+
+  it("reports recorded-but-claimless textStyles as a gap, never silently", () => {
+    const { gaps } = extractClaims("contracts/x.spec.json", {
+      designSource: {
+        readAt: "2026-08-05",
+        collections: [{ name: "Color", modes: [{ name: "L" }] }],
+        textStyles: { title: { style: "Heading" } },
+      },
+    });
+    expect(gaps.join("\n")).toMatch(/textStyles.*no claims/i);
+  });
+});
+
+/**
+ * `designSource.sharedValues` re-checking (v0.0.66).
+ *
+ * The claim exists because of a real incident: two variables sharing a hex were
+ * collapsed onto one theme token, and when the design later changed one of them,
+ * the other followed it — an invisible border, silent until a later design change
+ * exposed it. The moment that matters is the values DIVERGING, which is exactly
+ * what this check catches.
+ */
+describe("shared-value claims", () => {
+  const shared = (vars: string[] = ["Background/Brand/Default", "Border/Brand/Default"]): ContractClaim => ({
+    kind: "shared-value",
+    path: "designSource.sharedValues[0]",
+    statement: `${vars.join(" and ")} all resolve to #2c2c2c`,
+    variables: vars,
+    recordedValue: "#2c2c2c SDS Light / #f5f5f5 SDS Dark",
+  });
+  const vars = (
+    entries: Array<{ name: string; coll?: string; byMode: Record<string, string>; unresolved?: string[] }>,
+  ): DesignSourceSnapshot =>
+    ({
+      readAt: "2026-08-10",
+      variables: entries.map((e) => ({
+        name: e.name,
+        collectionId: e.coll ?? "VariableCollectionId:1:1",
+        collectionName: "Color",
+        resolvedByMode: e.byMode,
+        unresolved: e.unresolved ?? [],
+      })),
+    }) as DesignSourceSnapshot;
+
+  it("verifies when every mode still agrees, naming the per-mode values", () => {
+    const out = verifyClaims(
+      [shared()],
+      vars([
+        { name: "Background/Brand/Default", byMode: { "SDS Light": "#2c2c2c", "SDS Dark": "#f5f5f5" } },
+        { name: "Border/Brand/Default", byMode: { "SDS Light": "#2c2c2c", "SDS Dark": "#f5f5f5" } },
+      ]),
+    );
+    expect(out.counts.verified).toBe(1);
+    expect(out.results[0]!.evidence).toContain("#2c2c2c");
+    expect(out.results[0]!.evidence).toContain("#f5f5f5");
+  });
+
+  /** The invisible-border case: they diverged in one mode. */
+  it("falsifies a divergence, naming the mode and both values", () => {
+    const out = verifyClaims(
+      [shared()],
+      vars([
+        { name: "Background/Brand/Default", byMode: { "SDS Light": "#2c2c2c", "SDS Dark": "#f5f5f5" } },
+        { name: "Border/Brand/Default", byMode: { "SDS Light": "#2c2c2c", "SDS Dark": "#1e1e1e" } },
+      ]),
+    );
+    expect(out.counts.falsified).toBe(1);
+    const ev = out.results[0]!.evidence;
+    expect(ev).toContain('"SDS Dark"');
+    expect(ev).toContain("#f5f5f5");
+    expect(ev).toContain("#1e1e1e");
+    expect(ev).toMatch(/no longer share/);
+    expect(verifyExitCode(out)).toBe(VERIFY_EXIT.Falsified);
+  });
+
+  it("falsifies when a named variable no longer exists, naming it", () => {
+    const out = verifyClaims(
+      [shared()],
+      vars([{ name: "Background/Brand/Default", byMode: { "SDS Light": "#2c2c2c" } }]),
+    );
+    expect(out.counts.falsified).toBe(1);
+    expect(out.results[0]!.evidence).toContain("Border/Brand/Default");
+    expect(out.results[0]!.evidence).toMatch(/no longer exists|not found/);
+  });
+
+  it("refuses an ambiguous variable name rather than guessing", () => {
+    const out = verifyClaims(
+      [shared()],
+      vars([
+        { name: "Background/Brand/Default", byMode: { "SDS Light": "#2c2c2c" } },
+        { name: "Border/Brand/Default", coll: "VariableCollectionId:1:1", byMode: { "SDS Light": "#2c2c2c" } },
+        { name: "Border/Brand/Default", coll: "VariableCollectionId:9:9", byMode: { Value: "#2c2c2c" } },
+      ]),
+    );
+    expect(out.counts.verified).toBe(0);
+    expect(out.counts.falsified).toBe(0);
+    expect(out.unverifiable["not-expressible"]).toBe(1);
+    expect(out.results[0]!.evidence).toMatch(/ambiguous/);
+  });
+
+  it("refuses variables that live in different collections — per-mode comparison is undefined", () => {
+    const out = verifyClaims(
+      [shared()],
+      vars([
+        { name: "Background/Brand/Default", coll: "VariableCollectionId:1:1", byMode: { "SDS Light": "#2c2c2c" } },
+        { name: "Border/Brand/Default", coll: "VariableCollectionId:2:2", byMode: { Value: "#2c2c2c" } },
+      ]),
+    );
+    expect(out.unverifiable["not-expressible"]).toBe(1);
+    expect(out.results[0]!.evidence).toMatch(/different collections/);
+  });
+
+  it("is read-failed when the variables could not be read at all", () => {
+    const out = verifyClaims([shared()], { readAt: "2026-08-10" } as DesignSourceSnapshot);
+    expect(out.unverifiable["read-failed"]).toBe(1);
+    expect(verifyExitCode(out)).toBe(VERIFY_EXIT.Unverifiable);
+  });
+
+  it("is read-failed when an alias chain failed to resolve for a compared mode", () => {
+    const out = verifyClaims(
+      [shared()],
+      vars([
+        {
+          name: "Background/Brand/Default",
+          byMode: { "SDS Light": "#2c2c2c" },
+          unresolved: ["SDS Dark"],
+        },
+        { name: "Border/Brand/Default", byMode: { "SDS Light": "#2c2c2c", "SDS Dark": "#f5f5f5" } },
+      ]),
+    );
+    expect(out.unverifiable["read-failed"]).toBe(1);
+    expect(out.results[0]!.evidence).toContain("Background/Brand/Default");
+  });
+
+  it("is not-expressible when the claim carries fewer than two variable names", () => {
+    const legacy: ContractClaim = {
+      kind: "shared-value",
+      path: "designSource.sharedValues[0]",
+      statement: "X and Y all resolve to #000",
+    };
+    const out = verifyClaims([legacy], vars([]));
+    expect(out.unverifiable["not-expressible"]).toBe(1);
+  });
+});
+
+/**
+ * `designSource.literals` re-checking (v0.0.66).
+ *
+ * "This value is a raw literal, not bound" matters because the code was built on
+ * it — an unbound value has no token to map, so drift can compare the number but
+ * never attribute it. The premise flips the day a designer binds it.
+ */
+describe("literal claims", () => {
+  const literal = (over: Partial<ContractClaim> = {}): ContractClaim => ({
+    kind: "literal",
+    path: "designSource.literals[0]",
+    statement: "itemSpacing on node 6031:9153 is a raw literal, not bound to a variable",
+    nodeId: "6031:9153",
+    property: "itemSpacing",
+    recordedValue: "24",
+    ...over,
+  });
+  const nodes = (
+    entries: Record<string, { boundProperties: string[]; values: Record<string, unknown> }>,
+  ): DesignSourceSnapshot => ({ readAt: "2026-08-10", literalNodes: entries }) as DesignSourceSnapshot;
+
+  it("verifies when the property is still unbound, reporting the current value", () => {
+    const out = verifyClaims(
+      [literal()],
+      nodes({ "6031:9153": { boundProperties: ["fills"], values: { itemSpacing: 24 } } }),
+    );
+    expect(out.counts.verified).toBe(1);
+    expect(out.results[0]!.evidence).toMatch(/still a raw literal/);
+    expect(out.results[0]!.evidence).toContain("24");
+  });
+
+  it("says so when the value moved but stayed unbound — that is drift's job, not a broken claim", () => {
+    const out = verifyClaims(
+      [literal()],
+      nodes({ "6031:9153": { boundProperties: [], values: { itemSpacing: 32 } } }),
+    );
+    expect(out.counts.verified).toBe(1);
+    const ev = out.results[0]!.evidence;
+    expect(ev).toContain("32");
+    expect(ev).toContain("24");
+    expect(ev).toMatch(/drift/i);
+  });
+
+  it("falsifies when the property is now bound to a variable", () => {
+    const out = verifyClaims(
+      [literal()],
+      nodes({ "6031:9153": { boundProperties: ["itemSpacing"], values: { itemSpacing: 24 } } }),
+    );
+    expect(out.counts.falsified).toBe(1);
+    expect(out.results[0]!.evidence).toMatch(/now bound/i);
+  });
+
+  it("is read-failed when the node was not read this pass", () => {
+    const out = verifyClaims([literal()], nodes({}));
+    expect(out.unverifiable["read-failed"]).toBe(1);
+  });
+
+  it("is not-expressible when the claim names no property", () => {
+    const { property: _omitted, ...withoutProperty } = literal();
+    const out = verifyClaims(
+      [withoutProperty],
+      nodes({ "6031:9153": { boundProperties: [], values: {} } }),
+    );
+    expect(out.unverifiable["not-expressible"]).toBe(1);
+  });
+});
+
+/**
+ * `designSource.uncheckable` re-checking (v0.0.66) — deliberately narrow.
+ *
+ * Both real entries (Dialog) put PROSE in `nodeId`: "68:16009 / 68:16113 (Star /
+ * X icon instances, wherever used…)". There is no honest way to re-read that, and
+ * inventing a parse would check the wrong node confidently. So prose gets a
+ * precise "make it checkable by recording one clean id per entry", and a clean id
+ * gets "asserted, not verified" — the re-check itself stays unbuilt until a
+ * contract exists that a checker could actually be built against, which is the
+ * same rule the rest of designSource followed.
+ */
+describe("uncheckable claims", () => {
+  const uncheckable = (nodeId: string): ContractClaim => ({
+    kind: "uncheckable",
+    path: "designSource.uncheckable[0]",
+    statement: `fills[0] on node ${nodeId} cannot be read by this tool`,
+    nodeId,
+    property: "fills[0]",
+  });
+
+  it("tells a prose node id exactly how to become checkable", () => {
+    const out = verifyClaims(
+      [uncheckable("68:16009 / 68:16113 (Star / X icon instances, wherever used)")],
+      snap(),
+    );
+    expect(out.unverifiable["not-expressible"]).toBe(1);
+    expect(out.results[0]!.evidence).toMatch(/one clean node id per entry/);
+  });
+
+  it("reports a clean id as asserted, never verified", () => {
+    const out = verifyClaims([uncheckable("I192:31517;227:16985;34:12257")], snap());
+    expect(out.unverifiable["not-expressible"]).toBe(1);
+    expect(out.results[0]!.evidence).toMatch(/asserted, not verified/);
+  });
+});
+
+/**
+ * Node-id grammar — the guard that keeps prose ids out of the nodes request.
+ *
+ * Before this existed, the Dialog's prose `uncheckable` ids went straight into
+ * `/nodes?ids=…`, and a rejected batch dropped every OTHER id in the chunk into
+ * "unread", turning one badly-worded entry into unverifiable verdicts for clean
+ * claims. One junk id must never cost a clean id its verdict.
+ */
+describe("isCleanNodeId", () => {
+  it.each(["1:2", "6031:9153", "I192:31517;227:16985;34:12257", "T1:2"])(
+    "accepts %s",
+    (id) => expect(isCleanNodeId(id)).toBe(true),
+  );
+  it.each([
+    "68:16009 / 68:16113 (Star / X icon instances)",
+    "I192:31517;227:16985;34:12257 (Icon Button's X instance)",
+    "node 1:2",
+    "",
+    "1:2 ",
+  ])("rejects %s", (id) => expect(isCleanNodeId(id)).toBe(false));
 });

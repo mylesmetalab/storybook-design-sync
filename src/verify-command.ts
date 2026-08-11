@@ -31,12 +31,14 @@ import { loadConfig } from "./config.js";
 import { extractClaims, type ContractClaims } from "./contract-claims.js";
 import {
   VERIFY_EXIT,
+  isCleanNodeId,
   verifyClaims,
   verifyExitCode,
   verifySummary,
   type DesignSourceSnapshot,
   type VerifyOutcome,
 } from "./contract-verify.js";
+import { resolveVariablesLocal, type ResolvedVariablesLocal } from "./variable-resolution.js";
 
 export interface VerifyOptions {
   cwd: string;
@@ -112,52 +114,43 @@ async function readComponentSet(
   return { variantAxes, componentProperties };
 }
 
-/** Batch-resolve node existence. Missing ids come back in `missing`, never as an error. */
 /**
- * Every variable collection in the file, with its id and mode names.
+ * One read of `variables/local`, resolved — powers BOTH collection claims (names
+ * and modes) and shared-value claims (per-mode resolved values).
  *
- * Returns `null` on any read failure rather than an empty list — an empty list
- * would read as "the file has no collections", which would falsify every claim.
- * `null` makes them `read-failed`, which is the honest verdict.
- *
- * `id` is carried because collection **name is not unique**: the reference file has
- * two named `Typography` and two named `Size`, one local and one imported from
- * another library (composite `<libKey>/<id>` form).
+ * Returns `null` on any read failure rather than an empty result — an empty
+ * result would read as "the file has no variables", which would falsify every
+ * claim. `null` makes them `read-failed`, which is the honest verdict.
  */
-async function readCollections(
+async function readVariablesLocal(
   fileKey: string,
   pat: string,
-): Promise<Array<{ id: string; name: string; modes: string[] }> | null> {
+): Promise<ResolvedVariablesLocal | null> {
   const url = `https://api.figma.com/v1/files/${fileKey}/variables/local`;
   const res = await fetch(url, { headers: { "X-Figma-Token": pat } });
   if (!res.ok) return null;
-  const body = (await res.json()) as {
-    meta?: { variableCollections?: Record<string, unknown> };
-  };
-  const raw = body.meta?.variableCollections;
-  if (!raw) return null;
-  const out: Array<{ id: string; name: string; modes: string[] }> = [];
-  for (const entry of Object.values(raw)) {
-    const c = entry as { id?: unknown; name?: unknown; modes?: unknown };
-    if (typeof c.id !== "string" || typeof c.name !== "string") continue;
-    const modes = Array.isArray(c.modes)
-      ? c.modes
-          .map((m) => (m as { name?: unknown }).name)
-          .filter((n): n is string => typeof n === "string")
-      : [];
-    out.push({ id: c.id, name: c.name, modes });
-  }
-  return out;
+  const body = (await res.json()) as { meta?: unknown };
+  return resolveVariablesLocal(body.meta);
 }
 
+/**
+ * Batch-resolve node existence, keeping each node's own document so literal
+ * claims can read `boundVariables` and current values from the same fetch.
+ * Missing ids come back in `missing`, never as an error.
+ *
+ * Callers must pre-filter ids through `isCleanNodeId`: a prose id in the URL can
+ * reject the whole batch, which would cost every OTHER id in the chunk its
+ * verdict — one badly-worded contract entry must never break clean claims.
+ */
 async function readNodes(
   fileKey: string,
   ids: readonly string[],
   pat: string,
-): Promise<{ present: Set<string>; missing: Set<string> }> {
+): Promise<{ present: Set<string>; missing: Set<string>; documents: Map<string, unknown> }> {
   const present = new Set<string>();
   const missing = new Set<string>();
-  if (ids.length === 0) return { present, missing };
+  const documents = new Map<string, unknown>();
+  if (ids.length === 0) return { present, missing, documents };
   // Chunked so a component with 18 variant nodes does not build an unbounded URL.
   const CHUNK = 40;
   for (let i = 0; i < ids.length; i += CHUNK) {
@@ -169,13 +162,47 @@ async function readNodes(
       // makes them `unverifiable`, which is the honest verdict.
       continue;
     }
-    const body = (await res.json()) as { nodes?: Record<string, unknown> };
+    const body = (await res.json()) as {
+      nodes?: Record<string, { document?: unknown } | undefined>;
+    };
     for (const id of batch) {
-      if (body.nodes && body.nodes[id]) present.add(id);
-      else missing.add(id);
+      const node = body.nodes?.[id];
+      if (node) {
+        present.add(id);
+        if (node.document !== undefined) documents.set(id, node.document);
+      } else {
+        missing.add(id);
+      }
     }
   }
-  return { present, missing };
+  return { present, missing, documents };
+}
+
+/**
+ * The facts a `literal` claim needs from a node document: which properties are
+ * bound to variables, and the current value of the claimed property (scalar
+ * reads only — a paint-array property has no single "value" to report).
+ */
+function literalFacts(
+  document: unknown,
+  properties: readonly string[],
+): { boundProperties: string[]; values: Record<string, unknown> } {
+  const doc = (document ?? {}) as Record<string, unknown>;
+  const bound = doc["boundVariables"];
+  const boundProperties =
+    bound !== null && typeof bound === "object" ? Object.keys(bound as object) : [];
+  const values: Record<string, unknown> = {};
+  for (const property of properties) {
+    const value = doc[property];
+    if (
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      values[property] = value;
+    }
+  }
+  return { boundProperties, values };
 }
 
 /** The Figma node id of the component set a contract is about, if it records one. */
@@ -253,16 +280,40 @@ export async function runVerify(opts: VerifyOptions): Promise<number> {
         }
       }
       const nodeIds = [
-        ...new Set(claims.claims.map((c) => c.nodeId).filter((id): id is string => !!id)),
+        ...new Set(
+          claims.claims
+            .map((c) => c.nodeId)
+            .filter((id): id is string => !!id)
+            .filter(isCleanNodeId),
+        ),
       ];
-      const { present, missing } = await readNodes(fileKey, nodeIds, pat);
+      const { present, missing, documents } = await readNodes(fileKey, nodeIds, pat);
       snapshot.nodesPresent = present;
       snapshot.nodesMissing = missing;
-      // Only fetched when a collection claim exists — one extra request, and only
-      // for contracts that carry a `designSource` block.
-      if (claims.claims.some((c) => c.kind === "collection")) {
-        const collections = await readCollections(fileKey, pat);
-        if (collections) snapshot.collections = collections;
+      const literalClaims = claims.claims.filter((c) => c.kind === "literal");
+      if (literalClaims.length > 0) {
+        const literalNodes: Record<
+          string,
+          { boundProperties: string[]; values: Record<string, unknown> }
+        > = {};
+        for (const c of literalClaims) {
+          if (!c.nodeId || !documents.has(c.nodeId)) continue;
+          const properties = literalClaims
+            .filter((l) => l.nodeId === c.nodeId && l.property !== undefined)
+            .map((l) => l.property!);
+          literalNodes[c.nodeId] = literalFacts(documents.get(c.nodeId), properties);
+        }
+        snapshot.literalNodes = literalNodes;
+      }
+      // One request powers both collection claims (names + modes) and
+      // shared-value claims (per-mode resolved values) — and only runs for
+      // contracts that carry a `designSource` block.
+      if (claims.claims.some((c) => c.kind === "collection" || c.kind === "shared-value")) {
+        const resolved = await readVariablesLocal(fileKey, pat);
+        if (resolved) {
+          snapshot.collections = resolved.collections;
+          snapshot.variables = resolved.variables;
+        }
       }
     } else {
       claims.gaps.push(

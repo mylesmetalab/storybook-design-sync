@@ -98,6 +98,15 @@ system. Highlights of the work already done:
 
 ## Active roadmap
 
+> **Status sweep 2026-08-11.** Since this list was written the suite shipped
+> v0.0.45 → v0.0.67: headless `check`, `init`, `verify` with the full
+> `designSource` re-checkers (collections, sharedValues, literals), the
+> hosted second-engine host (built, proven, then retired with its infra —
+> the suite is deliberately all-local), nine workflow skills, and per-person
+> Figma tokens. Items below marked **⏸ parked** are write-path work frozen
+> by the 2026-07-27 detection-only pivot — v3 at the earliest, do not start
+> them.
+
 The product is roughly 75% built, 60% honest. The 25% gap is the
 unfinished dimensions and architectural shortcuts. The honesty gap is
 the source of most friction — features that get advertised in the UI
@@ -132,7 +141,7 @@ can't fulfil.
 | ~~P2.3~~ | ~~`variant-set` Apply~~                     | ✅ Shipped as honest advisory — the generic "no auto-apply engine yet" line replaced with per-shape, data-driven guidance (active-variant: names the missing Figma variants + BEM fix; variant-options: names the unknown code modifiers + both fixes). Real auto-edit rejected on honesty grounds: which side is wrong isn't inferable from the diff (empty CSS rule / deleting a Figma variant = a guess; see P3.1). | 0.5d   |
 | P2.4  | `story.structure` engine                    | "auto-layout horizontal in Figma, code uses column" surfaces as a drift row.              | 2d     |
 | P2.5  | `story.motion` engine                       | Figma prototype animations vs CSS transitions/animations compare honestly.                | 1.5d   |
-| ~~P2.8~~ | ~~`design-sync verify` — validate the contract~~ | ✅ Shipped — v0.0.49 (#92). Re-reads `contracts/*.spec.json`'s claims against Figma: **verified / falsified / unverifiable**. Answers a different question from `check` — not "does the build match the design today" but "are the assumptions this component was built on still true" — and the gap is **absence claims**, where a drift check is structurally blind (it compares values that exist, so a mode added after handoff produces no row while `notInFigma` goes false). No browser, no Storybook: one Figma read per contract plus a JSON compare, so it runs anywhere `audit` runs and scales with components rather than stories. Exit 0/1/2/3 with `unverifiable` outranking `falsified`. Two limits the tool states itself: most `notInFigma` entries as worded name no Figma fact (4 of 8 do, all assertions about variant axes or component properties), and `designSource` claims are parsed but not re-checked because no contract carries that block yet. | 2d |
+| ~~P2.8~~ | ~~`design-sync verify` — validate the contract~~ | ✅ Shipped — v0.0.49 (#92). Re-reads `contracts/*.spec.json`'s claims against Figma: **verified / falsified / unverifiable**. Answers a different question from `check` — not "does the build match the design today" but "are the assumptions this component was built on still true" — and the gap is **absence claims**, where a drift check is structurally blind (it compares values that exist, so a mode added after handoff produces no row while `notInFigma` goes false). No browser, no Storybook: one Figma read per contract plus a JSON compare, so it runs anywhere `audit` runs and scales with components rather than stories. Exit 0/1/2/3 with `unverifiable` outranking `falsified`. Two limits the tool states itself: most `notInFigma` entries as worded name no Figma fact (4 of 8 do, all assertions about variant axes or component properties), and `designSource` claims are parsed but not re-checked because no contract carries that block yet. **Update 2026-08-11:** the Dialog contract became the first real `designSource` block and the checkers followed — collections (v0.0.59, ambiguous names refused), sharedValues + literals with alias-chain resolution (v0.0.66); `uncheckable` and `textStyles` remain recorded-but-ungated, stated as gaps per run. | 2d |
 | P2.6  | Wire `lastSyncedHash`                       | Field has a purpose. Panel shows "last synced X ago". CI can skip-if-unchanged.           | 0.5d   |
 | ~~P2.7~~ | ~~Compare forced pseudo-states~~ | ✅ Shipped — v0.0.47 (#91). A registry `states` map binds a pseudo-state to the design's node for it, and the rendered element is measured **in that state**. Page JS cannot fire a real `:hover`, so the stylesheet is rewritten (`.btn:hover` gains `.btn.pseudo-hover`) and the class toggled — measured identical to a real pointer and to CDP `CSS.forcePseudoState`, and being pure DOM/CSS it behaves the same in the panel and in `check`, so the two agree by construction. Transitions are **suspended**, not waited out, because a mid-transition read returns the interpolated value and makes a correctly-forced state look unchanged. Vocabulary is forced pseudo-states only: a design's `State=Error`/`Open`/`Checked` is a prop and binds as its own story. Four things are refused rather than approximated — forcing that moved nothing, a state the component library owns via `data-*`, a run that also asked for two modes, and a story with no `states` map. Rows carry the state, not a fake element (`{"element": null, "state": "hover"}`), and **copy is not compared for a state** — a pseudo-class cannot change text, so that row would duplicate the resting one (fixed in v0.0.48, one release after the rest). **Modes × states is not combined** and `focus` has no design source in the reference file. | 2d |
 
@@ -145,7 +154,7 @@ to special-case cascade.
 | ----- | -------------------------------------------------------- | ---------------------------------------------------------------------- | ------ |
 | P3.1  | Per-variant-explicit codemod for remaining ~9 components | Each variant rule redeclares all design-token-bound properties.        | 1.5d   |
 | P3.2  | Cascade fallback decision                                | Keep + document as adoption-friendly graceful mode. Not removed.       | 0.5d   |
-| P3.3  | Auto-recheck timing polish                               | Debounce rapid Apply clicks so we don't re-check N times in a row.     | 0.5d   |
+| P3.3 ⏸ | Auto-recheck timing polish *(write path — parked)*      | Debounce rapid Apply clicks so we don't re-check N times in a row.     | 0.5d   |
 
 ### Phase 4 — New capabilities (~4.5 days)
 
@@ -154,7 +163,7 @@ Things the intent calls for that aren't here yet.
 | #     | Title                          | Done when                                                                | Effort |
 | ----- | ------------------------------ | ------------------------------------------------------------------------ | ------ |
 | ~~P4.1~~ | ~~CI integration~~          | ✅ Shipped — v0.0.45. `design-sync check` drives the consumer's own Storybook preview in headless Chromium and reuses the panel's request builder, engine, triage and budgets; verified row-for-row identical to a panel `Check all` over the reference consumer. Four exit codes (`0` clean / `1` drift / `2` coverage incomplete / `3` could not run), `--json` + `--out`, `--story`/`--component`/`--both-modes`. PR-comment-shaped **markdown** is still panel-only (`Export markdown`); the CLI emits JSON. | 1.5d |
-| P4.2  | Edit audit log                 | `.design-sync/audit.json` persists every Apply. `design-sync undo --last` works. | 1d |
+| P4.2 ⏸ | Edit audit log *(write path — parked)* | `.design-sync/audit.json` persists every Apply. `design-sync undo --last` works. | 1d |
 | P4.3  | Multi-file CSS / glob targets  | PostCSS engine handles multiple parse units; `codeTargets` accepts globs. | 1d     |
 | P4.4  | Coverage matrix view           | Panel tab showing all registered stories × last drift status.            | 1d     |
 
@@ -167,10 +176,10 @@ CSS-in-JS runtime themes.
 
 | #     | Title                              | Done when                                                            | Effort |
 | ----- | ---------------------------------- | -------------------------------------------------------------------- | ------ |
-| P5.1  | Tailwind engine                    | Drift Apply works on a Tailwind-class project, no `.css` files needed. | 2–3d  |
-| P5.2  | CSS-in-JS engine                   | JS AST rewrites styled-components / emotion / vanilla-extract calls. | 3–4d   |
-| ~~P5.3~~ | ~~Documented setup for new projects~~ | ✅ Shipped — v0.0.46, and as a command rather than a walkthrough. `design-sync init` detects the project (Storybook version, Tailwind generation, the `@theme` file, the component directory, the project's own story globs), registers both addons by **merging** into `main.*`, writes a config with `apply: "off"`, gitignores the cache, and copies the six workflow skills where absent. It refuses to invent a `fileKey`, to overwrite anything the user wrote, to generate the inspector's manifest, or to make the token-alignment and `copy` judgements — and it always ends with the steps that remain, numbered and in order, because a partial init reported as success is the failure mode. | 1d |
-| P5.4  | Tokens.json roundtrip              | Watch local tokens file → push value changes back to Figma variables. | 2d    |
+| P5.1 ⏸ | Tailwind engine *(write path — parked)* | Drift Apply works on a Tailwind-class project, no `.css` files needed. | 2–3d  |
+| P5.2 ⏸ | CSS-in-JS engine *(write path — parked)* | JS AST rewrites styled-components / emotion / vanilla-extract calls. | 3–4d   |
+| ~~P5.3~~ | ~~Documented setup for new projects~~ | ✅ Shipped — v0.0.46, and as a command rather than a walkthrough. `design-sync init` detects the project (Storybook version, Tailwind generation, the `@theme` file, the component directory, the project's own story globs), registers both addons by **merging** into `main.*`, writes a config with `apply: "off"`, gitignores the cache, and copies the workflow skills where absent (nine of them as of v0.0.64). It refuses to invent a `fileKey`, to overwrite anything the user wrote, to generate the inspector's manifest, or to make the token-alignment and `copy` judgements — and it always ends with the steps that remain, numbered and in order, because a partial init reported as success is the failure mode. | 1d |
+| P5.4 ⏸ | Tokens.json roundtrip *(write path — parked)* | Watch local tokens file → push value changes back to Figma variables. | 2d    |
 
 ## Totals
 

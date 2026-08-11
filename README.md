@@ -1,24 +1,12 @@
 # @metalab/storybook-design-sync
 
-> **Part of the design-sync system** —
-> [`addon`](https://github.com/mylesmetalab/storybook-design-sync) ·
-> [`pipeline`](https://github.com/mylesmetalab/design-sync-pipeline) ·
-> [`figma-plugin`](https://github.com/mylesmetalab/design-sync-figma-plugin) ·
-> [architecture](https://github.com/mylesmetalab/design-sync-pipeline/blob/main/ARCHITECTURE.md)
-
 A Storybook 10 addon that detects drift between a story and its Figma
-counterpart and surfaces it as a per-dimension diff table. v1 is
-**audit-only by default**: the panel reports drift and hands you a
-ready-to-paste fix prompt per row; one-click writes (in either
-direction) are opt-in via `apply: "experimental"`.
+counterpart and surfaces it as a per-dimension diff table. It is
+**audit-only**: the panel reports drift and hands you a ready-to-paste fix
+prompt per row — fixes are applied by people or agents as reviewable diffs.
 
 The addon is the *surface*. Drift detection runs through an engine adapter
-(today: `figma-rest`). When writes are enabled, code-scope edits are applied
-in-process by the addon's Node server (PostCSS / TSX engines, no extra
-binary needed); Figma-scope edits go through the
-[`design-sync-pipeline`](https://github.com/mylesmetalab/design-sync-pipeline)
-server ([Figma plugin](https://github.com/mylesmetalab/design-sync-figma-plugin)
-for binding writes, REST for variable values).
+(today: `figma-rest`).
 
 ## What it does
 
@@ -121,19 +109,10 @@ for binding writes, REST for variable values).
   detaches a property from its variable and types a literal, the row says so
   and its prompt routes the work to Figma — it never tells you to hardcode
   the literal or to retune a theme token to match it.
-- **Apply controls are gated** by the `apply` config field:
-  - `"off"` (default) — audit-only. Full drift detail and advisories,
-    no write buttons anywhere.
-  - `"experimental"` — enables the write surface (labeled as such):
-    - `Update code` / `Update Figma` for token-binding drift.
-    - `Use token` on value drift (rewrites the literal in CSS to `var(--token)`).
-    - Success shows `↶ undo` for one-click revert.
-    - **Stale check.** Figma writes refuse if the binding has moved since
-      the drift snapshot — re-run Check drift, try again.
-    - **Auto-recheck after Apply.** A successful write triggers a fresh
-      drift check so subsequent clicks operate on current data.
-    - **Preview all (dry-run)** / **Apply for real** bulk actions on the
-      Check-all summary.
+- **Apply controls are gated** by the `apply` config field. `"off"` (the
+  default) is the product: full drift detail and advisories, no write buttons
+  anywhere. The only other value enables a parked internal write experiment
+  that is not part of the supported product — leave it off.
 - **Both modes** checkbox runs dual-mode comparison: the story is snapshotted
   once per mode and each snapshot is compared against that mode's Figma value.
   Rows where light and dark agree are still fixable. The theme switch is
@@ -141,9 +120,8 @@ for binding writes, REST for variable values).
   comparison was **not performed** instead of comparing one mode twice. See
   [`modeSwitch`](#per-story-configuration).
 - Listens for `storybook-design-inspector` `STYLE_UPDATE` events and
-  surfaces them in the **Staged edits** panel. The section is part of the
-  write surface, so it only renders with `apply: "experimental"` — in
-  `apply: "off"` it is hidden entirely.
+  surfaces them in the **Staged edits** panel — part of the parked write
+  surface, hidden entirely under `apply: "off"`.
 
 ## Install
 
@@ -1757,7 +1735,7 @@ per `HOSTED-CHECK-TASKS.md`.
 - Not coupled to a specific consumer stack. The diff is dimension-shaped,
   not framework-shaped.
 - Not the inspector. A sibling addon does live token inspection. This addon
-  detects and (optionally, behind `apply: "experimental"`) syncs.
+  detects.
 
 ## Roadmap
 

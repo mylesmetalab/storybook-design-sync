@@ -148,7 +148,7 @@ for binding writes, REST for variable values).
 ## Install
 
 ```sh
-npm i -D "github:mylesmetalab/storybook-design-sync#v0.0.49"
+npm i -D "github:mylesmetalab/storybook-design-sync#v0.0.67"
 npx design-sync init
 ```
 

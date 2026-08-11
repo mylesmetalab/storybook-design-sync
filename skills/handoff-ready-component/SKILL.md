@@ -1,14 +1,14 @@
 ---
 name: handoff-ready-component
 description: Lint a Figma component before handoff to code — library tokens only, variant naming conventions, no detached values — and establish the facts about the design file the code side will depend on (modes, literals, text styles, shared values, what can't be compared later). Use before running component-handoff, or when asked "is this component ready to hand off?"
-revised: 2026-08-06
+revised: 2026-08-11
 ---
 
 # handoff-ready-component
 
 > **FIRST DRAFT** — conventions below are working defaults; the design lead owns them and should adjust. Sections marked ⚙ DRAFT are the ones to review.
 
-Two jobs, both report-only — never "fix" the component yourself:
+Two jobs, report-only — never "fix" the component yourself (one narrow, consent-gated exception: F6's codeSyntax offer, below):
 
 1. **Lint** the component against the handoff bar (below).
 2. **Establish the facts about the design file** that the code side will then depend on. `component-handoff` consumes these and accounts for them in the first build; discovered later they arrive as drift, or as invented values.
@@ -45,6 +45,20 @@ From F2's walk. An uncompared property reads as a pass, so name these up front, 
 - **`fills[0].type` is not `SOLID`** (IMAGE, GRADIENT_*). The fill dimension reads `fills[0]` only and resolves a colour only, so the property is silently uncompared. Reference: Card's `Asset Type=Image` variant.
 - **An invisible `fills[0]`** (`visible: false`) in front of the paint that matters. Visibility is not checked, so the comparison runs against a colour nothing renders.
 - **`State=Hover`/`Focus` variants**, whether they exist or not. Registry bindings aren't state-keyed, so a Hover node cannot be bound and its tokens are never compared. Present it as design intent the code must implement unchecked, not as covered.
+
+**F6 · codeSyntax coverage on every variable the component binds — the fact that decides matching quality.**
+From F1's `variables/local` response (already in hand): for each variable F2 found bound in this component, read `codeSyntax.WEB`. Three buckets, each with a stated consequence:
+- **Names a property the consumer's CSS declares** (check the repo's `@theme`/token block) → token matching for this component is **authoritative** — the drift tool treats the link as fact.
+- **Names a property the consumer does NOT declare** (e.g. a design system naming its own `--sds-*`) → report as the design system's vocabulary, not an error — matching stays **inference**, labelled as such in every report.
+- **Absent** → matching is **inference by name similarity**. Not a failure — a quality fact the team should know before trusting their first drift report.
+
+**The one fix this skill may offer (consent-gated, metadata-only).** When a variable lacks codeSyntax and ALL of the following hold, offer — never assume — to set it:
+1. The variable is **local to this file** (`remote: false`). A subscribed library's variables cannot be edited from the consumer file at all; that gap belongs to the library's owner.
+2. The file is **this project's own token source with a single consumer**. `codeSyntax.WEB` is one slot — on a shared design system serving many codebases it rightly names the system's own CSS, and overwriting it for one consumer breaks the others. When in doubt, don't offer; recommend `tokenAliases` in `design-sync.config.json` instead, which is consumer-side and collides with nobody.
+3. A **Figma Plugin API write path exists in this session** (a `use_figma`-style tool). REST variable writes are not an option here: they need a write-scoped token, and designers' PATs are read-only by this suite's own rule.
+4. The human says **yes, this handoff** — approval is per-session, never standing.
+
+The write is `setVariableCodeSyntax('WEB', 'var(--<the consumer property this handoff will bind>')` — metadata only: it changes no values, no bindings, no rendering, and Figma's version history covers it. After writing, **re-read `variables/local` to verify it landed**, and cite the write (tool, variables touched, date) in the Design-source facts block so the contract records that matching was made authoritative at handoff rather than found that way.
 
 ## Non-negotiable checks
 
@@ -96,7 +110,7 @@ From F2's walk. An uncompared property reads as a pass, so name these up front, 
 ## Output format
 
 1. A pass/fail table per check (check · pass/fail · offending nodes · fix).
-2. **A `Design-source facts` block, F1–F5, each line citing its read** (tool call + node/collection + date). `component-handoff` copies this verbatim into `contracts/<component>.spec.json` under `designSource`, so write it to be copied: fact, node/collection, citation. Emit it even on NOT READY — the facts are true regardless of the verdict.
+2. **A `Design-source facts` block, F1–F6, each line citing its read** (tool call + node/collection + date). `component-handoff` copies this verbatim into `contracts/<component>.spec.json` under `designSource`, so write it to be copied: fact, node/collection, citation. Emit it even on NOT READY — the facts are true regardless of the verdict. If F6's offer was taken, the write is one of the cited reads.
 3. A single verdict: **READY FOR HANDOFF** or **NOT READY** with the shortest path to ready.
 
 Do not soften failures. If a check could not be performed, say **NOT VERIFIED** for that row — never silently pass it. **F1 NOT VERIFIED blocks handoff**: without the mode enumeration the code side has no basis for its theme work, which is the exact hole the 24 invented values went through.

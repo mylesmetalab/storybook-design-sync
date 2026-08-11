@@ -897,7 +897,36 @@ from v0.0.59 on; contracts written before that get 4 of 9 refused.
 Only **modes** are gated. Variable counts move whenever a designer adds a variable —
 ordinary work, not a broken claim — so they are reported as context, never as a verdict.
 
-`literals`, `sharedValues` and `uncheckable` are still parsed and reported unimplemented.
+**`designSource.sharedValues` and `designSource.literals` are gated as of v0.0.66**,
+built against the first real contract to carry the block (Dialog, 2026-08-10).
+
+- **sharedValues** — "these variables resolve to the same value". Values are
+  resolved **through alias chains** (a two-mode semantic variable aliasing a
+  one-mode primitives collection resolves per Figma's own default-mode fallback)
+  and compared **current-vs-current, mode by mode** — the recorded value only
+  dates the claim. Divergence in any mode is **falsified**, naming the mode and
+  both values: that is the invisible-border incident, caught the day it happens
+  instead of the day a later design change exposes it. A variable name that no
+  longer exists is falsified; an ambiguous name (two variables sharing one name)
+  or a cross-collection pair is refused rather than guessed; an alias chain that
+  cannot be resolved blocks as *could not be read*.
+- **literals** — "this value is typed in, not bound". Only the **binding** is
+  gated: the property acquiring a variable binding is **falsified** (the premise
+  the code was built on flipped — a token mapping may now exist), while a value
+  that moved but stayed unbound is reported inside a verified claim as design
+  work drift checking already sees.
+- **uncheckable** stays unbuilt — deliberately. Both real entries put prose in
+  `nodeId` (*"68:16009 / 68:16113 (Star / X icon instances, wherever used…)"*),
+  which names no single node to re-read, and inventing a parse would re-check the
+  wrong node confidently. Prose entries get the exact path to becoming checkable
+  (one clean node id per entry); clean ids are reported as *asserted, not
+  verified*. `textStyles` is likewise recorded-but-ungated, and the run says so
+  as a gap rather than staying silent.
+
+One correctness rule the same release added: **only grammar-clean node ids are
+sent to the nodes endpoint.** A prose id in a batched `/nodes?ids=…` request can
+reject the whole batch, which would have cost every *other* id in the chunk its
+verdict — one badly-worded contract entry must never break clean claims.
 
 **What is checkable today.** The claims that get real verdicts are the ones naming
 a Figma fact: `variantNodeIds` / `childNodeIds` (does the node still resolve?), and

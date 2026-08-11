@@ -22,19 +22,19 @@
  * and a run full of them is not a clean run. Same discipline as `check`'s exit
  * codes, where incomplete coverage outranks a found problem.
  *
- * ## What is actually checkable today, which is less than the issue assumed
+ * ## What is actually checkable, and when that changed
  *
  * Issue #92 leads with `designSource.collections`, `literals`, `sharedValues`,
- * `textStyles` and `uncheckable`. **Neither contract in existence carries a
- * `designSource` block at all** — both were written before it was added on
- * 2026-07-31. Verifying those keys against the real contracts would report
- * `unverifiable` for every one: true, and useless.
+ * `textStyles` and `uncheckable`. When this module was written, **no contract in
+ * existence carried a `designSource` block** — both predated its addition on
+ * 2026-07-31 — so those keys were parsed but their checkers were deliberately
+ * not built: there was no real input to build them against. The Dialog contract
+ * (merged 2026-08-10) is the first real `designSource` block, and the checkers
+ * for `sharedValues` and `literals` were built against its actual shape.
  *
- * So this reads whatever the contract actually carries, and says plainly when a
- * contract predates `designSource` rather than reporting its absence as a
- * failure. The keys both real contracts do carry — `notInFigma`,
- * `variantNodeIds`, `tokenBindings` — include the highest-value check in the
- * issue's own list.
+ * This still reads whatever the contract actually carries, and says plainly when
+ * a contract predates `designSource` rather than reporting its absence as a
+ * failure.
  *
  * Pure: it turns JSON into claims and nothing else. The Figma reads live in
  * `contract-verify.ts`.
@@ -74,6 +74,20 @@ export interface ContractClaim {
   nodeId?: string;
   /** Figma variable / token name this claim is about, when it names one. */
   token?: string;
+  /**
+   * For a `shared-value` claim: the variable names asserted to share a value, as
+   * data. Same reason `expectedModes` exists — a checker must never parse the
+   * claim's own prose back out of `statement`.
+   */
+  variables?: readonly string[];
+  /** For a `literal`/`uncheckable` claim: the Figma property it is about. */
+  property?: string;
+  /**
+   * The value the contract recorded at handoff, normalized to a string. Context
+   * for evidence, never the thing gated — current-vs-current is what gets
+   * compared; recorded values only date the claim.
+   */
+  recordedValue?: string;
   /** The reason the contract gave, when it gave one. Quoted back, never judged. */
   reason?: string;
   /**
@@ -225,13 +239,18 @@ function designSourceClaims(raw: unknown, out: ContractClaim[], gaps: string[]):
   for (const [i, entry] of (Array.isArray(ds["sharedValues"]) ? ds["sharedValues"] : []).entries()) {
     const sv = asRecord(entry);
     const value = sv ? str(sv["value"]) : undefined;
-    const vars = sv && Array.isArray(sv["variables"]) ? sv["variables"].filter((v) => str(v)) : [];
+    const vars =
+      sv && Array.isArray(sv["variables"])
+        ? sv["variables"].map((v) => str(v)).filter((v): v is string => v !== undefined)
+        : [];
     if (!sv || value === undefined || vars.length < 2) continue;
     out.push(
       withRead({
         kind: "shared-value",
         path: `designSource.sharedValues[${i}]`,
         statement: `${vars.join(" and ")} all resolve to ${value}`,
+        variables: vars,
+        recordedValue: value,
       }),
     );
   }
@@ -246,9 +265,15 @@ function designSourceClaims(raw: unknown, out: ContractClaim[], gaps: string[]):
       path: `designSource.literals[${i}]`,
       statement: `${property} on node ${nodeId} is a raw literal, not bound to a variable`,
       nodeId,
+      property,
     });
-    const value = str(lit["value"]);
-    if (value !== undefined) claim.reason = `recorded value ${value}`;
+    // The Dialog's real literal records `"value": 24` — a NUMBER. A string-only
+    // read dropped the one recorded value in existence, silently.
+    const recorded = str(lit["value"]) ?? (typeof lit["value"] === "number" ? String(lit["value"]) : undefined);
+    if (recorded !== undefined) {
+      claim.recordedValue = recorded;
+      claim.reason = `recorded value ${recorded}`;
+    }
     out.push(claim);
   }
 
@@ -262,10 +287,20 @@ function designSourceClaims(raw: unknown, out: ContractClaim[], gaps: string[]):
       path: `designSource.uncheckable[${i}]`,
       statement: `${property} on node ${nodeId} cannot be read by this tool`,
       nodeId,
+      property,
     });
     const reason = str(un["reason"]);
     if (reason !== undefined) claim.reason = reason;
     out.push(claim);
+  }
+
+  // Recorded but claimless: say so. A section that silently yields nothing is
+  // indistinguishable from a section that was never read.
+  if (asRecord(ds["textStyles"]) && Object.keys(asRecord(ds["textStyles"])!).length > 0) {
+    gaps.push(
+      "`designSource.textStyles` is recorded but produces no claims — re-checking text " +
+        "styles is not built, so those facts are not re-verified by this run.",
+    );
   }
 }
 

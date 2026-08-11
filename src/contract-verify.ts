@@ -38,6 +38,22 @@
  */
 
 import type { ContractClaim } from "./contract-claims.js";
+import type { ResolvedVariable } from "./variable-resolution.js";
+
+/**
+ * The grammar of a real Figma node id: `1:2`, or an instance path like
+ * `I192:31517;227:16985;34:12257`. Everything else is prose.
+ *
+ * This is a guard, not a parser: a prose id ("68:16009 / 68:16113 (Star / X icon
+ * instances)") must never be sent to the nodes endpoint — one rejected batch
+ * drops every OTHER id in the chunk into "unread", so one badly-worded contract
+ * entry would cost clean claims their verdicts.
+ */
+const NODE_ID_RE = /^[IT]?\d+:\d+(?:;\d+:\d+)*$/;
+
+export function isCleanNodeId(id: string): boolean {
+  return NODE_ID_RE.test(id);
+}
 
 /** The freshly-read design facts a verdict is computed against. */
 export interface DesignSourceSnapshot {
@@ -66,6 +82,20 @@ export interface DesignSourceSnapshot {
    * keyed on name alone would silently compare the wrong collection.
    */
   collections?: ReadonlyArray<{ id: string; name: string; modes: readonly string[] }>;
+  /**
+   * Every variable in the file with its per-mode RESOLVED values (aliases
+   * followed). Absent when `/variables/local` could not be read — which makes
+   * shared-value claims `read-failed`, never verified.
+   */
+  variables?: ReadonlyArray<ResolvedVariable>;
+  /**
+   * Per node named by a `literal` claim: which properties are bound to variables
+   * on this read, and the current value of the claimed property. A node absent
+   * here was not read — `read-failed`, never verified.
+   */
+  literalNodes?: Readonly<
+    Record<string, { boundProperties: readonly string[]; values: Readonly<Record<string, unknown>> }>
+  >;
 }
 
 export type Verdict = "verified" | "falsified" | "unverifiable";
@@ -386,6 +416,212 @@ function verifyCollection(claim: ContractClaim, snap: DesignSourceSnapshot): Cla
   };
 }
 
+/**
+ * `designSource.sharedValues` — "these variables resolve to the same value".
+ *
+ * The claim exists because of a real incident: two variables sharing a hex were
+ * collapsed onto one theme token, and when design later changed one, the other
+ * followed — an invisible border, silent until a later change exposed it. The
+ * moment that matters is the values DIVERGING, so that is what gets gated:
+ * current-vs-current, mode by mode. The recorded value only dates the claim.
+ */
+function verifySharedValue(claim: ContractClaim, snap: DesignSourceSnapshot): ClaimResult {
+  const names = claim.variables;
+  if (!names || names.length < 2) {
+    return {
+      claim,
+      verdict: "unverifiable",
+      reason: "not-expressible",
+      evidence:
+        "the claim carries fewer than two variable names as data, so there is nothing to " +
+        "compare. Re-run `handoff-ready-component` to record them.",
+    };
+  }
+  if (!snap.variables) {
+    return {
+      claim,
+      verdict: "unverifiable",
+      reason: "read-failed",
+      evidence:
+        "the file's variables could not be read this time, so this claim was not re-checked. " +
+        "A failed read is not evidence that the values still agree.",
+    };
+  }
+
+  const matched: ResolvedVariable[] = [];
+  const missing: string[] = [];
+  for (const name of names) {
+    const candidates = snap.variables.filter((v) => v.name === name);
+    if (candidates.length === 0) {
+      missing.push(name);
+    } else if (candidates.length > 1) {
+      return {
+        claim,
+        verdict: "unverifiable",
+        reason: "not-expressible",
+        evidence:
+          `"${name}" is ambiguous — ${candidates.length} variables share that name ` +
+          `(${candidates.map((c) => `${c.collectionName} ${c.collectionId}`).join(" · ")}), so this ` +
+          `claim cannot be matched without a collection recorded in the contract.`,
+      };
+    } else {
+      matched.push(candidates[0]!);
+    }
+  }
+  if (missing.length > 0) {
+    return {
+      claim,
+      verdict: "falsified",
+      evidence:
+        `${missing.map((n) => `"${n}"`).join(" and ")} no longer exist${missing.length === 1 ? "s" : ""} ` +
+        `in the file (renames cannot be traced). The shared-value assertion as recorded no longer ` +
+        `holds; re-run \`handoff-ready-component\` to re-establish it.`,
+    };
+  }
+
+  const collectionIds = new Set(matched.map((v) => v.collectionId));
+  if (collectionIds.size > 1) {
+    return {
+      claim,
+      verdict: "unverifiable",
+      reason: "not-expressible",
+      evidence:
+        `the named variables live in different collections ` +
+        `(${matched.map((v) => `${v.name} in ${v.collectionName}`).join(" · ")}), whose modes do not ` +
+        `line up, so a per-mode comparison is undefined. Record variables from one collection per entry.`,
+    };
+  }
+
+  // The mode universe is the UNION across the matched variables — a mode one of
+  // them failed to resolve must fail the comparison, not silently shrink it.
+  const modes = [
+    ...new Set(matched.flatMap((v) => [...Object.keys(v.resolvedByMode), ...v.unresolved])),
+  ];
+  for (const variable of matched) {
+    const failed = modes.filter((m) => variable.resolvedByMode[m] === undefined);
+    if (failed.length > 0) {
+      return {
+        claim,
+        verdict: "unverifiable",
+        reason: "read-failed",
+        evidence:
+          `"${variable.name}" could not be resolved in mode(s) ` +
+          `${failed.map((m) => `"${m}"`).join(", ")} (broken alias chain?), ` +
+          `so the comparison was not made. This is not a pass.`,
+      };
+    }
+  }
+
+  for (const mode of modes) {
+    const values = matched.map((v) => v.resolvedByMode[mode]!);
+    if (new Set(values).size > 1) {
+      return {
+        claim,
+        verdict: "falsified",
+        evidence:
+          `in mode "${mode}": ${matched.map((v) => `${v.name} = ${v.resolvedByMode[mode]}`).join(", ")} — ` +
+          `they no longer share a value. Anything in the theme that mapped them to one token is now ` +
+          `coupling two values the design has separated.`,
+      };
+    }
+  }
+
+  return {
+    claim,
+    verdict: "verified",
+    evidence:
+      `still shared in every mode: ` +
+      `${modes.map((m) => `"${m}" = ${matched[0]!.resolvedByMode[m]}`).join(", ")} across ` +
+      `${matched.map((v) => v.name).join(" and ")}.`,
+  };
+}
+
+/**
+ * `designSource.literals` — "this value is typed in, not bound to a variable".
+ *
+ * The premise the code was built on: an unbound value has no token to map, so
+ * drift can compare the number but never attribute it. Only the BINDING is gated
+ * — a changed value that stayed unbound is design work drift checking already
+ * sees, not a broken claim.
+ */
+function verifyLiteral(claim: ContractClaim, snap: DesignSourceSnapshot): ClaimResult {
+  const property = claim.property;
+  if (property === undefined || claim.nodeId === undefined) {
+    return {
+      claim,
+      verdict: "unverifiable",
+      reason: "not-expressible",
+      evidence: "the claim names no node/property pair, so there is nothing to re-read.",
+    };
+  }
+  const node = snap.literalNodes?.[claim.nodeId];
+  if (!node) {
+    return {
+      claim,
+      verdict: "unverifiable",
+      reason: "read-failed",
+      evidence: `node ${claim.nodeId} was not read on this pass, so its bindings are unconfirmed.`,
+    };
+  }
+  if (node.boundProperties.includes(property)) {
+    return {
+      claim,
+      verdict: "falsified",
+      evidence:
+        `${property} on node ${claim.nodeId} is now BOUND to a variable — the premise "raw ` +
+        `literal" no longer holds, and a token mapping may now exist for it. Re-run ` +
+        `\`handoff-ready-component\` and let the binding into the comparison.`,
+    };
+  }
+  const current = node.values[property];
+  const currentText = current === undefined ? undefined : String(current);
+  const recorded = claim.recordedValue;
+  let detail = "";
+  if (currentText !== undefined && recorded !== undefined && currentText !== recorded) {
+    detail =
+      `; the value moved ${recorded} → ${currentText} but remains unbound — a design value ` +
+      `change, which drift checking sees, not a binding change`;
+  } else if (currentText !== undefined) {
+    detail = `; current value ${currentText}${recorded !== undefined ? ` (recorded ${recorded})` : ""}`;
+  }
+  return {
+    claim,
+    verdict: "verified",
+    evidence: `${property} on node ${claim.nodeId} is still a raw literal${detail}.`,
+  };
+}
+
+/**
+ * `designSource.uncheckable` — "the tool cannot read this property here".
+ *
+ * Both real entries put PROSE in `nodeId` ("68:16009 / 68:16113 (Star / X icon
+ * instances, wherever used…)"), which names no single node to re-read, and
+ * inventing a parse would re-check the wrong node confidently. So prose gets a
+ * precise path to becoming checkable, and a clean id is reported as asserted —
+ * the re-check itself stays unbuilt until a contract exists to build it against,
+ * the same rule the rest of `designSource` followed.
+ */
+function verifyUncheckable(claim: ContractClaim): ClaimResult {
+  if (claim.nodeId === undefined || !isCleanNodeId(claim.nodeId)) {
+    return {
+      claim,
+      verdict: "unverifiable",
+      reason: "not-expressible",
+      evidence:
+        `the entry's nodeId is prose (${claim.nodeId ? `"${truncate(claim.nodeId)}"` : "absent"}), ` +
+        `not a node id, so nothing can be re-read. Record one clean node id per entry — one entry ` +
+        `per node — to make this claim checkable.`,
+    };
+  }
+  return {
+    claim,
+    verdict: "unverifiable",
+    reason: "not-expressible",
+    evidence:
+      "re-checking tool-limitation claims is not built; the claim is reported as asserted, not verified.",
+  };
+}
+
 function verifyNotImplemented(claim: ContractClaim): ClaimResult {
   return {
     claim,
@@ -410,6 +646,12 @@ export function verifyClaims(
         return verifyAbsence(claim, snap);
       case "node":
         return verifyNode(claim, snap);
+      case "shared-value":
+        return verifySharedValue(claim, snap);
+      case "literal":
+        return verifyLiteral(claim, snap);
+      case "uncheckable":
+        return verifyUncheckable(claim);
       default:
         return verifyNotImplemented(claim);
     }
